@@ -30,6 +30,12 @@ describe('PostgreSQL migrations', () => {
     expect(begin).toBeGreaterThan(lock);
     expect(commit).toBeGreaterThan(begin);
     expect(unlock).toBeGreaterThan(commit);
+    expect(statements.some((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_admin_accounts')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_admin_approvals')
+    ))).toBe(true);
   });
 
   it('rolls back a failed migration and always releases the lock', async () => {

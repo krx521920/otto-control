@@ -1,5 +1,12 @@
 import type { OttoLicenseCapability } from '../contracts/license.js';
 import type {
+  AdminAccountRecord,
+  AdminApprovalRecord,
+  AdminPrincipal,
+  AdminRoleRecord,
+  AdminSessionRecord,
+} from '../contracts/admin-identity.js';
+import type {
   DeploymentTelemetrySummary,
   OttoTelemetryEvent,
   OttoTelemetryReceipt,
@@ -156,6 +163,86 @@ export interface ControlStore {
     reason: string;
     changedAt: Date;
   }): Promise<SigningKeyTransition | null>;
+  countAdminAccounts(): Promise<number>;
+  createAdminAccount(input: {
+    id: string;
+    username: string;
+    displayName: string;
+    passwordHash: string;
+    mfaSecretCiphertext: string;
+    enrollmentTokenHash: string;
+    enrollmentExpiresAt: Date;
+    roleIds: string[];
+  }): Promise<AdminAccountRecord>;
+  getAdminAccountById(id: string): Promise<AdminAccountRecord | null>;
+  getAdminAccountByUsername(username: string): Promise<AdminAccountRecord | null>;
+  listAdminAccounts(): Promise<Array<AdminAccountRecord & { roles: string[] }>>;
+  listAdminRoles(): Promise<AdminRoleRecord[]>;
+  replaceAdminAccountRoles(accountId: string, roleIds: string[]): Promise<string[] | null>;
+  setAdminAccountStatus(
+    accountId: string,
+    status: AdminAccountRecord['status'],
+    changedAt: Date,
+  ): Promise<AdminAccountRecord | null>;
+  confirmAdminEnrollment(input: {
+    accountId: string;
+    enrollmentTokenHash: string;
+    recoveryCodeHashes: string[];
+    confirmedAt: Date;
+  }): Promise<AdminAccountRecord | null>;
+  recordAdminLoginFailure(input: {
+    accountId: string;
+    failedLoginCount: number;
+    lockedUntil: Date | null;
+    changedAt: Date;
+  }): Promise<void>;
+  clearAdminLoginFailures(accountId: string, changedAt: Date): Promise<void>;
+  consumeAdminRecoveryCode(accountId: string, codeHash: string, usedAt: Date): Promise<boolean>;
+  createAdminSession(input: {
+    id: string;
+    accountId: string;
+    tokenHash: string;
+    expiresAt: Date;
+    mfaVerifiedAt: Date;
+    createdAt: Date;
+  }): Promise<AdminSessionRecord>;
+  getAdminPrincipalBySessionTokenHash(input: {
+    tokenHash: string;
+    now: Date;
+    idleCutoff: Date;
+  }): Promise<AdminPrincipal | null>;
+  touchAdminSession(sessionId: string, seenAt: Date): Promise<void>;
+  revokeAdminSession(sessionId: string, revokedAt: Date): Promise<void>;
+  revokeAdminAccountSessions(accountId: string, revokedAt: Date): Promise<void>;
+  createAdminApproval(input: {
+    id: string;
+    requesterAccountId: string;
+    operation: string;
+    targetType: string;
+    targetId: string;
+    requestHash: string;
+    requiredApprovals: number;
+    expiresAt: Date;
+    createdAt: Date;
+  }): Promise<AdminApprovalRecord>;
+  getAdminApproval(id: string): Promise<AdminApprovalRecord | null>;
+  listAdminApprovals(limit: number): Promise<AdminApprovalRecord[]>;
+  decideAdminApproval(input: {
+    approvalId: string;
+    accountId: string;
+    decision: 'approve' | 'reject';
+    reason: string | null;
+    decidedAt: Date;
+  }): Promise<AdminApprovalRecord | null>;
+  consumeAdminApproval(input: {
+    approvalId: string;
+    requesterAccountId: string;
+    operation: string;
+    targetType: string;
+    targetId: string;
+    requestHash: string;
+    executedAt: Date;
+  }): Promise<AdminApprovalRecord | null>;
   consumeLeaseNonce(input: {
     deploymentId: string;
     nonce: string;

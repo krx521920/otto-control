@@ -19,6 +19,28 @@ import type {
   OttoTelemetryEvent,
   OttoTelemetryReceipt,
 } from '../../src/contracts/telemetry.js';
+import type {
+  AdminAccountRecord,
+  AdminApprovalRecord,
+  AdminPermission,
+  AdminPrincipal,
+  AdminRoleRecord,
+  AdminSessionRecord,
+} from '../../src/contracts/admin-identity.js';
+
+const role = (
+  id: string,
+  name: string,
+  permissions: AdminPermission[],
+): AdminRoleRecord => ({ id, name, permissions, system: true });
+
+const ALL_PERMISSIONS: AdminPermission[] = [
+  'customer.create', 'deployment.create', 'license.issue', 'license.read',
+  'license.revoke', 'signing_key.read', 'signing_key.manage', 'telemetry.read',
+  'update_distribution.manage', 'update_release.create', 'update_release.read',
+  'update_release.publish', 'identity.read', 'identity.manage', 'approval.request',
+  'approval.read', 'approval.decide',
+];
 
 interface StoredTelemetryEvent extends OttoTelemetryEvent {
   deploymentId: string;
@@ -39,6 +61,32 @@ export class MemoryControlStore implements ControlStore {
   readonly updateReleases = new Map<string, UpdateReleaseRecord>();
   readonly updateAssignments = new Map<string, DeploymentUpdateAssignmentRecord>();
   readonly updatePolicyNonces = new Set<string>();
+  readonly adminAccounts = new Map<string, AdminAccountRecord>();
+  readonly adminAccountRoles = new Map<string, string[]>();
+  readonly adminEnrollments = new Map<string, { tokenHash: string; expiresAt: Date }>();
+  readonly adminRecoveryCodes = new Map<string, Set<string>>();
+  readonly adminSessions = new Map<string, AdminSessionRecord>();
+  readonly adminApprovals = new Map<string, AdminApprovalRecord>();
+  readonly adminApprovalDecisions = new Map<string, Map<string, 'approve' | 'reject'>>();
+  readonly adminRoles = new Map<string, AdminRoleRecord>([
+    ['super_admin', role('super_admin', 'Super administrator', ALL_PERMISSIONS)],
+    ['security_admin', role('security_admin', 'Security administrator', [
+      'signing_key.read', 'signing_key.manage', 'identity.read', 'identity.manage',
+      'approval.request', 'approval.read', 'approval.decide',
+    ])],
+    ['license_admin', role('license_admin', 'License administrator', [
+      'customer.create', 'deployment.create', 'license.issue', 'license.read',
+      'license.revoke', 'telemetry.read', 'approval.request', 'approval.read',
+    ])],
+    ['release_admin', role('release_admin', 'Release administrator', [
+      'update_distribution.manage', 'update_release.create', 'update_release.read',
+      'update_release.publish', 'approval.request', 'approval.read',
+    ])],
+    ['auditor', role('auditor', 'Auditor', [
+      'license.read', 'signing_key.read', 'telemetry.read', 'update_release.read',
+      'identity.read', 'approval.read',
+    ])],
+  ]);
 
   async ping(): Promise<void> {}
   async close(): Promise<void> {}
@@ -236,6 +284,302 @@ export class MemoryControlStore implements ControlStore {
       activeKey: activeKey?.keyId === revoked.keyId ? null : activeKey,
       previousActiveKey: target.state === 'active' ? target : null,
     };
+  }
+
+  async countAdminAccounts(): Promise<number> {
+    return this.adminAccounts.size;
+  }
+
+  async createAdminAccount(input: {
+    id: string;
+    username: string;
+    displayName: string;
+    passwordHash: string;
+    mfaSecretCiphertext: string;
+    enrollmentTokenHash: string;
+    enrollmentExpiresAt: Date;
+    roleIds: string[];
+  }): Promise<AdminAccountRecord> {
+    if ([...this.adminAccounts.values()].some((account) => account.username === input.username)) {
+      throw new Error('admin account already exists');
+    }
+    if (input.roleIds.some((roleId) => !this.adminRoles.has(roleId))) {
+      throw new Error('admin role does not exist');
+    }
+    const now = new Date();
+    const account: AdminAccountRecord = {
+      id: input.id,
+      username: input.username,
+      displayName: input.displayName,
+      passwordHash: input.passwordHash,
+      mfaSecretCiphertext: input.mfaSecretCiphertext,
+      status: 'pending',
+      failedLoginCount: 0,
+      lockedUntil: null,
+      mfaConfirmedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.adminAccounts.set(account.id, account);
+    this.adminAccountRoles.set(account.id, [...new Set(input.roleIds)]);
+    this.adminEnrollments.set(account.id, {
+      tokenHash: input.enrollmentTokenHash,
+      expiresAt: input.enrollmentExpiresAt,
+    });
+    return account;
+  }
+
+  async getAdminAccountById(id: string): Promise<AdminAccountRecord | null> {
+    return this.adminAccounts.get(id) ?? null;
+  }
+
+  async getAdminAccountByUsername(username: string): Promise<AdminAccountRecord | null> {
+    return [...this.adminAccounts.values()].find((account) => account.username === username) ?? null;
+  }
+
+  async listAdminAccounts(): Promise<Array<AdminAccountRecord & { roles: string[] }>> {
+    return [...this.adminAccounts.values()].map((account) => ({
+      ...account,
+      roles: [...(this.adminAccountRoles.get(account.id) ?? [])],
+    }));
+  }
+
+  async listAdminRoles(): Promise<AdminRoleRecord[]> {
+    return [...this.adminRoles.values()].map((entry) => ({
+      ...entry,
+      permissions: [...entry.permissions],
+    }));
+  }
+
+  async replaceAdminAccountRoles(accountId: string, roleIds: string[]): Promise<string[] | null> {
+    if (!this.adminAccounts.has(accountId)) return null;
+    if (roleIds.some((roleId) => !this.adminRoles.has(roleId))) {
+      throw new Error('admin role does not exist');
+    }
+    const roles = [...new Set(roleIds)];
+    this.adminAccountRoles.set(accountId, roles);
+    return roles;
+  }
+
+  async setAdminAccountStatus(
+    accountId: string,
+    status: AdminAccountRecord['status'],
+    changedAt: Date,
+  ): Promise<AdminAccountRecord | null> {
+    const account = this.adminAccounts.get(accountId);
+    if (!account) return null;
+    const updated = { ...account, status, updatedAt: changedAt };
+    this.adminAccounts.set(accountId, updated);
+    return updated;
+  }
+
+  async confirmAdminEnrollment(input: {
+    accountId: string;
+    enrollmentTokenHash: string;
+    recoveryCodeHashes: string[];
+    confirmedAt: Date;
+  }): Promise<AdminAccountRecord | null> {
+    const account = this.adminAccounts.get(input.accountId);
+    const enrollment = this.adminEnrollments.get(input.accountId);
+    if (!account || !enrollment || enrollment.tokenHash !== input.enrollmentTokenHash) return null;
+    if (enrollment.expiresAt.getTime() <= input.confirmedAt.getTime()) return null;
+    const updated: AdminAccountRecord = {
+      ...account,
+      status: 'active',
+      mfaConfirmedAt: input.confirmedAt,
+      updatedAt: input.confirmedAt,
+    };
+    this.adminAccounts.set(account.id, updated);
+    this.adminEnrollments.delete(account.id);
+    this.adminRecoveryCodes.set(account.id, new Set(input.recoveryCodeHashes));
+    return updated;
+  }
+
+  async recordAdminLoginFailure(input: {
+    accountId: string;
+    failedLoginCount: number;
+    lockedUntil: Date | null;
+    changedAt: Date;
+  }): Promise<void> {
+    const account = this.adminAccounts.get(input.accountId);
+    if (!account) return;
+    this.adminAccounts.set(account.id, {
+      ...account,
+      failedLoginCount: input.failedLoginCount,
+      lockedUntil: input.lockedUntil,
+      updatedAt: input.changedAt,
+    });
+  }
+
+  async clearAdminLoginFailures(accountId: string, changedAt: Date): Promise<void> {
+    const account = this.adminAccounts.get(accountId);
+    if (!account) return;
+    this.adminAccounts.set(account.id, {
+      ...account,
+      failedLoginCount: 0,
+      lockedUntil: null,
+      updatedAt: changedAt,
+    });
+  }
+
+  async consumeAdminRecoveryCode(
+    accountId: string,
+    codeHash: string,
+    usedAt: Date,
+  ): Promise<boolean> {
+    void usedAt;
+    const codes = this.adminRecoveryCodes.get(accountId);
+    if (!codes?.delete(codeHash)) return false;
+    return true;
+  }
+
+  async createAdminSession(input: {
+    id: string;
+    accountId: string;
+    tokenHash: string;
+    expiresAt: Date;
+    mfaVerifiedAt: Date;
+    createdAt: Date;
+  }): Promise<AdminSessionRecord> {
+    const account = this.adminAccounts.get(input.accountId);
+    if (!account) throw new Error('admin account does not exist');
+    const session: AdminSessionRecord = {
+      ...input,
+      username: account.username,
+      displayName: account.displayName,
+      lastSeenAt: input.createdAt,
+      revokedAt: null,
+    };
+    this.adminSessions.set(session.id, session);
+    return session;
+  }
+
+  async getAdminPrincipalBySessionTokenHash(input: {
+    tokenHash: string;
+    now: Date;
+    idleCutoff: Date;
+  }): Promise<AdminPrincipal | null> {
+    const session = [...this.adminSessions.values()].find((entry) => entry.tokenHash === input.tokenHash);
+    if (!session || session.revokedAt || session.expiresAt <= input.now || session.lastSeenAt < input.idleCutoff) {
+      return null;
+    }
+    const account = this.adminAccounts.get(session.accountId);
+    if (!account || account.status !== 'active') return null;
+    const roles = this.adminAccountRoles.get(account.id) ?? [];
+    const permissions = [...new Set(roles.flatMap((roleId) => (
+      this.adminRoles.get(roleId)?.permissions ?? []
+    )))];
+    return {
+      accountId: account.id,
+      sessionId: session.id,
+      username: account.username,
+      displayName: account.displayName,
+      roles: [...roles],
+      permissions,
+      mfaVerifiedAt: session.mfaVerifiedAt,
+    };
+  }
+
+  async touchAdminSession(sessionId: string, seenAt: Date): Promise<void> {
+    const session = this.adminSessions.get(sessionId);
+    if (session) this.adminSessions.set(sessionId, { ...session, lastSeenAt: seenAt });
+  }
+
+  async revokeAdminSession(sessionId: string, revokedAt: Date): Promise<void> {
+    const session = this.adminSessions.get(sessionId);
+    if (session) this.adminSessions.set(sessionId, { ...session, revokedAt });
+  }
+
+  async revokeAdminAccountSessions(accountId: string, revokedAt: Date): Promise<void> {
+    for (const [id, session] of this.adminSessions) {
+      if (session.accountId === accountId && !session.revokedAt) {
+        this.adminSessions.set(id, { ...session, revokedAt });
+      }
+    }
+  }
+
+  async createAdminApproval(input: {
+    id: string;
+    requesterAccountId: string;
+    operation: string;
+    targetType: string;
+    targetId: string;
+    requestHash: string;
+    requiredApprovals: number;
+    expiresAt: Date;
+    createdAt: Date;
+  }): Promise<AdminApprovalRecord> {
+    const approval: AdminApprovalRecord = {
+      ...input,
+      status: 'pending',
+      approvalCount: 0,
+      executedAt: null,
+      updatedAt: input.createdAt,
+    };
+    this.adminApprovals.set(approval.id, approval);
+    return approval;
+  }
+
+  async getAdminApproval(id: string): Promise<AdminApprovalRecord | null> {
+    return this.adminApprovals.get(id) ?? null;
+  }
+
+  async listAdminApprovals(limit: number): Promise<AdminApprovalRecord[]> {
+    return [...this.adminApprovals.values()]
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+      .slice(0, limit);
+  }
+
+  async decideAdminApproval(input: {
+    approvalId: string;
+    accountId: string;
+    decision: 'approve' | 'reject';
+    reason: string | null;
+    decidedAt: Date;
+  }): Promise<AdminApprovalRecord | null> {
+    const approval = this.adminApprovals.get(input.approvalId);
+    if (!approval) return null;
+    if (approval.requesterAccountId === input.accountId) throw new Error('self approval is not allowed');
+    if (approval.status !== 'pending' || approval.expiresAt <= input.decidedAt) return approval;
+    const decisions = this.adminApprovalDecisions.get(approval.id) ?? new Map();
+    if (decisions.has(input.accountId)) throw new Error('approval decision already exists');
+    decisions.set(input.accountId, input.decision);
+    this.adminApprovalDecisions.set(approval.id, decisions);
+    const approvalCount = [...decisions.values()].filter((decision) => decision === 'approve').length;
+    const status = input.decision === 'reject'
+      ? 'rejected' as const
+      : approvalCount >= approval.requiredApprovals ? 'approved' as const : 'pending' as const;
+    const updated = { ...approval, status, approvalCount, updatedAt: input.decidedAt };
+    this.adminApprovals.set(approval.id, updated);
+    return updated;
+  }
+
+  async consumeAdminApproval(input: {
+    approvalId: string;
+    requesterAccountId: string;
+    operation: string;
+    targetType: string;
+    targetId: string;
+    requestHash: string;
+    executedAt: Date;
+  }): Promise<AdminApprovalRecord | null> {
+    const approval = this.adminApprovals.get(input.approvalId);
+    if (!approval || approval.status !== 'approved' || approval.expiresAt <= input.executedAt) return null;
+    if (
+      approval.requesterAccountId !== input.requesterAccountId
+      || approval.operation !== input.operation
+      || approval.targetType !== input.targetType
+      || approval.targetId !== input.targetId
+      || approval.requestHash !== input.requestHash
+    ) return null;
+    const updated: AdminApprovalRecord = {
+      ...approval,
+      status: 'executed',
+      executedAt: input.executedAt,
+      updatedAt: input.executedAt,
+    };
+    this.adminApprovals.set(approval.id, updated);
+    return updated;
   }
 
   async consumeLeaseNonce(input: {

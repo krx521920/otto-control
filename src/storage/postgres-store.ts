@@ -2,6 +2,15 @@ import pg from 'pg';
 
 import type { OttoLicenseCapability } from '../contracts/license.js';
 import type {
+  AdminAccountRecord,
+  AdminApprovalRecord,
+  AdminApprovalStatus,
+  AdminPermission,
+  AdminPrincipal,
+  AdminRoleRecord,
+  AdminSessionRecord,
+} from '../contracts/admin-identity.js';
+import type {
   DeploymentTelemetrySummary,
   OttoTelemetryEvent,
   OttoTelemetryReceipt,
@@ -88,6 +97,50 @@ interface SigningKeyRow {
   retired_at: Date | null;
   revoked_at: Date | null;
   revocation_reason: string | null;
+  updated_at: Date;
+}
+
+interface AdminAccountRow {
+  id: string;
+  username: string;
+  display_name: string;
+  password_hash: string;
+  mfa_secret_ciphertext: string;
+  status: AdminAccountRecord['status'];
+  failed_login_count: number;
+  locked_until: Date | null;
+  mfa_confirmed_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+  roles?: string[];
+}
+
+interface AdminSessionRow {
+  id: string;
+  account_id: string;
+  username: string;
+  display_name: string;
+  token_hash: string;
+  expires_at: Date;
+  last_seen_at: Date;
+  mfa_verified_at: Date;
+  revoked_at: Date | null;
+  created_at: Date;
+}
+
+interface AdminApprovalRow {
+  id: string;
+  requester_account_id: string;
+  operation: string;
+  target_type: string;
+  target_id: string;
+  request_hash: string;
+  status: AdminApprovalStatus;
+  required_approvals: number;
+  approval_count: number | string;
+  expires_at: Date;
+  executed_at: Date | null;
+  created_at: Date;
   updated_at: Date;
 }
 
@@ -204,6 +257,60 @@ function signingKeyFromRow(row: SigningKeyRow): SigningKeyRecord {
     updatedAt: row.updated_at,
   };
 }
+
+function adminAccountFromRow(row: AdminAccountRow): AdminAccountRecord {
+  return {
+    id: row.id,
+    username: row.username,
+    displayName: row.display_name,
+    passwordHash: row.password_hash,
+    mfaSecretCiphertext: row.mfa_secret_ciphertext,
+    status: row.status,
+    failedLoginCount: row.failed_login_count,
+    lockedUntil: row.locked_until,
+    mfaConfirmedAt: row.mfa_confirmed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function adminSessionFromRow(row: AdminSessionRow): AdminSessionRecord {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    username: row.username,
+    displayName: row.display_name,
+    tokenHash: row.token_hash,
+    expiresAt: row.expires_at,
+    lastSeenAt: row.last_seen_at,
+    mfaVerifiedAt: row.mfa_verified_at,
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+  };
+}
+
+function adminApprovalFromRow(row: AdminApprovalRow): AdminApprovalRecord {
+  return {
+    id: row.id,
+    requesterAccountId: row.requester_account_id,
+    operation: row.operation,
+    targetType: row.target_type,
+    targetId: row.target_id,
+    requestHash: row.request_hash,
+    status: row.status,
+    requiredApprovals: row.required_approvals,
+    approvalCount: Number(row.approval_count),
+    expiresAt: row.expires_at,
+    executedAt: row.executed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+const ADMIN_APPROVAL_SELECT = `SELECT approvals.*,
+  COUNT(decisions.account_id) FILTER (WHERE decisions.decision = 'approve') AS approval_count
+  FROM control_admin_approvals approvals
+  LEFT JOIN control_admin_approval_decisions decisions ON decisions.approval_id = approvals.id`;
 
 function updateDistributionFromRow(row: UpdateDistributionRow): UpdateDistributionRecord {
   return {
@@ -598,6 +705,567 @@ export class PostgresControlStore implements ControlStore {
     } finally {
       client.release();
     }
+  }
+
+  async countAdminAccounts(): Promise<number> {
+    const result = await this.#pool.query<{ count: string }>(
+      'SELECT COUNT(*) AS count FROM control_admin_accounts',
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }
+
+  async createAdminAccount(input: {
+    id: string;
+    username: string;
+    displayName: string;
+    passwordHash: string;
+    mfaSecretCiphertext: string;
+    enrollmentTokenHash: string;
+    enrollmentExpiresAt: Date;
+    roleIds: string[];
+  }): Promise<AdminAccountRecord> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const roles = await client.query<{ id: string }>(
+        'SELECT id FROM control_admin_roles WHERE id = ANY($1::text[])',
+        [input.roleIds],
+      );
+      if (roles.rowCount !== input.roleIds.length) throw conflict('administrator role does not exist');
+      const result = await client.query<AdminAccountRow>(
+        `INSERT INTO control_admin_accounts
+          (id, username, display_name, password_hash, mfa_secret_ciphertext)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [
+          input.id,
+          input.username,
+          input.displayName,
+          input.passwordHash,
+          input.mfaSecretCiphertext,
+        ],
+      );
+      await client.query(
+        `INSERT INTO control_admin_enrollments (account_id, token_hash, expires_at)
+         VALUES ($1, $2, $3)`,
+        [input.id, input.enrollmentTokenHash, input.enrollmentExpiresAt],
+      );
+      for (const roleId of input.roleIds) {
+        await client.query(
+          `INSERT INTO control_admin_account_roles (account_id, role_id)
+           VALUES ($1, $2)`,
+          [input.id, roleId],
+        );
+      }
+      await client.query('COMMIT');
+      return adminAccountFromRow(result.rows[0]!);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23505') throw conflict('administrator account already exists');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getAdminAccountById(id: string): Promise<AdminAccountRecord | null> {
+    const result = await this.#pool.query<AdminAccountRow>(
+      'SELECT * FROM control_admin_accounts WHERE id = $1',
+      [id],
+    );
+    return result.rows[0] ? adminAccountFromRow(result.rows[0]) : null;
+  }
+
+  async getAdminAccountByUsername(username: string): Promise<AdminAccountRecord | null> {
+    const result = await this.#pool.query<AdminAccountRow>(
+      'SELECT * FROM control_admin_accounts WHERE username = $1',
+      [username],
+    );
+    return result.rows[0] ? adminAccountFromRow(result.rows[0]) : null;
+  }
+
+  async listAdminAccounts(): Promise<Array<AdminAccountRecord & { roles: string[] }>> {
+    const result = await this.#pool.query<AdminAccountRow>(
+      `SELECT accounts.*,
+         COALESCE(array_agg(account_roles.role_id ORDER BY account_roles.role_id)
+           FILTER (WHERE account_roles.role_id IS NOT NULL), ARRAY[]::text[]) AS roles
+       FROM control_admin_accounts accounts
+       LEFT JOIN control_admin_account_roles account_roles ON account_roles.account_id = accounts.id
+       GROUP BY accounts.id
+       ORDER BY accounts.created_at`,
+    );
+    return result.rows.map((row) => ({ ...adminAccountFromRow(row), roles: row.roles ?? [] }));
+  }
+
+  async listAdminRoles(): Promise<AdminRoleRecord[]> {
+    const result = await this.#pool.query<{
+      id: string;
+      name: string;
+      system: boolean;
+      permissions: AdminPermission[];
+    }>(
+      `SELECT roles.id, roles.name, roles.system,
+         COALESCE(array_agg(role_permissions.permission_id ORDER BY role_permissions.permission_id)
+           FILTER (WHERE role_permissions.permission_id IS NOT NULL), ARRAY[]::text[]) AS permissions
+       FROM control_admin_roles roles
+       LEFT JOIN control_admin_role_permissions role_permissions
+         ON role_permissions.role_id = roles.id
+       GROUP BY roles.id
+       ORDER BY roles.id`,
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      system: row.system,
+      permissions: row.permissions,
+    }));
+  }
+
+  async replaceAdminAccountRoles(accountId: string, roleIds: string[]): Promise<string[] | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('otto_control_admin_super_guard'))");
+      const account = await client.query<{ id: string; status: AdminAccountRecord['status'] }>(
+        'SELECT id, status FROM control_admin_accounts WHERE id = $1 FOR UPDATE',
+        [accountId],
+      );
+      if (!account.rowCount) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const roles = await client.query<{ id: string }>(
+        'SELECT id FROM control_admin_roles WHERE id = ANY($1::text[])',
+        [roleIds],
+      );
+      if (roles.rowCount !== roleIds.length) throw conflict('administrator role does not exist');
+      const hadSuperRole = await client.query(
+        `SELECT 1 FROM control_admin_account_roles
+         WHERE account_id = $1 AND role_id = 'super_admin'`,
+        [accountId],
+      );
+      if (
+        account.rows[0]?.status === 'active'
+        && hadSuperRole.rowCount === 1
+        && !roleIds.includes('super_admin')
+      ) {
+        const alternatives = await client.query(
+          `SELECT 1 FROM control_admin_accounts accounts
+           JOIN control_admin_account_roles roles ON roles.account_id = accounts.id
+           WHERE accounts.id <> $1 AND accounts.status = 'active'
+             AND roles.role_id = 'super_admin' LIMIT 1`,
+          [accountId],
+        );
+        if (!alternatives.rowCount) throw conflict('the last active super administrator must be preserved');
+      }
+      await client.query('DELETE FROM control_admin_account_roles WHERE account_id = $1', [accountId]);
+      for (const roleId of roleIds) {
+        await client.query(
+          'INSERT INTO control_admin_account_roles (account_id, role_id) VALUES ($1, $2)',
+          [accountId, roleId],
+        );
+      }
+      await client.query('UPDATE control_admin_accounts SET updated_at = now() WHERE id = $1', [accountId]);
+      await client.query('COMMIT');
+      return roleIds;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async setAdminAccountStatus(
+    accountId: string,
+    status: AdminAccountRecord['status'],
+    changedAt: Date,
+  ): Promise<AdminAccountRecord | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('otto_control_admin_super_guard'))");
+      const account = await client.query<AdminAccountRow>(
+        'SELECT * FROM control_admin_accounts WHERE id = $1 FOR UPDATE',
+        [accountId],
+      );
+      const current = account.rows[0];
+      if (!current) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (current.status === 'active' && status !== 'active') {
+        const superRole = await client.query(
+          `SELECT 1 FROM control_admin_account_roles
+           WHERE account_id = $1 AND role_id = 'super_admin'`,
+          [accountId],
+        );
+        if (superRole.rowCount === 1) {
+          const alternatives = await client.query(
+            `SELECT 1 FROM control_admin_accounts accounts
+             JOIN control_admin_account_roles roles ON roles.account_id = accounts.id
+             WHERE accounts.id <> $1 AND accounts.status = 'active'
+               AND roles.role_id = 'super_admin' LIMIT 1`,
+            [accountId],
+          );
+          if (!alternatives.rowCount) throw conflict('the last active super administrator must be preserved');
+        }
+      }
+      const result = await client.query<AdminAccountRow>(
+        `UPDATE control_admin_accounts SET status = $2, updated_at = $3
+         WHERE id = $1 RETURNING *`,
+        [accountId, status, changedAt],
+      );
+      await client.query('COMMIT');
+      return adminAccountFromRow(result.rows[0]!);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async confirmAdminEnrollment(input: {
+    accountId: string;
+    enrollmentTokenHash: string;
+    recoveryCodeHashes: string[];
+    confirmedAt: Date;
+  }): Promise<AdminAccountRecord | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const enrollment = await client.query<{ account_id: string }>(
+        `SELECT account_id FROM control_admin_enrollments
+         WHERE account_id = $1 AND token_hash = $2 AND expires_at > $3
+         FOR UPDATE`,
+        [input.accountId, input.enrollmentTokenHash, input.confirmedAt],
+      );
+      if (!enrollment.rows[0]) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const result = await client.query<AdminAccountRow>(
+        `UPDATE control_admin_accounts
+         SET status = 'active', mfa_confirmed_at = $2, updated_at = $2
+         WHERE id = $1 AND status = 'pending'
+         RETURNING *`,
+        [input.accountId, input.confirmedAt],
+      );
+      if (!result.rows[0]) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      for (const codeHash of input.recoveryCodeHashes) {
+        await client.query(
+          `INSERT INTO control_admin_recovery_codes (account_id, code_hash)
+           VALUES ($1, $2)`,
+          [input.accountId, codeHash],
+        );
+      }
+      await client.query('DELETE FROM control_admin_enrollments WHERE account_id = $1', [input.accountId]);
+      await client.query('COMMIT');
+      return adminAccountFromRow(result.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordAdminLoginFailure(input: {
+    accountId: string;
+    failedLoginCount: number;
+    lockedUntil: Date | null;
+    changedAt: Date;
+  }): Promise<void> {
+    await this.#pool.query(
+      `UPDATE control_admin_accounts
+       SET failed_login_count = $2, locked_until = $3, updated_at = $4
+       WHERE id = $1`,
+      [input.accountId, input.failedLoginCount, input.lockedUntil, input.changedAt],
+    );
+  }
+
+  async clearAdminLoginFailures(accountId: string, changedAt: Date): Promise<void> {
+    await this.#pool.query(
+      `UPDATE control_admin_accounts
+       SET failed_login_count = 0, locked_until = NULL, updated_at = $2
+       WHERE id = $1`,
+      [accountId, changedAt],
+    );
+  }
+
+  async consumeAdminRecoveryCode(
+    accountId: string,
+    codeHash: string,
+    usedAt: Date,
+  ): Promise<boolean> {
+    const result = await this.#pool.query(
+      `UPDATE control_admin_recovery_codes SET used_at = $3
+       WHERE account_id = $1 AND code_hash = $2 AND used_at IS NULL
+       RETURNING code_hash`,
+      [accountId, codeHash, usedAt],
+    );
+    return result.rowCount === 1;
+  }
+
+  async createAdminSession(input: {
+    id: string;
+    accountId: string;
+    tokenHash: string;
+    expiresAt: Date;
+    mfaVerifiedAt: Date;
+    createdAt: Date;
+  }): Promise<AdminSessionRecord> {
+    const result = await this.#pool.query<AdminSessionRow>(
+      `WITH inserted AS (
+         INSERT INTO control_admin_sessions
+           (id, account_id, token_hash, expires_at, last_seen_at, mfa_verified_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $5)
+         RETURNING *
+       )
+       SELECT inserted.*, accounts.username, accounts.display_name
+       FROM inserted JOIN control_admin_accounts accounts ON accounts.id = inserted.account_id`,
+      [
+        input.id,
+        input.accountId,
+        input.tokenHash,
+        input.expiresAt,
+        input.createdAt,
+        input.mfaVerifiedAt,
+      ],
+    );
+    return adminSessionFromRow(result.rows[0]!);
+  }
+
+  async getAdminPrincipalBySessionTokenHash(input: {
+    tokenHash: string;
+    now: Date;
+    idleCutoff: Date;
+  }): Promise<AdminPrincipal | null> {
+    const result = await this.#pool.query<{
+      account_id: string;
+      session_id: string;
+      username: string;
+      display_name: string;
+      mfa_verified_at: Date;
+      roles: string[];
+      permissions: AdminPermission[];
+    }>(
+      `SELECT accounts.id AS account_id, sessions.id AS session_id, accounts.username,
+         accounts.display_name, sessions.mfa_verified_at,
+         COALESCE(array_agg(DISTINCT account_roles.role_id)
+           FILTER (WHERE account_roles.role_id IS NOT NULL), ARRAY[]::text[]) AS roles,
+         COALESCE(array_agg(DISTINCT role_permissions.permission_id)
+           FILTER (WHERE role_permissions.permission_id IS NOT NULL), ARRAY[]::text[]) AS permissions
+       FROM control_admin_sessions sessions
+       JOIN control_admin_accounts accounts ON accounts.id = sessions.account_id
+       LEFT JOIN control_admin_account_roles account_roles ON account_roles.account_id = accounts.id
+       LEFT JOIN control_admin_role_permissions role_permissions
+         ON role_permissions.role_id = account_roles.role_id
+       WHERE sessions.token_hash = $1 AND sessions.revoked_at IS NULL
+         AND sessions.expires_at > $2 AND sessions.last_seen_at > $3
+         AND accounts.status = 'active' AND accounts.mfa_confirmed_at IS NOT NULL
+       GROUP BY accounts.id, sessions.id`,
+      [input.tokenHash, input.now, input.idleCutoff],
+    );
+    const row = result.rows[0];
+    return row ? {
+      accountId: row.account_id,
+      sessionId: row.session_id,
+      username: row.username,
+      displayName: row.display_name,
+      roles: row.roles,
+      permissions: row.permissions,
+      mfaVerifiedAt: row.mfa_verified_at,
+    } : null;
+  }
+
+  async touchAdminSession(sessionId: string, seenAt: Date): Promise<void> {
+    await this.#pool.query(
+      'UPDATE control_admin_sessions SET last_seen_at = $2 WHERE id = $1 AND revoked_at IS NULL',
+      [sessionId, seenAt],
+    );
+  }
+
+  async revokeAdminSession(sessionId: string, revokedAt: Date): Promise<void> {
+    await this.#pool.query(
+      `UPDATE control_admin_sessions SET revoked_at = COALESCE(revoked_at, $2)
+       WHERE id = $1`,
+      [sessionId, revokedAt],
+    );
+  }
+
+  async revokeAdminAccountSessions(accountId: string, revokedAt: Date): Promise<void> {
+    await this.#pool.query(
+      `UPDATE control_admin_sessions SET revoked_at = COALESCE(revoked_at, $2)
+       WHERE account_id = $1`,
+      [accountId, revokedAt],
+    );
+  }
+
+  async createAdminApproval(input: {
+    id: string;
+    requesterAccountId: string;
+    operation: string;
+    targetType: string;
+    targetId: string;
+    requestHash: string;
+    requiredApprovals: number;
+    expiresAt: Date;
+    createdAt: Date;
+  }): Promise<AdminApprovalRecord> {
+    const result = await this.#pool.query<AdminApprovalRow>(
+      `WITH inserted AS (
+         INSERT INTO control_admin_approvals
+           (id, requester_account_id, operation, target_type, target_id, request_hash,
+            required_approvals, expires_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+         RETURNING *
+       )
+       SELECT inserted.*, 0 AS approval_count FROM inserted`,
+      [
+        input.id,
+        input.requesterAccountId,
+        input.operation,
+        input.targetType,
+        input.targetId,
+        input.requestHash,
+        input.requiredApprovals,
+        input.expiresAt,
+        input.createdAt,
+      ],
+    );
+    return adminApprovalFromRow(result.rows[0]!);
+  }
+
+  async getAdminApproval(id: string): Promise<AdminApprovalRecord | null> {
+    await this.#pool.query(
+      `UPDATE control_admin_approvals SET status = 'expired', updated_at = now()
+       WHERE id = $1 AND status IN ('pending', 'approved') AND expires_at <= now()`,
+      [id],
+    );
+    const result = await this.#pool.query<AdminApprovalRow>(
+      `${ADMIN_APPROVAL_SELECT} WHERE approvals.id = $1 GROUP BY approvals.id`,
+      [id],
+    );
+    return result.rows[0] ? adminApprovalFromRow(result.rows[0]) : null;
+  }
+
+  async listAdminApprovals(limit: number): Promise<AdminApprovalRecord[]> {
+    await this.#pool.query(
+      `UPDATE control_admin_approvals SET status = 'expired', updated_at = now()
+       WHERE status IN ('pending', 'approved') AND expires_at <= now()`,
+    );
+    const result = await this.#pool.query<AdminApprovalRow>(
+      `${ADMIN_APPROVAL_SELECT} GROUP BY approvals.id
+       ORDER BY approvals.created_at DESC LIMIT $1`,
+      [limit],
+    );
+    return result.rows.map(adminApprovalFromRow);
+  }
+
+  async decideAdminApproval(input: {
+    approvalId: string;
+    accountId: string;
+    decision: 'approve' | 'reject';
+    reason: string | null;
+    decidedAt: Date;
+  }): Promise<AdminApprovalRecord | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const approvalResult = await client.query<AdminApprovalRow>(
+        'SELECT *, 0 AS approval_count FROM control_admin_approvals WHERE id = $1 FOR UPDATE',
+        [input.approvalId],
+      );
+      const approval = approvalResult.rows[0];
+      if (!approval) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (approval.requester_account_id === input.accountId) {
+        throw conflict('approval requester cannot approve their own operation');
+      }
+      if (approval.expires_at <= input.decidedAt) {
+        await client.query(
+          "UPDATE control_admin_approvals SET status = 'expired', updated_at = $2 WHERE id = $1",
+          [input.approvalId, input.decidedAt],
+        );
+        await client.query('COMMIT');
+        return this.getAdminApproval(input.approvalId);
+      }
+      if (approval.status !== 'pending') throw conflict('approval is no longer pending');
+      try {
+        await client.query(
+          `INSERT INTO control_admin_approval_decisions
+            (approval_id, account_id, decision, reason, decided_at)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [input.approvalId, input.accountId, input.decision, input.reason, input.decidedAt],
+        );
+      } catch (error) {
+        if (postgresCode(error) === '23505') throw conflict('administrator has already decided this approval');
+        throw error;
+      }
+      const countResult = await client.query<{ count: string }>(
+        `SELECT COUNT(*) AS count FROM control_admin_approval_decisions
+         WHERE approval_id = $1 AND decision = 'approve'`,
+        [input.approvalId],
+      );
+      const approvalCount = Number(countResult.rows[0]?.count ?? 0);
+      const status = input.decision === 'reject'
+        ? 'rejected'
+        : approvalCount >= approval.required_approvals ? 'approved' : 'pending';
+      await client.query(
+        'UPDATE control_admin_approvals SET status = $2, updated_at = $3 WHERE id = $1',
+        [input.approvalId, status, input.decidedAt],
+      );
+      await client.query('COMMIT');
+      return this.getAdminApproval(input.approvalId);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async consumeAdminApproval(input: {
+    approvalId: string;
+    requesterAccountId: string;
+    operation: string;
+    targetType: string;
+    targetId: string;
+    requestHash: string;
+    executedAt: Date;
+  }): Promise<AdminApprovalRecord | null> {
+    const result = await this.#pool.query<AdminApprovalRow>(
+      `WITH consumed AS (
+         UPDATE control_admin_approvals
+         SET status = 'executed', executed_at = $8, updated_at = $8
+         WHERE id = $1 AND requester_account_id = $2 AND operation = $3
+           AND target_type = $4 AND target_id = $5 AND request_hash = $6
+           AND status = 'approved' AND expires_at > $7
+         RETURNING *
+       )
+       SELECT consumed.*,
+         (SELECT COUNT(*) FROM control_admin_approval_decisions decisions
+          WHERE decisions.approval_id = consumed.id AND decisions.decision = 'approve') AS approval_count
+       FROM consumed`,
+      [
+        input.approvalId,
+        input.requesterAccountId,
+        input.operation,
+        input.targetType,
+        input.targetId,
+        input.requestHash,
+        input.executedAt,
+        input.executedAt,
+      ],
+    );
+    return result.rows[0] ? adminApprovalFromRow(result.rows[0]) : null;
   }
 
   async consumeLeaseNonce(input: {

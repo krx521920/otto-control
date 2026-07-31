@@ -11,6 +11,8 @@ import {
   signTelemetryRequest,
   telemetryIntegrityHash,
 } from '../src/crypto/telemetry-request.js';
+import { generateTotpCode } from '../src/modules/admin-identity/crypto.js';
+import { AdminIdentityService } from '../src/modules/admin-identity/service.js';
 import { CommercialControlService } from '../src/modules/commercial-control/service.js';
 import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
 import { UpdatePolicyService } from '../src/modules/update-policy/service.js';
@@ -40,6 +42,8 @@ describe('commercial control HTTP routes', () => {
   let app: FastifyInstance;
   let activeKeyId: string;
   let standbyKeyId: string;
+  let adminSessionToken: string;
+  let securitySessionToken: string;
 
   beforeEach(async () => {
     const keys = generateKeyPairSync('ed25519');
@@ -61,6 +65,32 @@ describe('commercial control HTTP routes', () => {
       ],
     });
     const tokenIssuer = new ControlTokenIssuer(config.tokenSecret!);
+    const identity = new AdminIdentityService({
+      store,
+      controlSecret: config.tokenSecret!,
+    });
+    const enrollment = await identity.bootstrap({
+      username: 'route.admin',
+      displayName: 'Route Admin',
+      password: 'SecureControl2026',
+    });
+    const adminSession = await identity.confirmEnrollment({
+      accountId: enrollment.account.id,
+      enrollmentToken: enrollment.enrollmentToken,
+      totpCode: generateTotpCode(enrollment.mfaSecret),
+    });
+    adminSessionToken = adminSession.token;
+    const securityEnrollment = await identity.createAccount(adminSession.principal, {
+      username: 'security.admin',
+      displayName: 'Security Admin',
+      password: 'SecureControl2026',
+      roleIds: ['security_admin'],
+    });
+    securitySessionToken = (await identity.confirmEnrollment({
+      accountId: securityEnrollment.account.id,
+      enrollmentToken: securityEnrollment.enrollmentToken,
+      totpCode: generateTotpCode(securityEnrollment.mfaSecret),
+    })).token;
     const service = new CommercialControlService({
       store,
       signer: keyring,
@@ -73,21 +103,51 @@ describe('commercial control HTTP routes', () => {
       logger: false,
       commercialControl: {
         adminToken: ADMIN_TOKEN,
+        identity,
         service,
         updatePolicy: new UpdatePolicyService({ store, signer: keyring, tokenIssuer }),
       },
     });
   });
 
+  async function approvedOperation(
+    operation: string,
+    targetType: string,
+    targetId: string,
+    request: unknown = {},
+  ): Promise<string> {
+    const requested = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/approvals',
+      headers: { authorization: `Bearer ${adminSessionToken}` },
+      payload: { operation, targetType, targetId, request },
+    });
+    expect(requested.statusCode).toBe(201);
+    const approvalId = requested.json().approval.id as string;
+    const decided = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/approvals/${approvalId}/decide`,
+      headers: { authorization: `Bearer ${securitySessionToken}` },
+      payload: { decision: 'approve', reason: 'test review' },
+    });
+    expect(decided.statusCode).toBe(200);
+    return approvalId;
+  }
+
   it('activates, retires, and revokes signing keys through audited admin routes', async () => {
     const headers = {
-      authorization: `Bearer ${ADMIN_TOKEN}`,
+      authorization: `Bearer ${adminSessionToken}`,
       'x-otto-actor': 'security-operator',
     };
+    const activationApproval = await approvedOperation(
+      'signing_key.activate',
+      'signing_key',
+      standbyKeyId,
+    );
     const activated = await app.inject({
       method: 'POST',
       url: `/v1/admin/signing-keys/${standbyKeyId}/activate`,
-      headers,
+      headers: { ...headers, 'x-otto-approval-id': activationApproval },
     });
     expect(activated.statusCode).toBe(200);
     expect(activated.json().signingKeys).toEqual(expect.arrayContaining([
@@ -95,11 +155,18 @@ describe('commercial control HTTP routes', () => {
       expect.objectContaining({ keyId: standbyKeyId, state: 'active' }),
     ]));
 
+    const revokeRequest = { reason: 'confirmed key exposure' };
+    const revocationApproval = await approvedOperation(
+      'signing_key.revoke',
+      'signing_key',
+      activeKeyId,
+      revokeRequest,
+    );
     const revoked = await app.inject({
       method: 'POST',
       url: `/v1/admin/signing-keys/${activeKeyId}/revoke`,
-      headers,
-      payload: { reason: 'confirmed key exposure' },
+      headers: { ...headers, 'x-otto-approval-id': revocationApproval },
+      payload: revokeRequest,
     });
     expect(revoked.statusCode).toBe(200);
     expect(revoked.json().signingKeys).toEqual(expect.arrayContaining([
@@ -128,12 +195,16 @@ describe('commercial control HTTP routes', () => {
       'lease_revocation',
       'telemetry_health',
       'update_policy',
+      'admin_identity',
+      'admin_rbac',
+      'admin_mfa',
+      'dual_control_approval',
     ]);
 
     const signingKey = await app.inject({
       method: 'GET',
       url: '/v1/admin/signing-key',
-      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { authorization: `Bearer ${adminSessionToken}` },
     });
     expect(signingKey.statusCode).toBe(200);
     expect(signingKey.json().signingKey).toMatchObject({ algorithm: 'ed25519' });
@@ -148,7 +219,7 @@ describe('commercial control HTTP routes', () => {
   });
 
   it('creates a deployment, issues a License, and serves Otto lease refreshes', async () => {
-    const authorization = { authorization: `Bearer ${ADMIN_TOKEN}` };
+    const authorization = { authorization: `Bearer ${adminSessionToken}` };
     const customerResponse = await app.inject({
       method: 'POST',
       url: '/v1/admin/customers',
@@ -211,7 +282,7 @@ describe('commercial control HTTP routes', () => {
   });
 
   it('ingests authenticated operational telemetry and exposes deployment health', async () => {
-    const authorization = { authorization: `Bearer ${ADMIN_TOKEN}` };
+    const authorization = { authorization: `Bearer ${adminSessionToken}` };
     const customerResponse = await app.inject({
       method: 'POST',
       url: '/v1/admin/customers',
@@ -384,7 +455,7 @@ describe('commercial control HTTP routes', () => {
   });
 
   it('publishes and resolves an authenticated distribution-specific update policy', async () => {
-    const authorization = { authorization: `Bearer ${ADMIN_TOKEN}` };
+    const authorization = { authorization: `Bearer ${adminSessionToken}` };
     const customer = await app.inject({
       method: 'POST',
       url: '/v1/admin/customers',
@@ -437,10 +508,15 @@ describe('commercial control HTTP routes', () => {
     });
     expect(releaseResponse.statusCode).toBe(201);
     const releaseId = releaseResponse.json().release.id as string;
+    const activationApproval = await approvedOperation(
+      'update_release.activate',
+      'update_release',
+      releaseId,
+    );
     const activated = await app.inject({
       method: 'POST',
       url: `/v1/admin/update-releases/${releaseId}/activate`,
-      headers: authorization,
+      headers: { ...authorization, 'x-otto-approval-id': activationApproval },
     });
     expect(activated.statusCode).toBe(200);
     const licenseResponse = await app.inject({

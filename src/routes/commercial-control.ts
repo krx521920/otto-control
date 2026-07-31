@@ -1,12 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 
-import { unauthorized } from '../errors.js';
+import type { AdminIdentityService } from '../modules/admin-identity/service.js';
 import type { CommercialControlService } from '../modules/commercial-control/service.js';
-import { actorId, bearerToken, secretMatches } from './route-auth.js';
+import { authenticateAdmin, bearerToken, consumeRouteApproval } from './route-auth.js';
 
 export interface CommercialControlRouteOptions {
   service: CommercialControlService;
-  adminToken: string;
+  identity: AdminIdentityService;
 }
 
 export async function registerCommercialControlRoutes(
@@ -14,87 +14,118 @@ export async function registerCommercialControlRoutes(
   options: CommercialControlRouteOptions,
 ): Promise<void> {
   app.register(async (admin) => {
-    admin.addHook('preHandler', async (request) => {
-      if (!secretMatches(bearerToken(request), options.adminToken)) {
-        throw unauthorized('Control administrator token is invalid');
-      }
-    });
-
     admin.post('/customers', async (request, reply) => {
-      const customer = await options.service.createCustomer(request.body, actorId(request));
+      const auth = await authenticateAdmin(request, options, 'customer.create');
+      const customer = await options.service.createCustomer(request.body, auth.actorId);
       return reply.code(201).send({ customer });
     });
 
     admin.post('/deployments', async (request, reply) => {
-      const deployment = await options.service.createDeployment(request.body, actorId(request));
+      const auth = await authenticateAdmin(request, options, 'deployment.create');
+      const deployment = await options.service.createDeployment(request.body, auth.actorId);
       return reply.code(201).send({ deployment });
     });
 
     admin.post('/licenses', async (request, reply) => {
-      const envelope = await options.service.issueLicense(request.body, actorId(request));
+      const auth = await authenticateAdmin(request, options, 'license.issue');
+      const envelope = await options.service.issueLicense(request.body, auth.actorId);
       return reply.code(201).send(envelope);
     });
 
-    admin.get('/signing-key', async () => ({
-      signingKey: await options.service.signingKey(),
-    }));
+    admin.get('/signing-key', async (request) => {
+      await authenticateAdmin(request, options, 'signing_key.read');
+      return { signingKey: await options.service.signingKey() };
+    });
 
-    admin.get('/signing-keys', async () => ({ signingKeys: await options.service.signingKeys() }));
+    admin.get('/signing-keys', async (request) => {
+      await authenticateAdmin(request, options, 'signing_key.read');
+      return { signingKeys: await options.service.signingKeys() };
+    });
 
     admin.post<{ Params: { keyId: string } }>(
       '/signing-keys/:keyId/activate',
-      async (request) => ({
-        signingKeys: await options.service.activateSigningKey(
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'signing_key.manage');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'signing_key.activate',
+          targetType: 'signing_key',
+          targetId: request.params.keyId,
+          request: {},
+        });
+        return { signingKeys: await options.service.activateSigningKey(
           request.params.keyId,
-          actorId(request),
-        ),
-      }),
+          auth.actorId,
+        ) };
+      },
     );
 
     admin.post<{ Params: { keyId: string } }>(
       '/signing-keys/:keyId/retire',
-      async (request) => ({
-        signingKeys: await options.service.retireSigningKey(
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'signing_key.manage');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'signing_key.retire',
+          targetType: 'signing_key',
+          targetId: request.params.keyId,
+          request: {},
+        });
+        return { signingKeys: await options.service.retireSigningKey(
           request.params.keyId,
-          actorId(request),
-        ),
-      }),
+          auth.actorId,
+        ) };
+      },
     );
 
     admin.post<{ Params: { keyId: string } }>(
       '/signing-keys/:keyId/revoke',
-      async (request) => ({
-        signingKeys: await options.service.revokeSigningKey(
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'signing_key.manage');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'signing_key.revoke',
+          targetType: 'signing_key',
+          targetId: request.params.keyId,
+          request: request.body ?? {},
+        });
+        return { signingKeys: await options.service.revokeSigningKey(
           request.params.keyId,
           request.body,
-          actorId(request),
-        ),
-      }),
+          auth.actorId,
+        ) };
+      },
     );
 
-    admin.get<{ Params: { licenseId: string } }>('/licenses/:licenseId', async (request) => (
-      options.service.getLicenseEnvelope(request.params.licenseId)
-    ));
+    admin.get<{ Params: { licenseId: string } }>('/licenses/:licenseId', async (request) => {
+      await authenticateAdmin(request, options, 'license.read');
+      return options.service.getLicenseEnvelope(request.params.licenseId);
+    });
 
     admin.post<{ Params: { licenseId: string } }>(
       '/licenses/:licenseId/revoke',
-      async (request) => ({
-        license: await options.service.revokeLicense(
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'license.revoke');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'license.revoke',
+          targetType: 'license',
+          targetId: request.params.licenseId,
+          request: {},
+        });
+        return { license: await options.service.revokeLicense(
           request.params.licenseId,
-          actorId(request),
-        ),
-      }),
+          auth.actorId,
+        ) };
+      },
     );
 
     admin.get<{
       Params: { deploymentId: string };
       Querystring: { hours?: string };
-    }>('/deployments/:deploymentId/health', async (request) => ({
-      health: await options.service.deploymentHealth(
+    }>('/deployments/:deploymentId/health', async (request) => {
+      await authenticateAdmin(request, options, 'telemetry.read');
+      return { health: await options.service.deploymentHealth(
         request.params.deploymentId,
         request.query.hours === undefined ? 24 : Number(request.query.hours),
-      ),
-    }));
+      ) };
+    });
   }, { prefix: '/v1/admin' });
 
   app.get('/v1/signing-keyring', {

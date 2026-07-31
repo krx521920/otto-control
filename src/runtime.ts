@@ -3,6 +3,7 @@ import { ManagedSigningKeyring } from './crypto/signing-keyring.js';
 import { loadSigningProviders } from './crypto/signing-provider-config.js';
 import { CommercialControlService } from './modules/commercial-control/service.js';
 import { ControlTokenIssuer } from './modules/commercial-control/token-issuer.js';
+import { AdminIdentityService } from './modules/admin-identity/service.js';
 import { UpdatePolicyService } from './modules/update-policy/service.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 
@@ -10,6 +11,7 @@ export interface CommercialControlRuntime {
   adminToken: string;
   service: CommercialControlService;
   updatePolicy: UpdatePolicyService;
+  identity: AdminIdentityService;
 }
 
 function missingConfiguration(config: Readonly<ControlConfig>): string[] {
@@ -47,8 +49,13 @@ export async function createCommercialControlRuntime(
       ...providerConfig,
     });
     const tokenIssuer = new ControlTokenIssuer(config.tokenSecret!);
+    const identity = new AdminIdentityService({
+      store,
+      controlSecret: config.tokenSecret!,
+    });
     return {
       adminToken: config.adminToken!,
+      identity,
       service: new CommercialControlService({
         store,
         signer,

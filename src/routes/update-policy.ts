@@ -1,12 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 
-import { unauthorized } from '../errors.js';
+import type { AdminIdentityService } from '../modules/admin-identity/service.js';
 import type { UpdatePolicyService } from '../modules/update-policy/service.js';
-import { actorId, bearerToken, secretMatches } from './route-auth.js';
+import { authenticateAdmin, consumeRouteApproval } from './route-auth.js';
 
 export interface UpdatePolicyRouteOptions {
   service: UpdatePolicyService;
-  adminToken: string;
+  identity: AdminIdentityService;
 }
 
 export async function registerUpdatePolicyRoutes(
@@ -14,67 +14,78 @@ export async function registerUpdatePolicyRoutes(
   options: UpdatePolicyRouteOptions,
 ): Promise<void> {
   app.register(async (admin) => {
-    admin.addHook('preHandler', async (request) => {
-      if (!secretMatches(bearerToken(request), options.adminToken)) {
-        throw unauthorized('Control administrator token is invalid');
-      }
-    });
-
     admin.post('/update-distributions', async (request, reply) => {
+      const auth = await authenticateAdmin(request, options, 'update_distribution.manage');
       const distribution = await options.service.createDistribution(
         request.body,
-        actorId(request),
+        auth.actorId,
       );
       return reply.code(201).send({ distribution });
     });
 
     admin.put<{ Params: { deploymentId: string } }>(
       '/deployments/:deploymentId/update-distribution',
-      async (request) => ({
-        assignment: await options.service.assignDeployment(
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'update_distribution.manage');
+        return { assignment: await options.service.assignDeployment(
           request.params.deploymentId,
           request.body,
-          actorId(request),
-        ),
-      }),
+          auth.actorId,
+        ) };
+      },
     );
 
     admin.post('/update-releases', async (request, reply) => {
-      const release = await options.service.createRelease(request.body, actorId(request));
+      const auth = await authenticateAdmin(request, options, 'update_release.create');
+      const release = await options.service.createRelease(request.body, auth.actorId);
       return reply.code(201).send({ release });
     });
 
     admin.get<{ Params: { distributionId: string } }>(
       '/update-distributions/:distributionId/releases',
-      async (request) => ({
-        releases: await options.service.listReleases(request.params.distributionId),
-      }),
+      async (request) => {
+        await authenticateAdmin(request, options, 'update_release.read');
+        return { releases: await options.service.listReleases(request.params.distributionId) };
+      },
     );
 
     admin.post<{ Params: { releaseId: string } }>(
       '/update-releases/:releaseId/activate',
-      async (request) => options.service.activateRelease(
-        request.params.releaseId,
-        actorId(request),
-      ),
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'update_release.publish');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'update_release.activate',
+          targetType: 'update_release',
+          targetId: request.params.releaseId,
+          request: {},
+        });
+        return options.service.activateRelease(request.params.releaseId, auth.actorId);
+      },
     );
 
     admin.post<{ Params: { releaseId: string } }>(
       '/update-releases/:releaseId/pause',
-      async (request) => ({
-        release: await options.service.pauseRelease(
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'update_release.publish');
+        return { release: await options.service.pauseRelease(
           request.params.releaseId,
-          actorId(request),
-        ),
-      }),
+          auth.actorId,
+        ) };
+      },
     );
 
     admin.post<{ Params: { releaseId: string } }>(
       '/update-releases/:releaseId/rollback',
-      async (request) => options.service.rollbackRelease(
-        request.params.releaseId,
-        actorId(request),
-      ),
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'update_release.publish');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'update_release.rollback',
+          targetType: 'update_release',
+          targetId: request.params.releaseId,
+          request: {},
+        });
+        return options.service.rollbackRelease(request.params.releaseId, auth.actorId);
+      },
     );
   }, { prefix: '/v1/admin' });
 
@@ -99,4 +110,3 @@ export async function registerUpdatePolicyRoutes(
       : undefined,
   }));
 }
-

@@ -6,6 +6,7 @@ import Fastify, { type FastifyError, type FastifyInstance, type FastifyServerOpt
 import { loadControlConfig, type ControlConfig } from './config.js';
 import { ControlPlaneError } from './errors.js';
 import type { CommercialControlRuntime } from './runtime.js';
+import { registerAdminIdentityRoutes } from './routes/admin-identity.js';
 import { registerCommercialControlRoutes } from './routes/commercial-control.js';
 import { registerPlatformRoutes } from './routes/platform.js';
 import { registerUpdatePolicyRoutes } from './routes/update-policy.js';
@@ -41,6 +42,9 @@ export async function buildControlApp(
         'req.headers.x-api-key',
         'req.body.password',
         'req.body.token',
+        'req.body.totpCode',
+        'req.body.recoveryCode',
+        'req.body.enrollmentToken',
         'req.body.leaseToken',
         'req.body.telemetryToken',
       ],
@@ -118,10 +122,15 @@ export async function buildControlApp(
       'telemetry_health',
       'update_policy',
     );
+    capabilities.push('admin_identity', 'admin_rbac', 'admin_mfa', 'dual_control_approval');
+    await registerAdminIdentityRoutes(app, {
+      adminToken: commercialControl.adminToken,
+      identity: commercialControl.identity,
+    });
     await registerCommercialControlRoutes(app, commercialControl);
     await registerUpdatePolicyRoutes(app, {
-      adminToken: commercialControl.adminToken,
       service: commercialControl.updatePolicy,
+      identity: commercialControl.identity,
     });
     app.addHook('onClose', async () => commercialControl.service.close());
   }

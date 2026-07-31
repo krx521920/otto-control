@@ -199,6 +199,134 @@ const MIGRATIONS: Migration[] = [
        ON control_licenses(signing_key_id, created_at DESC)`,
     ],
   },
+  {
+    id: '006_admin_identity',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_admin_permissions (
+        id TEXT PRIMARY KEY
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_admin_roles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        system BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_admin_role_permissions (
+        role_id TEXT NOT NULL REFERENCES control_admin_roles(id) ON DELETE CASCADE,
+        permission_id TEXT NOT NULL REFERENCES control_admin_permissions(id) ON DELETE CASCADE,
+        PRIMARY KEY (role_id, permission_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_admin_accounts (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        mfa_secret_ciphertext TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'active', 'disabled')),
+        failed_login_count INTEGER NOT NULL DEFAULT 0 CHECK (failed_login_count >= 0),
+        locked_until TIMESTAMPTZ,
+        mfa_confirmed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_admin_account_roles (
+        account_id TEXT NOT NULL REFERENCES control_admin_accounts(id) ON DELETE CASCADE,
+        role_id TEXT NOT NULL REFERENCES control_admin_roles(id),
+        PRIMARY KEY (account_id, role_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_admin_enrollments (
+        account_id TEXT PRIMARY KEY REFERENCES control_admin_accounts(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_admin_recovery_codes (
+        account_id TEXT NOT NULL REFERENCES control_admin_accounts(id) ON DELETE CASCADE,
+        code_hash TEXT NOT NULL,
+        used_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (account_id, code_hash)
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_admin_sessions (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES control_admin_accounts(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        last_seen_at TIMESTAMPTZ NOT NULL,
+        mfa_verified_at TIMESTAMPTZ NOT NULL,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_admin_sessions_account
+       ON control_admin_sessions(account_id, expires_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_admin_sessions_expiry
+       ON control_admin_sessions(expires_at) WHERE revoked_at IS NULL`,
+      `CREATE TABLE IF NOT EXISTS control_admin_approvals (
+        id TEXT PRIMARY KEY,
+        requester_account_id TEXT NOT NULL REFERENCES control_admin_accounts(id),
+        operation TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'approved', 'rejected', 'executed', 'expired')),
+        required_approvals INTEGER NOT NULL DEFAULT 1 CHECK (required_approvals BETWEEN 1 AND 10),
+        expires_at TIMESTAMPTZ NOT NULL,
+        executed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_admin_approval_decisions (
+        approval_id TEXT NOT NULL REFERENCES control_admin_approvals(id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL REFERENCES control_admin_accounts(id),
+        decision TEXT NOT NULL CHECK (decision IN ('approve', 'reject')),
+        reason TEXT,
+        decided_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (approval_id, account_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_admin_approvals_status
+       ON control_admin_approvals(status, expires_at, created_at DESC)`,
+      `INSERT INTO control_admin_permissions (id) VALUES
+        ('customer.create'), ('deployment.create'), ('license.issue'), ('license.read'),
+        ('license.revoke'), ('signing_key.read'), ('signing_key.manage'), ('telemetry.read'),
+        ('update_distribution.manage'), ('update_release.create'), ('update_release.read'),
+        ('update_release.publish'), ('identity.read'), ('identity.manage'),
+        ('approval.request'), ('approval.read'), ('approval.decide')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_roles (id, name) VALUES
+        ('super_admin', 'Super administrator'),
+        ('security_admin', 'Security administrator'),
+        ('license_admin', 'License administrator'),
+        ('release_admin', 'Release administrator'),
+        ('auditor', 'Read-only auditor')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'super_admin', id FROM control_admin_permissions
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'security_admin', id FROM control_admin_permissions
+       WHERE id IN ('signing_key.read', 'signing_key.manage', 'identity.read', 'identity.manage',
+                    'approval.request', 'approval.read', 'approval.decide')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'license_admin', id FROM control_admin_permissions
+       WHERE id IN ('customer.create', 'deployment.create', 'license.issue', 'license.read',
+                    'license.revoke', 'telemetry.read', 'approval.request', 'approval.read')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'release_admin', id FROM control_admin_permissions
+       WHERE id IN ('update_distribution.manage', 'update_release.create', 'update_release.read',
+                    'update_release.publish', 'approval.request', 'approval.read')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'auditor', id FROM control_admin_permissions
+       WHERE id IN ('license.read', 'signing_key.read', 'telemetry.read',
+                    'update_release.read', 'identity.read', 'approval.read')
+       ON CONFLICT DO NOTHING`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {
