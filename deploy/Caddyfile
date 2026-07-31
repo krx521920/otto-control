@@ -1,0 +1,9 @@
+{$CONTROL_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy control:7788
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    -Server
+  }
+}

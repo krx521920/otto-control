@@ -1,0 +1,35 @@
+import { readFileSync } from 'node:fs';
+
+import { describe, expect, it } from 'vitest';
+
+function repositoryFile(path: string): string {
+  return readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+}
+
+describe('production deployment assets', () => {
+  it('keeps credentials out of the image build context', () => {
+    const ignore = repositoryFile('.dockerignore');
+    expect(ignore).toContain('secrets');
+    expect(ignore).toContain('.env.*');
+    expect(ignore).toContain('*.pem');
+  });
+
+  it('isolates PostgreSQL and hardens the control runtime', () => {
+    const compose = repositoryFile('compose.production.yaml');
+    expect(compose).toContain('internal: true');
+    expect(compose).toContain('read_only: true');
+    expect(compose).toContain('no-new-privileges:true');
+    expect(compose).toContain('cap_drop:');
+    expect(compose).toContain('- control_signer_private_key');
+    expect(compose).toContain('file: ./secrets/control_signer_private_key.pem');
+    expect(compose).not.toMatch(/POSTGRES_PASSWORD:\s*[^\n]/u);
+  });
+
+  it('publishes only the TLS edge and runs the application image as non-root', () => {
+    const compose = repositoryFile('compose.production.yaml');
+    const dockerfile = repositoryFile('Dockerfile');
+    expect(compose).toContain('"443:443"');
+    expect(compose).not.toContain('"7788:7788"');
+    expect(dockerfile).toContain('USER node');
+  });
+});

@@ -1,7 +1,11 @@
 .git
 .github
-node_modules
-dist
 coverage
-.env*
+dist
+node_modules
+secrets
+.env
+.env.*
+!.env.example
 *.log
+*.pem

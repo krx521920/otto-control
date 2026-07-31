@@ -1,0 +1,52 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+import { describe, expect, it } from 'vitest';
+
+describe('production bootstrap', () => {
+  it('creates file-backed secrets without writing them into the environment file', () => {
+    const output = mkdtempSync(join(tmpdir(), 'otto-control-bootstrap-'));
+    try {
+      const result = spawnSync(process.execPath, [
+        'scripts/bootstrap-production.mjs',
+        '--public-url',
+        'https://control.example.test',
+        '--output',
+        output,
+      ], { cwd: process.cwd(), encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+
+      const environment = readFileSync(join(output, '.env.production'), 'utf8');
+      const adminToken = readFileSync(join(output, 'secrets', 'control_admin_token'), 'utf8').trim();
+      const databasePassword = readFileSync(
+        join(output, 'secrets', 'postgres_password'),
+        'utf8',
+      ).trim();
+      const signer = readFileSync(
+        join(output, 'secrets', 'control_signer_private_key.pem'),
+        'utf8',
+      );
+      expect(environment).toContain('CONTROL_PUBLIC_BASE_URL=https://control.example.test');
+      expect(environment).toContain('CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token');
+      expect(environment).not.toContain(adminToken);
+      expect(environment).not.toContain(databasePassword);
+      expect(signer).toContain('BEGIN PRIVATE KEY');
+
+      const repeated = spawnSync(process.execPath, [
+        'scripts/bootstrap-production.mjs',
+        '--public-url',
+        'https://control.example.test',
+        '--output',
+        output,
+      ], { cwd: process.cwd(), encoding: 'utf8' });
+      expect(repeated.status).toBe(1);
+      expect(
+        readFileSync(join(output, 'secrets', 'control_admin_token'), 'utf8').trim(),
+      ).toBe(adminToken);
+    } finally {
+      rmSync(output, { recursive: true, force: true });
+    }
+  });
+});

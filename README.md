@@ -30,6 +30,10 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Draft, canary, stable, and required release policy with deterministic deployment cohorts
 - SHA-256-pinned full and incremental manifests with short-lived Ed25519 policy envelopes
 - Audited activation, pause, and rollback to the previous release policy
+- Production Compose stack with isolated PostgreSQL, automatic HTTPS, persistent
+  volumes, read-only control runtime, and file-mounted secrets
+- One-command Ed25519 key and random credential bootstrap that refuses to
+  overwrite an existing production identity
 
 ## Development
 
@@ -56,6 +60,32 @@ Run all local gates:
 npm run check
 ```
 
+## Production Compose deployment
+
+Point a public DNS name at the server first. Then create the deployment identity
+and secrets locally on that server:
+
+```bash
+npm ci
+npm run bootstrap:production -- --public-url https://control.example.com
+docker compose -f compose.production.yaml --env-file .env.production config
+docker compose -f compose.production.yaml --env-file .env.production up -d --build
+docker compose -f compose.production.yaml --env-file .env.production ps
+curl https://control.example.com/health/ready
+```
+
+The stack keeps PostgreSQL on an internal-only network. Only Caddy publishes
+ports 80 and 443; it obtains and renews the public TLS certificate. The control
+container runs without Linux capabilities, with a read-only root filesystem,
+and receives credentials through `/run/secrets` rather than image layers or
+plain environment values.
+
+Back up both the PostgreSQL volume and the `secrets/` directory. In particular,
+do not regenerate `control_signer_private_key.pem` for an existing deployment:
+replacing it changes the signing identity and makes previously issued License
+and update-policy envelopes unverifiable. The bootstrap command uses exclusive
+file creation and fails instead of overwriting an existing identity.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -68,9 +98,17 @@ npm run check
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
 | `OTTO_CONTROL_VERSION` | `0.4.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
+| `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
+| `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
+| `CONTROL_DATABASE_NAME` | empty | PostgreSQL database name for component configuration |
+| `CONTROL_DATABASE_USER` | empty | PostgreSQL user for component configuration |
+| `CONTROL_DATABASE_PASSWORD` | empty | PostgreSQL password; file-backed form is preferred |
+| `CONTROL_DATABASE_PASSWORD_FILE` | empty | Read-only file containing the PostgreSQL password |
 | `CONTROL_DATABASE_SSL` | production: `true` | Require verified TLS to PostgreSQL |
 | `CONTROL_ADMIN_TOKEN` | empty | 32-byte minimum bearer token for `/v1/admin/*` |
+| `CONTROL_ADMIN_TOKEN_FILE` | empty | Read-only file containing the administrator token |
 | `CONTROL_TOKEN_SECRET` | empty | 32-byte minimum root secret used to derive scoped tokens |
+| `CONTROL_TOKEN_SECRET_FILE` | empty | Read-only file containing the token derivation secret |
 | `CONTROL_SIGNER_PRIVATE_KEY_FILE` | empty | Read-only Ed25519 PKCS#8 secret mount |
 | `CONTROL_LEASE_DURATION_MS` | `600000` | Online lease lifetime; Otto refreshes every two minutes |
 | `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
@@ -170,6 +208,7 @@ Traefik
        -> audit
 ```
 
-The next phase is the Otto server/client adapter that consumes this signed
-policy and maps it onto the existing `latest.json` and incremental manifest
-engines. A richer operator dashboard and federation remain separate later phases.
+The Otto private server and desktop adapter now consume this signed policy and
+map it onto the existing `latest.json` and incremental manifest engines. The
+next phases are automated backup/restore drills, operator-facing administration,
+and eventually the separate federation gateway.

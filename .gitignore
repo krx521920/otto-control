@@ -4,6 +4,7 @@ coverage/
 .env
 .env.*
 !.env.example
+secrets/
 *.log
 .DS_Store
 Thumbs.db

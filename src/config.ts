@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 export type ControlEnvironment = 'development' | 'test' | 'production';
 export type ControlLogLevel = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
 
@@ -59,6 +61,69 @@ function optionalSecret(value: string | undefined, name: string): string | null 
     throw new Error(`${name} must contain at least 32 bytes`);
   }
   return normalized;
+}
+
+function secretFromEnvironment(
+  env: NodeJS.ProcessEnv,
+  valueName: string,
+  fileName: string,
+): string | null {
+  const direct = env[valueName]?.trim();
+  const path = env[fileName]?.trim();
+  if (direct && path) throw new Error(`${valueName} and ${fileName} cannot both be set`);
+  if (!path) return optionalSecret(direct, valueName);
+
+  let value: string;
+  try {
+    value = readFileSync(path, 'utf8').trim();
+  } catch {
+    throw new Error(`${fileName} could not be read`);
+  }
+  return optionalSecret(value, fileName);
+}
+
+function databaseUrlFromEnvironment(env: NodeJS.ProcessEnv): string | undefined {
+  const direct = env.CONTROL_DATABASE_URL?.trim();
+  const componentNames = [
+    'CONTROL_DATABASE_HOST',
+    'CONTROL_DATABASE_PORT',
+    'CONTROL_DATABASE_NAME',
+    'CONTROL_DATABASE_USER',
+    'CONTROL_DATABASE_PASSWORD',
+    'CONTROL_DATABASE_PASSWORD_FILE',
+  ] as const;
+  const hasComponents = componentNames.some((name) => Boolean(env[name]?.trim()));
+  if (direct && hasComponents) {
+    throw new Error('CONTROL_DATABASE_URL cannot be combined with database component settings');
+  }
+  if (!hasComponents) return direct;
+
+  const host = env.CONTROL_DATABASE_HOST?.trim();
+  const database = env.CONTROL_DATABASE_NAME?.trim();
+  const user = env.CONTROL_DATABASE_USER?.trim();
+  if (!host || !database || !user) {
+    throw new Error(
+      'CONTROL_DATABASE_HOST, CONTROL_DATABASE_NAME, and CONTROL_DATABASE_USER are required together',
+    );
+  }
+  const password = secretFromEnvironment(
+    env,
+    'CONTROL_DATABASE_PASSWORD',
+    'CONTROL_DATABASE_PASSWORD_FILE',
+  );
+  if (!password) throw new Error('CONTROL_DATABASE_PASSWORD or CONTROL_DATABASE_PASSWORD_FILE is required');
+
+  const port = env.CONTROL_DATABASE_PORT?.trim() || '5432';
+  if (!/^\d{1,5}$/u.test(port) || Number(port) < 1 || Number(port) > 65_535) {
+    throw new Error('CONTROL_DATABASE_PORT must be between 1 and 65535');
+  }
+  const url = new URL('postgresql://localhost');
+  url.hostname = host;
+  url.port = port;
+  url.username = user;
+  url.password = password;
+  url.pathname = `/${database}`;
+  return url.toString();
 }
 
 function parseDatabaseUrl(value: string | undefined): string | null {
@@ -145,14 +210,14 @@ export function loadControlConfig(
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
     version: env.OTTO_CONTROL_VERSION?.trim() || '0.4.0',
-    databaseUrl: parseDatabaseUrl(env.CONTROL_DATABASE_URL),
+    databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
       environment === 'production',
       'CONTROL_DATABASE_SSL',
     ),
-    adminToken: optionalSecret(env.CONTROL_ADMIN_TOKEN, 'CONTROL_ADMIN_TOKEN'),
-    tokenSecret: optionalSecret(env.CONTROL_TOKEN_SECRET, 'CONTROL_TOKEN_SECRET'),
+    adminToken: secretFromEnvironment(env, 'CONTROL_ADMIN_TOKEN', 'CONTROL_ADMIN_TOKEN_FILE'),
+    tokenSecret: secretFromEnvironment(env, 'CONTROL_TOKEN_SECRET', 'CONTROL_TOKEN_SECRET_FILE'),
     signerPrivateKeyFile: env.CONTROL_SIGNER_PRIVATE_KEY_FILE?.trim() || null,
     leaseDurationMs: parseLeaseDuration(env.CONTROL_LEASE_DURATION_MS),
     telemetryRetentionDays: parseRetentionDays(env.CONTROL_TELEMETRY_RETENTION_DAYS),

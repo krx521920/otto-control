@@ -8,6 +8,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "bootstrap:production": "node scripts/bootstrap-production.mjs",
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run lint && npm run typecheck && npm test && npm run build",
     "dev": "tsx watch src/server.ts",

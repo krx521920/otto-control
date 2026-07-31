@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import { loadControlConfig } from '../src/config.js';
@@ -40,5 +44,46 @@ describe('control configuration', () => {
       NODE_ENV: 'production',
       CONTROL_PUBLIC_BASE_URL: 'https://control.example.test/',
     }).publicBaseUrl).toBe('https://control.example.test');
+  });
+
+  it('loads production secrets and database credentials from mounted files', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'otto-control-config-'));
+    try {
+      const adminTokenFile = join(directory, 'admin-token');
+      const tokenSecretFile = join(directory, 'token-secret');
+      const databasePasswordFile = join(directory, 'database-password');
+      writeFileSync(adminTokenFile, 'a'.repeat(48));
+      writeFileSync(tokenSecretFile, 'b'.repeat(48));
+      writeFileSync(databasePasswordFile, 'p'.repeat(48));
+
+      const config = loadControlConfig({
+        CONTROL_ADMIN_TOKEN_FILE: adminTokenFile,
+        CONTROL_TOKEN_SECRET_FILE: tokenSecretFile,
+        CONTROL_DATABASE_HOST: 'postgres',
+        CONTROL_DATABASE_PORT: '5433',
+        CONTROL_DATABASE_NAME: 'otto_control',
+        CONTROL_DATABASE_USER: 'otto_control',
+        CONTROL_DATABASE_PASSWORD_FILE: databasePasswordFile,
+      });
+
+      expect(config.adminToken).toBe('a'.repeat(48));
+      expect(config.tokenSecret).toBe('b'.repeat(48));
+      expect(config.databaseUrl).toBe(
+        `postgresql://otto_control:${'p'.repeat(48)}@postgres:5433/otto_control`,
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects ambiguous direct and file-backed secrets', () => {
+    expect(() => loadControlConfig({
+      CONTROL_ADMIN_TOKEN: 'a'.repeat(48),
+      CONTROL_ADMIN_TOKEN_FILE: 'admin-token',
+    })).toThrow('CONTROL_ADMIN_TOKEN and CONTROL_ADMIN_TOKEN_FILE cannot both be set');
+    expect(() => loadControlConfig({
+      CONTROL_DATABASE_URL: 'postgresql://otto:secret@localhost/otto',
+      CONTROL_DATABASE_HOST: 'postgres',
+    })).toThrow('CONTROL_DATABASE_URL cannot be combined with database component settings');
   });
 });
