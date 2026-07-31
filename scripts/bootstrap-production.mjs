@@ -31,10 +31,12 @@ function main() {
     resolve(secretDirectory, 'control_admin_token'),
     resolve(secretDirectory, 'control_token_secret'),
     resolve(secretDirectory, 'postgres_password'),
+    resolve(secretDirectory, 'backup_encryption_key'),
   ];
   const existing = targets.find(existsSync);
   if (existing) throw new Error(`refusing to overwrite existing production identity file: ${existing}`);
   mkdirSync(secretDirectory, { recursive: true, mode: 0o700 });
+  mkdirSync(resolve(root, 'backups'), { recursive: true, mode: 0o700 });
 
   const { privateKey } = generateKeyPairSync('ed25519');
   writeSecret(
@@ -44,6 +46,7 @@ function main() {
   writeSecret(resolve(secretDirectory, 'control_admin_token'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'control_token_secret'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'postgres_password'), randomBytes(48).toString('base64url'));
+  writeSecret(resolve(secretDirectory, 'backup_encryption_key'), randomBytes(48).toString('base64url'));
 
   const environment = [
     'NODE_ENV=production',
@@ -65,6 +68,8 @@ function main() {
     'CONTROL_LEASE_DURATION_MS=600000',
     'CONTROL_TELEMETRY_RETENTION_DAYS=90',
     'CONTROL_UPDATE_POLICY_DURATION_MS=300000',
+    'CONTROL_BACKUP_RETENTION_DAYS=30',
+    'OTTO_CONTROL_BACKUP_KEY_FILE=./secrets/backup_encryption_key',
     'POSTGRES_DB=otto_control',
     'POSTGRES_USER=otto_control',
     '',

@@ -32,4 +32,23 @@ describe('production deployment assets', () => {
     expect(compose).not.toContain('"7788:7788"');
     expect(dockerfile).toContain('USER node');
   });
+
+  it('creates atomic verified backups and requires a safety backup before restore', () => {
+    const backup = repositoryFile('deploy/backup-postgres.sh');
+    const restore = repositoryFile('deploy/restore-postgres.sh');
+    const timer = repositoryFile('deploy/systemd/otto-control-backup.timer');
+    expect(backup).toContain('--format custom');
+    expect(backup).toContain('pg_restore --list');
+    expect(backup).toContain('.dump.enc');
+    expect(backup).toContain('backup-crypto.mjs');
+    expect(backup).toContain('mkfifo');
+    expect(backup).toContain('sha256sum');
+    expect(backup).toContain('CONTROL_BACKUP_RETENTION_DAYS');
+    expect(restore).toContain('--confirm=RESTORE_OTTO_CONTROL');
+    expect(restore.indexOf('backup-postgres.sh')).toBeLessThan(restore.indexOf('compose stop control'));
+    expect(restore).toContain('sha256sum --check');
+    expect(restore).toContain('backup-crypto.mjs');
+    expect(restore).toContain('/health/ready');
+    expect(timer).toContain('Persistent=true');
+  });
 });

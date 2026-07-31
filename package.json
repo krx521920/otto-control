@@ -9,11 +9,13 @@
   },
   "scripts": {
     "bootstrap:production": "node scripts/bootstrap-production.mjs",
+    "backup:production": "sh deploy/backup-postgres.sh",
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run lint && npm run typecheck && npm test && npm run build",
     "dev": "tsx watch src/server.ts",
     "lint": "eslint .",
     "start": "node dist/server.js",
+    "restore:production": "sh deploy/restore-postgres.sh",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

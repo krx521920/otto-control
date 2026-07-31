@@ -24,6 +24,10 @@ describe('production bootstrap', () => {
         join(output, 'secrets', 'postgres_password'),
         'utf8',
       ).trim();
+      const backupKey = readFileSync(
+        join(output, 'secrets', 'backup_encryption_key'),
+        'utf8',
+      ).trim();
       const signer = readFileSync(
         join(output, 'secrets', 'control_signer_private_key.pem'),
         'utf8',
@@ -32,6 +36,7 @@ describe('production bootstrap', () => {
       expect(environment).toContain('CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token');
       expect(environment).not.toContain(adminToken);
       expect(environment).not.toContain(databasePassword);
+      expect(environment).not.toContain(backupKey);
       expect(signer).toContain('BEGIN PRIVATE KEY');
 
       const repeated = spawnSync(process.execPath, [

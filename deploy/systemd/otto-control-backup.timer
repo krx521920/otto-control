@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Otto Control PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 02:20:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=otto-control-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Back up Otto Control PostgreSQL
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/opt/otto-control/.env.production
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/otto-control
+ExecStart=/bin/sh /opt/otto-control/deploy/backup-postgres.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+NoNewPrivileges=true

@@ -34,6 +34,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   volumes, read-only control runtime, and file-mounted secrets
 - One-command Ed25519 key and random credential bootstrap that refuses to
   overwrite an existing production identity
+- AES-256-GCM encrypted PostgreSQL backups with atomic publication, integrity
+  checks, retention, restore-before-write validation, and a systemd schedule
 
 ## Development
 
@@ -86,6 +88,44 @@ replacing it changes the signing identity and makes previously issued License
 and update-policy envelopes unverifiable. The bootstrap command uses exclusive
 file creation and fails instead of overwriting an existing identity.
 
+### Backup and restore
+
+Create an encrypted backup immediately:
+
+```bash
+npm run backup:production
+```
+
+To install the daily 02:20 systemd schedule on a deployment checked out at
+`/opt/otto-control`:
+
+```bash
+sudo install -m 0644 deploy/systemd/otto-control-backup.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/otto-control-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now otto-control-backup.timer
+systemctl list-timers otto-control-backup.timer
+```
+
+Backups are written atomically under `backups/` as `.dump.enc` plus a matching
+`.sha256` file. Database bytes are encrypted as a stream with AES-256-GCM, so an
+unencrypted dump is never written to disk. Copy encrypted backups and checksum
+files to off-site storage, but protect `secrets/backup_encryption_key` separately;
+losing that key makes every encrypted backup unrecoverable.
+
+Restore requires the exact confirmation phrase:
+
+```bash
+npm run restore:production -- /absolute/path/otto-control-TIMESTAMP.dump.enc \
+  --confirm=RESTORE_OTTO_CONTROL
+```
+
+The restore command checks SHA-256, authenticates and parses the encrypted dump,
+and creates a fresh safety backup before stopping the control service. It starts
+the service only after PostgreSQL restoration succeeds, then waits for the
+readiness endpoint. A failed destructive restore deliberately leaves the control
+service stopped so an operator cannot unknowingly write into partial data.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -113,6 +153,8 @@ file creation and fails instead of overwriting an existing identity.
 | `CONTROL_LEASE_DURATION_MS` | `600000` | Online lease lifetime; Otto refreshes every two minutes |
 | `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
 | `CONTROL_UPDATE_POLICY_DURATION_MS` | `300000` | Signed update decision lifetime, from one minute to one hour |
+| `CONTROL_BACKUP_RETENTION_DAYS` | `30` | Number of days encrypted local backups are retained |
+| `OTTO_CONTROL_BACKUP_KEY_FILE` | empty | File containing the backup encryption key |
 
 ## Commercial control flow
 
@@ -210,5 +252,5 @@ Traefik
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are automated backup/restore drills, operator-facing administration,
-and eventually the separate federation gateway.
+next phases are scheduled restore drills, signing-key rotation, operator-facing
+administration, and eventually the separate federation gateway.
