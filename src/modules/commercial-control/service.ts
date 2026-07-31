@@ -20,7 +20,12 @@ import {
   signTelemetryRequest,
   telemetryIntegrityHash,
 } from '../../crypto/telemetry-request.js';
-import type { PayloadSigner } from '../../crypto/signed-envelope.js';
+import { signPayload, type PayloadSigner } from '../../crypto/signed-envelope.js';
+import type {
+  ManagedSigningKeyring,
+  PublicSigningKey,
+  SignedKeyringEnvelope,
+} from '../../crypto/signing-keyring.js';
 import { conflict, invalidRequest, notFound, unauthorized } from '../../errors.js';
 import type {
   ControlStore,
@@ -33,6 +38,7 @@ import type { ControlTokenIssuer } from './token-issuer.js';
 const ID_PART_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{1,127}$/u;
 const DEPLOYMENT_ID_PATTERN = /^dep_[a-zA-Z0-9]{16,64}$/u;
 const MACHINE_FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u;
+const SIGNING_KEY_ID_PATTERN = /^[a-f0-9]{16}$/u;
 const NONCE_PATTERN = /^[a-zA-Z0-9._:-]{16,128}$/u;
 const MAX_LICENSE_DURATION_MS = 5 * 366 * 24 * 60 * 60 * 1000;
 const TELEMETRY_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -178,6 +184,7 @@ function licensePayload(
 export interface CommercialControlServiceOptions {
   store: ControlStore;
   signer: PayloadSigner;
+  keyring?: ManagedSigningKeyring;
   tokenIssuer: ControlTokenIssuer;
   publicBaseUrl: string;
   leaseDurationMs?: number;
@@ -188,6 +195,7 @@ export interface CommercialControlServiceOptions {
 export class CommercialControlService {
   readonly #store: ControlStore;
   readonly #signer: PayloadSigner;
+  readonly #keyring: ManagedSigningKeyring | null;
   readonly #tokens: ControlTokenIssuer;
   readonly #publicBaseUrl: string;
   readonly #leaseDurationMs: number;
@@ -197,6 +205,7 @@ export class CommercialControlService {
   constructor(options: CommercialControlServiceOptions) {
     this.#store = options.store;
     this.#signer = options.signer;
+    this.#keyring = options.keyring ?? null;
     this.#tokens = options.tokenIssuer;
     this.#publicBaseUrl = options.publicBaseUrl.replace(/\/$/u, '');
     this.#leaseDurationMs = options.leaseDurationMs ?? 10 * 60 * 1000;
@@ -219,12 +228,128 @@ export class CommercialControlService {
     await this.#store.close();
   }
 
-  signingKey(): { keyId: string; algorithm: 'ed25519'; publicKeyPem: string } {
+  async signingKey(): Promise<{
+    keyId: string;
+    algorithm: 'ed25519';
+    publicKeyPem: string;
+  }> {
+    if (this.#keyring) {
+      const active = (await this.#keyring.list()).find((key) => key.state === 'active');
+      if (!active) throw conflict('signing keyring has no active key');
+      return {
+        keyId: active.keyId,
+        algorithm: active.algorithm,
+        publicKeyPem: active.publicKeyPem,
+      };
+    }
     return {
       keyId: this.#signer.keyId,
       algorithm: 'ed25519',
       publicKeyPem: this.#signer.publicKeyPem,
     };
+  }
+
+  async signingKeys(): Promise<PublicSigningKey[]> {
+    if (this.#keyring) return this.#keyring.list();
+    const now = new Date();
+    return [{
+      keyId: this.#signer.keyId,
+      algorithm: 'ed25519',
+      publicKeyPem: this.#signer.publicKeyPem,
+      provider: 'local',
+      state: 'active',
+      createdAt: now,
+      activatedAt: now,
+      retiredAt: null,
+      revokedAt: null,
+      revocationReason: null,
+      updatedAt: now,
+      canSign: true,
+    }];
+  }
+
+  async publicSigningKeyring(): Promise<SignedKeyringEnvelope> {
+    if (this.#keyring) return this.#keyring.publicEnvelope(this.#now());
+    const generatedAtMs = this.#now();
+    const keyring = {
+      version: 1 as const,
+      activeKeyId: this.#signer.keyId,
+      revisionMs: generatedAtMs,
+      generatedAtMs,
+      expiresAtMs: generatedAtMs + 10 * 60 * 1000,
+      keys: [{
+        keyId: this.#signer.keyId,
+        algorithm: 'ed25519' as const,
+        publicKeyPem: this.#signer.publicKeyPem,
+        provider: 'local' as const,
+        state: 'active' as const,
+        activatedAt: null,
+        retiredAt: null,
+        revokedAt: null,
+      }],
+    };
+    return {
+      keyring,
+      signingKeyId: this.#signer.keyId,
+      signature: await this.#signer.sign(keyring),
+    };
+  }
+
+  async activateSigningKey(keyId: string, actorId: string): Promise<PublicSigningKey[]> {
+    if (!this.#keyring) throw conflict('managed signing keyring is not configured');
+    if (!SIGNING_KEY_ID_PATTERN.test(keyId)) throw invalidRequest('signing key id is invalid');
+    const transition = await this.#keyring.activate(keyId);
+    await this.#store.appendAuditEvent({
+      actorId,
+      action: 'signing_key.activated',
+      targetType: 'signing_key',
+      targetId: keyId,
+      detail: { previousActiveKeyId: transition.previousActiveKey?.keyId ?? null },
+    });
+    return this.#keyring.list();
+  }
+
+  async retireSigningKey(keyId: string, actorId: string): Promise<PublicSigningKey[]> {
+    if (!this.#keyring) throw conflict('managed signing keyring is not configured');
+    if (!SIGNING_KEY_ID_PATTERN.test(keyId)) throw invalidRequest('signing key id is invalid');
+    await this.#keyring.retire(keyId);
+    await this.#store.appendAuditEvent({
+      actorId,
+      action: 'signing_key.retired',
+      targetType: 'signing_key',
+      targetId: keyId,
+      detail: {},
+    });
+    return this.#keyring.list();
+  }
+
+  async revokeSigningKey(
+    keyId: string,
+    raw: unknown,
+    actorId: string,
+  ): Promise<PublicSigningKey[]> {
+    if (!this.#keyring) throw conflict('managed signing keyring is not configured');
+    if (!SIGNING_KEY_ID_PATTERN.test(keyId)) throw invalidRequest('signing key id is invalid');
+    const body = objectValue(raw);
+    const reason = requiredString(body, 'reason', 500);
+    const replacementKeyId = body.replacementKeyId === undefined || body.replacementKeyId === null
+      ? null
+      : requiredString(body, 'replacementKeyId', 64);
+    if (replacementKeyId && !SIGNING_KEY_ID_PATTERN.test(replacementKeyId)) {
+      throw invalidRequest('replacementKeyId is invalid');
+    }
+    const transition = await this.#keyring.revoke({ keyId, replacementKeyId, reason });
+    await this.#store.appendAuditEvent({
+      actorId,
+      action: 'signing_key.revoked',
+      targetType: 'signing_key',
+      targetId: keyId,
+      detail: {
+        reason,
+        replacementKeyId: transition.activeKey?.keyId ?? replacementKeyId,
+      },
+    });
+    return this.#keyring.list();
   }
 
   async createCustomer(raw: unknown, actorId: string): Promise<CustomerRecord> {
@@ -326,16 +451,17 @@ export class CommercialControlService {
       leaseEndpoint,
       tokenVersion: 1,
       signature: '',
-      signingKeyId: this.#signer.keyId,
+      signingKeyId: '',
       revokedAtMs: null,
       createdAt: new Date(issuedAtMs),
       updatedAt: new Date(issuedAtMs),
     };
     const payload = licensePayload(unsigned, this.#tokens);
-    const signature = await this.#signer.sign(payload);
+    const signed = await signPayload(this.#signer, payload);
     const stored = await this.#store.createLicense({
       ...unsigned,
-      signature,
+      signature: signed.signature,
+      signingKeyId: signed.signingKeyId,
     });
     await this.#store.appendAuditEvent({
       actorId,
@@ -351,13 +477,21 @@ export class CommercialControlService {
         expiresAtMs,
       },
     });
-    return { license: licensePayload(stored, this.#tokens), signature: stored.signature };
+    return {
+      license: licensePayload(stored, this.#tokens),
+      signingKeyId: stored.signingKeyId,
+      signature: stored.signature,
+    };
   }
 
   async getLicenseEnvelope(id: string): Promise<OttoSignedLicenseEnvelope> {
     const license = await this.#store.getLicense(id);
     if (!license) throw notFound('license not found');
-    return { license: licensePayload(license, this.#tokens), signature: license.signature };
+    return {
+      license: licensePayload(license, this.#tokens),
+      signingKeyId: license.signingKeyId,
+      signature: license.signature,
+    };
   }
 
   async revokeLicense(id: string, actorId: string): Promise<LicenseRecord> {
@@ -405,6 +539,7 @@ export class CommercialControlService {
     const issuedAtMs = this.#now();
     if (license.revokedAtMs !== null) throw unauthorized('License has been revoked');
     if (license.expiresAtMs <= issuedAtMs) throw unauthorized('License has expired');
+    await this.#keyring?.assertLicenseSigningKeyUsable(license.signingKeyId);
     const nonceAccepted = await this.#store.consumeLeaseNonce({
       deploymentId: license.deploymentId,
       nonce: body.nonce,
@@ -419,8 +554,8 @@ export class CommercialControlService {
       issuedAtMs,
       expiresAtMs: Math.min(issuedAtMs + this.#leaseDurationMs, license.expiresAtMs),
     };
-    const signature = await this.#signer.sign(lease);
-    return { lease, signature };
+    const signed = await signPayload(this.#signer, lease);
+    return { lease, ...signed };
   }
 
   async ingestTelemetry(

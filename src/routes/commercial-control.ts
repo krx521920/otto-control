@@ -35,7 +35,42 @@ export async function registerCommercialControlRoutes(
       return reply.code(201).send(envelope);
     });
 
-    admin.get('/signing-key', async () => ({ signingKey: options.service.signingKey() }));
+    admin.get('/signing-key', async () => ({
+      signingKey: await options.service.signingKey(),
+    }));
+
+    admin.get('/signing-keys', async () => ({ signingKeys: await options.service.signingKeys() }));
+
+    admin.post<{ Params: { keyId: string } }>(
+      '/signing-keys/:keyId/activate',
+      async (request) => ({
+        signingKeys: await options.service.activateSigningKey(
+          request.params.keyId,
+          actorId(request),
+        ),
+      }),
+    );
+
+    admin.post<{ Params: { keyId: string } }>(
+      '/signing-keys/:keyId/retire',
+      async (request) => ({
+        signingKeys: await options.service.retireSigningKey(
+          request.params.keyId,
+          actorId(request),
+        ),
+      }),
+    );
+
+    admin.post<{ Params: { keyId: string } }>(
+      '/signing-keys/:keyId/revoke',
+      async (request) => ({
+        signingKeys: await options.service.revokeSigningKey(
+          request.params.keyId,
+          request.body,
+          actorId(request),
+        ),
+      }),
+    );
 
     admin.get<{ Params: { licenseId: string } }>('/licenses/:licenseId', async (request) => (
       options.service.getLicenseEnvelope(request.params.licenseId)
@@ -61,6 +96,10 @@ export async function registerCommercialControlRoutes(
       ),
     }));
   }, { prefix: '/v1/admin' });
+
+  app.get('/v1/signing-keyring', {
+    config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+  }, async () => options.service.publicSigningKeyring());
 
   app.post<{ Params: { licenseId: string } }>(
     '/v1/licenses/:licenseId/lease',

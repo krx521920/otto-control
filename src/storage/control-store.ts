@@ -8,6 +8,29 @@ import type { UpdateChannel, UpdateReleaseState } from '../contracts/update-poli
 
 export type RecordStatus = 'active' | 'suspended';
 
+export type SigningKeyState = 'standby' | 'active' | 'retired' | 'revoked';
+export type SigningKeyProvider = 'local' | 'kms' | 'hsm';
+
+export interface SigningKeyRecord {
+  keyId: string;
+  algorithm: 'ed25519';
+  publicKeyPem: string;
+  provider: SigningKeyProvider;
+  state: SigningKeyState;
+  createdAt: Date;
+  activatedAt: Date | null;
+  retiredAt: Date | null;
+  revokedAt: Date | null;
+  revocationReason: string | null;
+  updatedAt: Date;
+}
+
+export interface SigningKeyTransition {
+  key: SigningKeyRecord;
+  activeKey: SigningKeyRecord | null;
+  previousActiveKey: SigningKeyRecord | null;
+}
+
 export interface CustomerRecord {
   id: string;
   name: string;
@@ -118,6 +141,21 @@ export interface ControlStore {
   createLicense(input: CreateLicenseRecordInput): Promise<LicenseRecord>;
   getLicense(id: string): Promise<LicenseRecord | null>;
   revokeLicense(id: string, revokedAtMs: number): Promise<LicenseRecord | null>;
+  registerSigningKey(input: {
+    keyId: string;
+    publicKeyPem: string;
+    provider: SigningKeyProvider;
+  }): Promise<SigningKeyRecord>;
+  getSigningKey(keyId: string): Promise<SigningKeyRecord | null>;
+  listSigningKeys(): Promise<SigningKeyRecord[]>;
+  activateSigningKey(keyId: string, changedAt: Date): Promise<SigningKeyTransition | null>;
+  retireSigningKey(keyId: string, changedAt: Date): Promise<SigningKeyTransition | null>;
+  revokeSigningKey(input: {
+    keyId: string;
+    replacementKeyId: string | null;
+    reason: string;
+    changedAt: Date;
+  }): Promise<SigningKeyTransition | null>;
   consumeLeaseNonce(input: {
     deploymentId: string;
     nonce: string;

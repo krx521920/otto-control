@@ -32,12 +32,23 @@ describe('production bootstrap', () => {
         join(output, 'secrets', 'control_signer_private_key.pem'),
         'utf8',
       );
+      const keyring = JSON.parse(readFileSync(
+        join(output, 'secrets', 'control_signer_keyring.json'),
+        'utf8',
+      )) as { version: number; keys: Array<{ privateKeyFile: string }> };
       expect(environment).toContain('CONTROL_PUBLIC_BASE_URL=https://control.example.test');
       expect(environment).toContain('CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token');
+      expect(environment).toContain(
+        'CONTROL_SIGNER_KEYRING_FILE=/run/otto-secrets/control_signer_keyring.json',
+      );
       expect(environment).not.toContain(adminToken);
       expect(environment).not.toContain(databasePassword);
       expect(environment).not.toContain(backupKey);
       expect(signer).toContain('BEGIN PRIVATE KEY');
+      expect(keyring).toEqual({
+        version: 1,
+        keys: [{ provider: 'local', privateKeyFile: 'control_signer_private_key.pem' }],
+      });
 
       const repeated = spawnSync(process.execPath, [
         'scripts/bootstrap-production.mjs',

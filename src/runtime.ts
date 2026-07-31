@@ -1,7 +1,6 @@
-import { readFile } from 'node:fs/promises';
-
 import type { ControlConfig } from './config.js';
-import { LocalEd25519Signer } from './crypto/signed-envelope.js';
+import { ManagedSigningKeyring } from './crypto/signing-keyring.js';
+import { loadSigningProviders } from './crypto/signing-provider-config.js';
 import { CommercialControlService } from './modules/commercial-control/service.js';
 import { ControlTokenIssuer } from './modules/commercial-control/token-issuer.js';
 import { UpdatePolicyService } from './modules/update-policy/service.js';
@@ -19,7 +18,9 @@ function missingConfiguration(config: Readonly<ControlConfig>): string[] {
   if (!config.publicBaseUrl) missing.push('CONTROL_PUBLIC_BASE_URL');
   if (!config.adminToken) missing.push('CONTROL_ADMIN_TOKEN');
   if (!config.tokenSecret) missing.push('CONTROL_TOKEN_SECRET');
-  if (!config.signerPrivateKeyFile) missing.push('CONTROL_SIGNER_PRIVATE_KEY_FILE');
+  if (!config.signerPrivateKeyFile && !config.signerKeyringFile) {
+    missing.push('CONTROL_SIGNER_PRIVATE_KEY_FILE or CONTROL_SIGNER_KEYRING_FILE');
+  }
   return missing;
 }
 
@@ -38,15 +39,20 @@ export async function createCommercialControlRuntime(
     ssl: config.databaseSsl,
   });
   try {
-    // The path should be a read-only Docker/Kubernetes secret mount in production.
-    const privateKey = await readFile(config.signerPrivateKeyFile!, 'utf8');
-    const signer = new LocalEd25519Signer(privateKey);
+    // Local files should be read-only secret mounts. KMS/HSM adapters implement
+    // PayloadSigner and can be registered without changing either service.
+    const providerConfig = await loadSigningProviders(config);
+    const signer = await ManagedSigningKeyring.create({
+      store,
+      ...providerConfig,
+    });
     const tokenIssuer = new ControlTokenIssuer(config.tokenSecret!);
     return {
       adminToken: config.adminToken!,
       service: new CommercialControlService({
         store,
         signer,
+        keyring: signer,
         tokenIssuer,
         publicBaseUrl: config.publicBaseUrl!,
         leaseDurationMs: config.leaseDurationMs,

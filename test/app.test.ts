@@ -17,6 +17,7 @@ const testConfig: Readonly<ControlConfig> = {
   adminToken: null,
   tokenSecret: null,
   signerPrivateKeyFile: null,
+  signerKeyringFile: null,
   leaseDurationMs: 600_000,
   telemetryRetentionDays: 90,
   updatePolicyDurationMs: 300_000,

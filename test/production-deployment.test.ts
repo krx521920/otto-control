@@ -20,8 +20,10 @@ describe('production deployment assets', () => {
     expect(compose).toContain('read_only: true');
     expect(compose).toContain('no-new-privileges:true');
     expect(compose).toContain('cap_drop:');
-    expect(compose).toContain('- control_signer_private_key');
+    expect(compose).toContain('- source: control_signer_private_key');
+    expect(compose).toContain('target: control_signer_private_key.pem');
     expect(compose).toContain('file: ./secrets/control_signer_private_key.pem');
+    expect(compose).toContain('./secrets:/run/otto-secrets:ro');
     expect(compose).not.toMatch(/POSTGRES_PASSWORD:\s*[^\n]/u);
   });
 
@@ -60,6 +62,7 @@ describe('production deployment assets', () => {
     expect(drill).toContain('--template template0');
     expect(drill).toContain('control_schema_migrations');
     expect(drill).toContain('control_deployment_update_assignments');
+    expect(drill).toContain('control_signing_keys');
     expect(drill).toContain('result=passed');
     expect(drill).toContain('CONTROL_DRILL_MAX_BACKUP_AGE_HOURS');
     expect(drill).toContain('backup_age_seconds');

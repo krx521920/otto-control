@@ -17,6 +17,10 @@ import type {
   DeploymentRecord,
   LicenseRecord,
   RecordStatus,
+  SigningKeyProvider,
+  SigningKeyRecord,
+  SigningKeyState,
+  SigningKeyTransition,
   UpdateDistributionRecord,
   UpdateReleaseRecord,
   UpdateReleaseTransition,
@@ -70,6 +74,20 @@ interface LicenseRow {
   signing_key_id: string;
   revoked_at_ms: string | null;
   created_at: Date;
+  updated_at: Date;
+}
+
+interface SigningKeyRow {
+  key_id: string;
+  algorithm: 'ed25519';
+  public_key_pem: string;
+  provider: SigningKeyProvider;
+  state: SigningKeyState;
+  created_at: Date;
+  activated_at: Date | null;
+  retired_at: Date | null;
+  revoked_at: Date | null;
+  revocation_reason: string | null;
   updated_at: Date;
 }
 
@@ -167,6 +185,22 @@ function licenseFromRow(row: LicenseRow): LicenseRecord {
     signingKeyId: row.signing_key_id,
     revokedAtMs: row.revoked_at_ms === null ? null : Number(row.revoked_at_ms),
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function signingKeyFromRow(row: SigningKeyRow): SigningKeyRecord {
+  return {
+    keyId: row.key_id,
+    algorithm: row.algorithm,
+    publicKeyPem: row.public_key_pem,
+    provider: row.provider,
+    state: row.state,
+    createdAt: row.created_at,
+    activatedAt: row.activated_at,
+    retiredAt: row.retired_at,
+    revokedAt: row.revoked_at,
+    revocationReason: row.revocation_reason,
     updatedAt: row.updated_at,
   };
 }
@@ -357,6 +391,213 @@ export class PostgresControlStore implements ControlStore {
       [id, revokedAtMs],
     );
     return result.rows[0] ? licenseFromRow(result.rows[0]) : null;
+  }
+
+  async registerSigningKey(input: {
+    keyId: string;
+    publicKeyPem: string;
+    provider: SigningKeyProvider;
+  }): Promise<SigningKeyRecord> {
+    const result = await this.#pool.query<SigningKeyRow>(
+      `INSERT INTO control_signing_keys (key_id, public_key_pem, provider)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (key_id) DO NOTHING
+       RETURNING *`,
+      [input.keyId, input.publicKeyPem, input.provider],
+    );
+    const row = result.rows[0] ?? (await this.#pool.query<SigningKeyRow>(
+      'SELECT * FROM control_signing_keys WHERE key_id = $1',
+      [input.keyId],
+    )).rows[0];
+    if (!row) throw new Error('signing key registration did not persist');
+    const record = signingKeyFromRow(row);
+    if (record.publicKeyPem !== input.publicKeyPem || record.provider !== input.provider) {
+      throw conflict('signing key id is already bound to another provider or public key');
+    }
+    return record;
+  }
+
+  async getSigningKey(keyId: string): Promise<SigningKeyRecord | null> {
+    const result = await this.#pool.query<SigningKeyRow>(
+      'SELECT * FROM control_signing_keys WHERE key_id = $1',
+      [keyId],
+    );
+    return result.rows[0] ? signingKeyFromRow(result.rows[0]) : null;
+  }
+
+  async listSigningKeys(): Promise<SigningKeyRecord[]> {
+    const result = await this.#pool.query<SigningKeyRow>(
+      `SELECT * FROM control_signing_keys
+       ORDER BY
+         CASE state WHEN 'active' THEN 0 WHEN 'standby' THEN 1
+           WHEN 'retired' THEN 2 ELSE 3 END,
+         created_at DESC`,
+    );
+    return result.rows.map(signingKeyFromRow);
+  }
+
+  async activateSigningKey(
+    keyId: string,
+    changedAt: Date,
+  ): Promise<SigningKeyTransition | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('otto_control_signing_keys'))");
+      const targetResult = await client.query<SigningKeyRow>(
+        'SELECT * FROM control_signing_keys WHERE key_id = $1 FOR UPDATE',
+        [keyId],
+      );
+      const target = targetResult.rows[0];
+      if (!target) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (target.state === 'revoked') throw conflict('revoked signing key cannot be activated');
+      const previousResult = await client.query<SigningKeyRow>(
+        "SELECT * FROM control_signing_keys WHERE state = 'active' AND key_id <> $1 FOR UPDATE",
+        [keyId],
+      );
+      const previous = previousResult.rows[0] ?? null;
+      if (previous) {
+        await client.query(
+          `UPDATE control_signing_keys
+           SET state = 'retired', retired_at = $2, updated_at = $2
+           WHERE key_id = $1`,
+          [previous.key_id, changedAt],
+        );
+      }
+      const activeResult = await client.query<SigningKeyRow>(
+        `UPDATE control_signing_keys
+         SET state = 'active', activated_at = COALESCE(activated_at, $2),
+             retired_at = NULL, updated_at = $2
+         WHERE key_id = $1
+         RETURNING *`,
+        [keyId, changedAt],
+      );
+      await client.query('COMMIT');
+      return {
+        key: signingKeyFromRow(activeResult.rows[0]!),
+        activeKey: signingKeyFromRow(activeResult.rows[0]!),
+        previousActiveKey: previous ? signingKeyFromRow(previous) : null,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async retireSigningKey(
+    keyId: string,
+    changedAt: Date,
+  ): Promise<SigningKeyTransition | null> {
+    const result = await this.#pool.query<SigningKeyRow>(
+      `UPDATE control_signing_keys
+       SET state = 'retired', retired_at = COALESCE(retired_at, $2), updated_at = $2
+       WHERE key_id = $1 AND state IN ('standby', 'retired')
+       RETURNING *`,
+      [keyId, changedAt],
+    );
+    if (!result.rows[0]) {
+      const existing = await this.getSigningKey(keyId);
+      if (!existing) return null;
+      if (existing.state === 'active') throw conflict('activate a replacement before retiring the active key');
+      throw conflict('revoked signing key cannot be retired');
+    }
+    const activeResult = await this.#pool.query<SigningKeyRow>(
+      "SELECT * FROM control_signing_keys WHERE state = 'active'",
+    );
+    return {
+      key: signingKeyFromRow(result.rows[0]),
+      activeKey: activeResult.rows[0] ? signingKeyFromRow(activeResult.rows[0]) : null,
+      previousActiveKey: null,
+    };
+  }
+
+  async revokeSigningKey(input: {
+    keyId: string;
+    replacementKeyId: string | null;
+    reason: string;
+    changedAt: Date;
+  }): Promise<SigningKeyTransition | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('otto_control_signing_keys'))");
+      const targetResult = await client.query<SigningKeyRow>(
+        'SELECT * FROM control_signing_keys WHERE key_id = $1 FOR UPDATE',
+        [input.keyId],
+      );
+      const target = targetResult.rows[0];
+      if (!target) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (target.state === 'revoked') {
+        const activeResult = await client.query<SigningKeyRow>(
+          "SELECT * FROM control_signing_keys WHERE state = 'active'",
+        );
+        await client.query('COMMIT');
+        return {
+          key: signingKeyFromRow(target),
+          activeKey: activeResult.rows[0] ? signingKeyFromRow(activeResult.rows[0]) : null,
+          previousActiveKey: null,
+        };
+      }
+      let replacement: SigningKeyRow | null = null;
+      if (target.state === 'active') {
+        if (!input.replacementKeyId || input.replacementKeyId === input.keyId) {
+          throw conflict('revoking the active key requires a different replacement key');
+        }
+        const replacementResult = await client.query<SigningKeyRow>(
+          'SELECT * FROM control_signing_keys WHERE key_id = $1 FOR UPDATE',
+          [input.replacementKeyId],
+        );
+        replacement = replacementResult.rows[0] ?? null;
+        if (!replacement) throw conflict('replacement signing key does not exist');
+        if (replacement.state === 'revoked') {
+          throw conflict('revoked signing key cannot be used as a replacement');
+        }
+      }
+      const revokedResult = await client.query<SigningKeyRow>(
+        `UPDATE control_signing_keys
+         SET state = 'revoked', revoked_at = $2, revocation_reason = $3,
+             retired_at = COALESCE(retired_at, $2), updated_at = $2
+         WHERE key_id = $1
+         RETURNING *`,
+        [input.keyId, input.changedAt, input.reason],
+      );
+      let activeKey: SigningKeyRecord | null = null;
+      if (replacement) {
+        const activeResult = await client.query<SigningKeyRow>(
+          `UPDATE control_signing_keys
+           SET state = 'active', activated_at = COALESCE(activated_at, $2),
+               retired_at = NULL, updated_at = $2
+           WHERE key_id = $1
+           RETURNING *`,
+          [replacement.key_id, input.changedAt],
+        );
+        activeKey = signingKeyFromRow(activeResult.rows[0]!);
+      } else {
+        const activeResult = await client.query<SigningKeyRow>(
+          "SELECT * FROM control_signing_keys WHERE state = 'active'",
+        );
+        activeKey = activeResult.rows[0] ? signingKeyFromRow(activeResult.rows[0]) : null;
+      }
+      await client.query('COMMIT');
+      return {
+        key: signingKeyFromRow(revokedResult.rows[0]!),
+        activeKey,
+        previousActiveKey: target.state === 'active' ? signingKeyFromRow(target) : null,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async consumeLeaseNonce(input: {

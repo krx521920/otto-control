@@ -7,6 +7,9 @@ import type {
   DeploymentUpdateAssignmentRecord,
   DeploymentRecord,
   LicenseRecord,
+  SigningKeyProvider,
+  SigningKeyRecord,
+  SigningKeyTransition,
   UpdateDistributionRecord,
   UpdateReleaseRecord,
   UpdateReleaseTransition,
@@ -27,6 +30,7 @@ export class MemoryControlStore implements ControlStore {
   readonly customers = new Map<string, CustomerRecord>();
   readonly deployments = new Map<string, DeploymentRecord>();
   readonly licenses = new Map<string, LicenseRecord>();
+  readonly signingKeys = new Map<string, SigningKeyRecord>();
   readonly nonces = new Set<string>();
   readonly audits: AuditEventInput[] = [];
   readonly telemetryEvents = new Map<string, StoredTelemetryEvent>();
@@ -98,6 +102,140 @@ export class MemoryControlStore implements ControlStore {
     };
     this.licenses.set(id, updated);
     return updated;
+  }
+
+  async registerSigningKey(input: {
+    keyId: string;
+    publicKeyPem: string;
+    provider: SigningKeyProvider;
+  }): Promise<SigningKeyRecord> {
+    const existing = this.signingKeys.get(input.keyId);
+    if (existing) {
+      if (existing.publicKeyPem !== input.publicKeyPem || existing.provider !== input.provider) {
+        throw new Error('signing key id is already bound to another provider or public key');
+      }
+      return existing;
+    }
+    const now = new Date();
+    const key: SigningKeyRecord = {
+      ...input,
+      algorithm: 'ed25519',
+      state: 'standby',
+      createdAt: now,
+      activatedAt: null,
+      retiredAt: null,
+      revokedAt: null,
+      revocationReason: null,
+      updatedAt: now,
+    };
+    this.signingKeys.set(key.keyId, key);
+    return key;
+  }
+
+  async getSigningKey(keyId: string): Promise<SigningKeyRecord | null> {
+    return this.signingKeys.get(keyId) ?? null;
+  }
+
+  async listSigningKeys(): Promise<SigningKeyRecord[]> {
+    return [...this.signingKeys.values()];
+  }
+
+  async activateSigningKey(
+    keyId: string,
+    changedAt: Date,
+  ): Promise<SigningKeyTransition | null> {
+    const target = this.signingKeys.get(keyId);
+    if (!target) return null;
+    if (target.state === 'revoked') throw new Error('revoked signing key cannot be activated');
+    const previous = [...this.signingKeys.values()].find((key) => key.state === 'active');
+    if (previous && previous.keyId !== keyId) {
+      this.signingKeys.set(previous.keyId, {
+        ...previous,
+        state: 'retired',
+        retiredAt: changedAt,
+        updatedAt: changedAt,
+      });
+    }
+    const active: SigningKeyRecord = {
+      ...target,
+      state: 'active',
+      activatedAt: target.activatedAt ?? changedAt,
+      retiredAt: null,
+      updatedAt: changedAt,
+    };
+    this.signingKeys.set(keyId, active);
+    return { key: active, activeKey: active, previousActiveKey: previous ?? null };
+  }
+
+  async retireSigningKey(
+    keyId: string,
+    changedAt: Date,
+  ): Promise<SigningKeyTransition | null> {
+    const target = this.signingKeys.get(keyId);
+    if (!target) return null;
+    if (target.state === 'active') throw new Error('activate a replacement before retiring the active key');
+    if (target.state === 'revoked') throw new Error('revoked signing key cannot be retired');
+    const retired: SigningKeyRecord = {
+      ...target,
+      state: 'retired',
+      retiredAt: target.retiredAt ?? changedAt,
+      updatedAt: changedAt,
+    };
+    this.signingKeys.set(keyId, retired);
+    return {
+      key: retired,
+      activeKey: [...this.signingKeys.values()].find((key) => key.state === 'active') ?? null,
+      previousActiveKey: null,
+    };
+  }
+
+  async revokeSigningKey(input: {
+    keyId: string;
+    replacementKeyId: string | null;
+    reason: string;
+    changedAt: Date;
+  }): Promise<SigningKeyTransition | null> {
+    const target = this.signingKeys.get(input.keyId);
+    if (!target) return null;
+    if (target.state === 'revoked') {
+      return {
+        key: target,
+        activeKey: [...this.signingKeys.values()].find((key) => key.state === 'active') ?? null,
+        previousActiveKey: null,
+      };
+    }
+    let activeKey = [...this.signingKeys.values()].find((key) => key.state === 'active') ?? null;
+    if (target.state === 'active') {
+      if (!input.replacementKeyId || input.replacementKeyId === input.keyId) {
+        throw new Error('revoking the active key requires a different replacement key');
+      }
+      const replacement = this.signingKeys.get(input.replacementKeyId);
+      if (!replacement || replacement.state === 'revoked') {
+        throw new Error('replacement signing key does not exist');
+      }
+      activeKey = {
+        ...replacement,
+        state: 'active',
+        activatedAt: replacement.activatedAt ?? input.changedAt,
+        retiredAt: null,
+        updatedAt: input.changedAt,
+      };
+      this.signingKeys.set(activeKey.keyId, activeKey);
+    }
+    const revoked: SigningKeyRecord = {
+      ...target,
+      state: 'revoked',
+      revokedAt: input.changedAt,
+      retiredAt: target.retiredAt ?? input.changedAt,
+      revocationReason: input.reason,
+      updatedAt: input.changedAt,
+    };
+    this.signingKeys.set(input.keyId, revoked);
+    return {
+      key: revoked,
+      activeKey: activeKey?.keyId === revoked.keyId ? null : activeKey,
+      previousActiveKey: target.state === 'active' ? target : null,
+    };
   }
 
   async consumeLeaseNonce(input: {

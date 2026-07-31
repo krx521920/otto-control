@@ -28,6 +28,7 @@ function main() {
   const targets = [
     resolve(root, '.env.production'),
     resolve(secretDirectory, 'control_signer_private_key.pem'),
+    resolve(secretDirectory, 'control_signer_keyring.json'),
     resolve(secretDirectory, 'control_admin_token'),
     resolve(secretDirectory, 'control_token_secret'),
     resolve(secretDirectory, 'postgres_password'),
@@ -42,6 +43,16 @@ function main() {
   writeSecret(
     resolve(secretDirectory, 'control_signer_private_key.pem'),
     privateKey.export({ type: 'pkcs8', format: 'pem' }),
+  );
+  writeSecret(
+    resolve(secretDirectory, 'control_signer_keyring.json'),
+    JSON.stringify({
+      version: 1,
+      keys: [{
+        provider: 'local',
+        privateKeyFile: 'control_signer_private_key.pem',
+      }],
+    }, null, 2),
   );
   writeSecret(resolve(secretDirectory, 'control_admin_token'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'control_token_secret'), randomBytes(48).toString('base64url'));
@@ -64,7 +75,7 @@ function main() {
     'CONTROL_DATABASE_SSL=false',
     'CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token',
     'CONTROL_TOKEN_SECRET_FILE=/run/secrets/control_token_secret',
-    'CONTROL_SIGNER_PRIVATE_KEY_FILE=/run/secrets/control_signer_private_key.pem',
+    'CONTROL_SIGNER_KEYRING_FILE=/run/otto-secrets/control_signer_keyring.json',
     'CONTROL_LEASE_DURATION_MS=600000',
     'CONTROL_TELEMETRY_RETENTION_DAYS=90',
     'CONTROL_UPDATE_POLICY_DURATION_MS=300000',

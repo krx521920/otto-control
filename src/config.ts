@@ -16,6 +16,7 @@ export interface ControlConfig {
   adminToken: string | null;
   tokenSecret: string | null;
   signerPrivateKeyFile: string | null;
+  signerKeyringFile: string | null;
   leaseDurationMs: number;
   telemetryRetentionDays: number;
   updatePolicyDurationMs: number;
@@ -202,6 +203,11 @@ export function loadControlConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): Readonly<ControlConfig> {
   const environment = parseEnvironment(env.NODE_ENV);
+  const signerPrivateKeyFile = env.CONTROL_SIGNER_PRIVATE_KEY_FILE?.trim() || null;
+  const signerKeyringFile = env.CONTROL_SIGNER_KEYRING_FILE?.trim() || null;
+  if (signerPrivateKeyFile && signerKeyringFile) {
+    throw new Error('CONTROL_SIGNER_PRIVATE_KEY_FILE and CONTROL_SIGNER_KEYRING_FILE cannot both be set');
+  }
   return Object.freeze({
     environment,
     host: env.CONTROL_HOST?.trim() || '127.0.0.1',
@@ -209,7 +215,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.4.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.5.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -218,7 +224,8 @@ export function loadControlConfig(
     ),
     adminToken: secretFromEnvironment(env, 'CONTROL_ADMIN_TOKEN', 'CONTROL_ADMIN_TOKEN_FILE'),
     tokenSecret: secretFromEnvironment(env, 'CONTROL_TOKEN_SECRET', 'CONTROL_TOKEN_SECRET_FILE'),
-    signerPrivateKeyFile: env.CONTROL_SIGNER_PRIVATE_KEY_FILE?.trim() || null,
+    signerPrivateKeyFile,
+    signerKeyringFile,
     leaseDurationMs: parseLeaseDuration(env.CONTROL_LEASE_DURATION_MS),
     telemetryRetentionDays: parseRetentionDays(env.CONTROL_TELEMETRY_RETENTION_DAYS),
     updatePolicyDurationMs: parseUpdatePolicyDuration(env.CONTROL_UPDATE_POLICY_DURATION_MS),

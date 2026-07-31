@@ -8,7 +8,7 @@ import type {
 } from '../../contracts/update-policy.js';
 import { UPDATE_CHANNELS } from '../../contracts/update-policy.js';
 import { secureTextMatches, signTelemetryRequest } from '../../crypto/telemetry-request.js';
-import type { PayloadSigner } from '../../crypto/signed-envelope.js';
+import { signPayload, type PayloadSigner } from '../../crypto/signed-envelope.js';
 import { conflict, invalidRequest, notFound, unauthorized } from '../../errors.js';
 import type {
   ControlStore,
@@ -453,6 +453,6 @@ export class UpdatePolicyService {
       issuedAtMs: now,
       expiresAtMs: now + this.#policyDurationMs,
     };
-    return { policy, signature: await this.#signer.sign(policy) };
+    return { policy, ...await signPayload(this.#signer, policy) };
   }
 }

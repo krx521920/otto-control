@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildControlApp } from '../src/app.js';
 import type { ControlConfig } from '../src/config.js';
 import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import { ManagedSigningKeyring } from '../src/crypto/signing-keyring.js';
 import {
   signTelemetryRequest,
   telemetryIntegrityHash,
@@ -29,6 +30,7 @@ const config: Readonly<ControlConfig> = {
   adminToken: ADMIN_TOKEN,
   tokenSecret: 'test-control-token-secret-that-is-long-enough',
   signerPrivateKeyFile: null,
+  signerKeyringFile: null,
   leaseDurationMs: 600_000,
   telemetryRetentionDays: 90,
   updatePolicyDurationMs: 300_000,
@@ -36,6 +38,8 @@ const config: Readonly<ControlConfig> = {
 
 describe('commercial control HTTP routes', () => {
   let app: FastifyInstance;
+  let activeKeyId: string;
+  let standbyKeyId: string;
 
   beforeEach(async () => {
     const keys = generateKeyPairSync('ed25519');
@@ -43,10 +47,24 @@ describe('commercial control HTTP routes', () => {
     const signer = new LocalEd25519Signer(
       keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
     );
+    const standbyKeys = generateKeyPairSync('ed25519');
+    const standbySigner = new LocalEd25519Signer(
+      standbyKeys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+    );
+    activeKeyId = signer.keyId;
+    standbyKeyId = standbySigner.keyId;
+    const keyring = await ManagedSigningKeyring.create({
+      store,
+      providers: [
+        { signer, provider: 'local' },
+        { signer: standbySigner, provider: 'local' },
+      ],
+    });
     const tokenIssuer = new ControlTokenIssuer(config.tokenSecret!);
     const service = new CommercialControlService({
       store,
-      signer,
+      signer: keyring,
+      keyring,
       tokenIssuer,
       publicBaseUrl: config.publicBaseUrl!,
     });
@@ -56,9 +74,38 @@ describe('commercial control HTTP routes', () => {
       commercialControl: {
         adminToken: ADMIN_TOKEN,
         service,
-        updatePolicy: new UpdatePolicyService({ store, signer, tokenIssuer }),
+        updatePolicy: new UpdatePolicyService({ store, signer: keyring, tokenIssuer }),
       },
     });
+  });
+
+  it('activates, retires, and revokes signing keys through audited admin routes', async () => {
+    const headers = {
+      authorization: `Bearer ${ADMIN_TOKEN}`,
+      'x-otto-actor': 'security-operator',
+    };
+    const activated = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/signing-keys/${standbyKeyId}/activate`,
+      headers,
+    });
+    expect(activated.statusCode).toBe(200);
+    expect(activated.json().signingKeys).toEqual(expect.arrayContaining([
+      expect.objectContaining({ keyId: activeKeyId, state: 'retired' }),
+      expect.objectContaining({ keyId: standbyKeyId, state: 'active' }),
+    ]));
+
+    const revoked = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/signing-keys/${activeKeyId}/revoke`,
+      headers,
+      payload: { reason: 'confirmed key exposure' },
+    });
+    expect(revoked.statusCode).toBe(200);
+    expect(revoked.json().signingKeys).toEqual(expect.arrayContaining([
+      expect.objectContaining({ keyId: activeKeyId, state: 'revoked' }),
+      expect.objectContaining({ keyId: standbyKeyId, state: 'active' }),
+    ]));
   });
 
   afterEach(async () => app.close());
@@ -77,6 +124,7 @@ describe('commercial control HTTP routes', () => {
       'health',
       'customer_deployment',
       'license_authority',
+      'signing_key_rotation',
       'lease_revocation',
       'telemetry_health',
       'update_policy',
@@ -90,6 +138,13 @@ describe('commercial control HTTP routes', () => {
     expect(signingKey.statusCode).toBe(200);
     expect(signingKey.json().signingKey).toMatchObject({ algorithm: 'ed25519' });
     expect(signingKey.json().signingKey.publicKeyPem).toContain('BEGIN PUBLIC KEY');
+
+    const keyring = await app.inject({ method: 'GET', url: '/v1/signing-keyring' });
+    expect(keyring.statusCode).toBe(200);
+    expect(keyring.json()).toMatchObject({
+      keyring: { version: 1, activeKeyId: signingKey.json().signingKey.keyId },
+      signingKeyId: signingKey.json().signingKey.keyId,
+    });
   });
 
   it('creates a deployment, issues a License, and serves Otto lease refreshes', async () => {
@@ -130,6 +185,7 @@ describe('commercial control HTTP routes', () => {
       },
     });
     expect(licenseResponse.statusCode).toBe(201);
+    expect(licenseResponse.json().signingKeyId).toMatch(/^[a-f0-9]{16}$/u);
     const license = licenseResponse.json().license as Record<string, unknown>;
 
     const leaseResponse = await app.inject({

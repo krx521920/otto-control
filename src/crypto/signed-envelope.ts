@@ -47,6 +47,22 @@ export interface PayloadSigner {
   sign(payload: unknown): Promise<string>;
 }
 
+export interface SignedPayload {
+  signingKeyId: string;
+  signature: string;
+}
+
+export async function signPayload(
+  signer: PayloadSigner,
+  payload: unknown,
+): Promise<SignedPayload> {
+  if ('signWithKey' in signer && typeof signer.signWithKey === 'function') {
+    return signer.signWithKey(payload) as Promise<SignedPayload>;
+  }
+  const signingKeyId = signer.keyId;
+  return { signingKeyId, signature: await signer.sign(payload) };
+}
+
 export class LocalEd25519Signer implements PayloadSigner {
   readonly keyId: string;
   readonly publicKeyPem: string;

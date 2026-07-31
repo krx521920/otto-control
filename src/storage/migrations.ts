@@ -172,6 +172,33 @@ const MIGRATIONS: Migration[] = [
        ADD PRIMARY KEY (deployment_id, distribution_id)`,
     ],
   },
+  {
+    id: '005_signing_keyring',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_signing_keys (
+        key_id TEXT PRIMARY KEY,
+        algorithm TEXT NOT NULL DEFAULT 'ed25519' CHECK (algorithm = 'ed25519'),
+        public_key_pem TEXT NOT NULL,
+        provider TEXT NOT NULL CHECK (provider IN ('local', 'kms', 'hsm')),
+        state TEXT NOT NULL DEFAULT 'standby'
+          CHECK (state IN ('standby', 'active', 'retired', 'revoked')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        activated_at TIMESTAMPTZ,
+        retired_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        revocation_reason TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CHECK ((state = 'revoked') = (revoked_at IS NOT NULL)),
+        CHECK ((state = 'revoked') = (revocation_reason IS NOT NULL))
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_signing_keys_one_active
+       ON control_signing_keys ((state)) WHERE state = 'active'`,
+      `CREATE INDEX IF NOT EXISTS idx_control_signing_keys_state
+       ON control_signing_keys(state, updated_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_licenses_signing_key
+       ON control_licenses(signing_key_id, created_at DESC)`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

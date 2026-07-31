@@ -30,6 +30,7 @@ export interface OttoLicensePayload {
 
 export interface OttoSignedLicenseEnvelope {
   license: OttoLicensePayload;
+  signingKeyId: string;
   signature: string;
 }
 
@@ -53,6 +54,7 @@ export interface OttoLeasePayload {
 
 export interface OttoSignedLeaseEnvelope {
   lease: OttoLeasePayload;
+  signingKeyId: string;
   signature: string;
 }
 

@@ -34,6 +34,6 @@ export interface OttoUpdatePolicyPayload {
 
 export interface OttoSignedUpdatePolicyEnvelope {
   policy: OttoUpdatePolicyPayload;
+  signingKeyId: string;
   signature: string;
 }
-

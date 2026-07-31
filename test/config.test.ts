@@ -85,5 +85,11 @@ describe('control configuration', () => {
       CONTROL_DATABASE_URL: 'postgresql://otto:secret@localhost/otto',
       CONTROL_DATABASE_HOST: 'postgres',
     })).toThrow('CONTROL_DATABASE_URL cannot be combined with database component settings');
+    expect(() => loadControlConfig({
+      CONTROL_SIGNER_PRIVATE_KEY_FILE: 'current.pem',
+      CONTROL_SIGNER_KEYRING_FILE: 'keyring.json',
+    })).toThrow(
+      'CONTROL_SIGNER_PRIVATE_KEY_FILE and CONTROL_SIGNER_KEYRING_FILE cannot both be set',
+    );
   });
 });

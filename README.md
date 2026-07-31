@@ -22,6 +22,9 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Otto-compatible Ed25519 License envelopes and 10-minute online leases
 - License binding to deployment ID, organization ID, and machine fingerprint
 - Administrator bearer authentication and fail-closed License revocation
+- Persisted Ed25519 keyring with standby, active, retired, and revoked states
+- Audited key activation and emergency revocation with atomic replacement
+- Signed public keyring export and stable signer-provider boundary for KMS/HSM adapters
 - Derived lease/telemetry tokens that are never stored as plaintext in PostgreSQL
 - Authenticated operational telemetry ingest with HMAC, nonce replay protection,
   event integrity checks, idempotent storage, and retention cleanup
@@ -82,11 +85,14 @@ container runs without Linux capabilities, with a read-only root filesystem,
 and receives credentials through `/run/secrets` rather than image layers or
 plain environment values.
 
-Back up both the PostgreSQL volume and the `secrets/` directory. In particular,
-do not regenerate `control_signer_private_key.pem` for an existing deployment:
-replacing it changes the signing identity and makes previously issued License
-and update-policy envelopes unverifiable. The bootstrap command uses exclusive
-file creation and fails instead of overwriting an existing identity.
+Back up both the PostgreSQL volume and the `secrets/` directory. Never overwrite
+an existing private key. Add a new key to `control_signer_keyring.json`, restart
+the control service so it is registered as `standby`, distribute the signed
+public keyring, and only then activate it. The old key becomes `retired` and
+continues to verify historical License envelopes. Use `revoked` only for a
+compromise; online License leases signed by that key then fail closed. The
+bootstrap command uses exclusive file creation and refuses to overwrite an
+existing identity.
 
 ### Backup and restore
 
@@ -154,7 +160,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.4.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.5.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -168,6 +174,7 @@ a misleading success report.
 | `CONTROL_TOKEN_SECRET` | empty | 32-byte minimum root secret used to derive scoped tokens |
 | `CONTROL_TOKEN_SECRET_FILE` | empty | Read-only file containing the token derivation secret |
 | `CONTROL_SIGNER_PRIVATE_KEY_FILE` | empty | Read-only Ed25519 PKCS#8 secret mount |
+| `CONTROL_SIGNER_KEYRING_FILE` | empty | Version 1 local-provider keyring manifest; mutually exclusive with the legacy single-key setting |
 | `CONTROL_LEASE_DURATION_MS` | `600000` | Online lease lifetime; Otto refreshes every two minutes |
 | `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
 | `CONTROL_UPDATE_POLICY_DURATION_MS` | `300000` | Signed update decision lifetime, from one minute to one hour |
@@ -182,18 +189,35 @@ a misleading success report.
 2. Read the Otto server's deployment ID, organization ID, and machine
    fingerprint, then register them with `POST /v1/admin/deployments`.
 3. Issue an online or offline License with `POST /v1/admin/licenses`.
-4. Configure the returned public key from `GET /v1/admin/signing-key` as an
-   Otto License verification key.
+4. Configure the non-revoked public keys from `GET /v1/signing-keyring` as Otto
+   License verification keys. Pin at least one trusted key out of band before
+   accepting a downloaded keyring.
 5. Import the signed envelope into Otto. Online deployments refresh
    `POST /v1/licenses/:licenseId/lease` every two minutes.
 6. Configure `OTTO_TELEMETRY_ENDPOINT` on the private Otto server as
    `https://<control-host>/v1/telemetry/ingest`.
 
-The control database stores License metadata, signatures, and a token version.
-It does not store the License private key or plaintext lease/telemetry tokens.
-The private key path must point to a read-only secret mount. The signer is an
-interface so a KMS/HSM adapter can replace the mounted-file signer without
-changing the License service or HTTP contract.
+The control database stores License metadata, signatures, public keys, key
+states, and a token version. It does not store private keys or plaintext
+lease/telemetry tokens. Local private key paths must point to read-only secret
+mounts. `PayloadSigner` is the provider boundary: a KMS/HSM adapter supplies the
+same key ID, public key, and asynchronous signing operation without changing
+the License or update-policy services.
+
+### Signing key rotation
+
+1. Generate a new Ed25519 key outside the application and add its read-only path
+   to the version 1 keyring manifest. Restart; it appears as `standby`.
+2. Export `GET /v1/signing-keyring`, verify its signature with an already trusted
+   key, and distribute both old and new public keys to Otto deployments.
+3. Activate with `POST /v1/admin/signing-keys/:keyId/activate`. The former active
+   key becomes `retired`, so historical License files continue to verify.
+4. After the longest License/update overlap window, remove the retired private
+   key provider if desired, but retain its public record.
+5. For compromise response, call `.../:keyId/revoke` with `reason` and, when the
+   key is active, a signable `replacementKeyId`. The transition is atomic and
+   audited. Offline License revocation cannot be instantaneous; keep offline
+   validity short and distribute the revoked-key list through customer operations.
 
 Revoking an online License prevents the next lease renewal, so normal access is
 removed within the 10-minute lease window. Offline Licenses cannot receive live
@@ -243,6 +267,11 @@ POST /v1/admin/licenses
 GET  /v1/admin/licenses/:licenseId
 POST /v1/admin/licenses/:licenseId/revoke
 GET  /v1/admin/signing-key
+GET  /v1/admin/signing-keys
+POST /v1/admin/signing-keys/:keyId/activate
+POST /v1/admin/signing-keys/:keyId/retire
+POST /v1/admin/signing-keys/:keyId/revoke
+GET  /v1/signing-keyring
 GET  /v1/admin/deployments/:deploymentId/health?hours=24
 POST /v1/admin/update-distributions
 PUT  /v1/admin/deployments/:deploymentId/update-distribution
@@ -264,6 +293,7 @@ Traefik
        -> identity_admin
        -> customer_deployment (implemented foundation)
        -> license_authority (implemented foundation)
+       -> signing_key_rotation (implemented foundation)
        -> lease_revocation (implemented foundation)
        -> telemetry_health (implemented foundation)
        -> update_policy (implemented foundation)
@@ -272,5 +302,5 @@ Traefik
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are signing-key rotation, off-site backup delivery, operator-facing
-administration, and eventually the separate federation gateway.
+next phases are off-site backup delivery, operator-facing administration,
+managed KMS/HSM provider adapters, and eventually the separate federation gateway.

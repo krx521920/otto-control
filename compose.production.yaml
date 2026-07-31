@@ -38,8 +38,11 @@ services:
     secrets:
       - control_admin_token
       - control_token_secret
-      - control_signer_private_key
+      - source: control_signer_private_key
+        target: control_signer_private_key.pem
       - postgres_password
+    volumes:
+      - ./secrets:/run/otto-secrets:ro
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m

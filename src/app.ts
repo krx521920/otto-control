@@ -113,6 +113,7 @@ export async function buildControlApp(
     capabilities.push(
       'customer_deployment',
       'license_authority',
+      'signing_key_rotation',
       'lease_revocation',
       'telemetry_health',
       'update_policy',

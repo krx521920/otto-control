@@ -175,7 +175,7 @@ RESTORE_PID=''
 rm -f -- "$RESTORE_PIPE"
 RESTORE_PIPE=''
 
-REQUIRED_TABLES='control_schema_migrations control_customers control_deployments control_licenses control_audit_events control_telemetry_events control_update_distributions control_update_releases control_deployment_update_assignments'
+REQUIRED_TABLES='control_schema_migrations control_customers control_deployments control_licenses control_signing_keys control_audit_events control_telemetry_events control_update_distributions control_update_releases control_deployment_update_assignments'
 for TABLE in $REQUIRED_TABLES; do
   EXISTS=$(compose exec -T postgres psql \
     --username "$DB_USER" --dbname "$DRILL_DATABASE" --tuples-only --no-align \
