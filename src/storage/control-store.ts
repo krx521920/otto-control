@@ -16,6 +16,16 @@ import type {
   OttoTelemetryReceipt,
 } from '../contracts/telemetry.js';
 import type { UpdateChannel, UpdateReleaseState } from '../contracts/update-policy.js';
+import type {
+  BillingRateRecord,
+  CreditAccountRecord,
+  CreditHoldMutationResult,
+  CreditHoldRecord,
+  CreditMutationResult,
+  CreditStatement,
+  CreditTransactionRecord,
+  OttoBillingModule,
+} from '../contracts/billing.js';
 
 export type RecordStatus = 'active' | 'suspended';
 
@@ -345,5 +355,100 @@ export interface ControlStore {
     nonce: string;
     expiresAtMs: number;
   }): Promise<boolean>;
+  getCreditAccount(customerId: string): Promise<CreditAccountRecord | null>;
+  setBillingRate(input: {
+    customerId: string;
+    module: OttoBillingModule;
+    unitSize: number;
+    creditsPerUnit: number;
+    actorId: string;
+    changedAt: Date;
+  }): Promise<BillingRateRecord>;
+  getBillingRate(customerId: string, module: OttoBillingModule): Promise<BillingRateRecord | null>;
+  listBillingRates(customerId: string): Promise<BillingRateRecord[]>;
+  topUpCredits(input: {
+    transactionId: string;
+    customerId: string;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    metadata: Record<string, unknown>;
+    occurredAt: Date;
+  }): Promise<CreditMutationResult>;
+  createCreditHold(input: {
+    holdId: string;
+    transactionId: string;
+    customerId: string;
+    organizationId: string;
+    deploymentId: string;
+    module: OttoBillingModule;
+    amount: number;
+    idempotencyKey: string;
+    expiresAt: Date;
+    occurredAt: Date;
+  }): Promise<CreditHoldMutationResult>;
+  getCreditHold(id: string): Promise<CreditHoldRecord | null>;
+  listExpiredCreditHolds(input: {
+    customerId: string;
+    expiredBefore: Date;
+    limit: number;
+  }): Promise<CreditHoldRecord[]>;
+  captureCreditHold(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    occurredAt: Date;
+  }): Promise<CreditHoldMutationResult | null>;
+  releaseCreditHold(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    idempotencyKey: string;
+    reason: 'released' | 'expired';
+    description: string;
+    occurredAt: Date;
+  }): Promise<CreditHoldMutationResult | null>;
+  consumeCredits(input: {
+    transactionId: string;
+    customerId: string;
+    organizationId: string;
+    deploymentId: string;
+    module: OttoBillingModule;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    metadata: Record<string, unknown>;
+    occurredAt: Date;
+  }): Promise<CreditMutationResult>;
+  refundCredits(input: {
+    transactionId: string;
+    customerId: string;
+    relatedTransactionId: string;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    metadata: Record<string, unknown>;
+    occurredAt: Date;
+  }): Promise<CreditMutationResult | null>;
+  listCreditTransactions(input: {
+    customerId: string;
+    from: Date;
+    to: Date;
+    organizationId?: string;
+    module?: OttoBillingModule;
+    limit: number;
+  }): Promise<CreditTransactionRecord[]>;
+  getCreditStatement(input: {
+    customerId: string;
+    from: Date;
+    to: Date;
+  }): Promise<CreditStatement | null>;
   appendAuditEvent(input: AuditEventInput): Promise<void>;
 }

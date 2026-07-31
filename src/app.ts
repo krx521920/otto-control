@@ -10,6 +10,7 @@ import { registerAdminIdentityRoutes } from './routes/admin-identity.js';
 import { registerCommercialControlRoutes } from './routes/commercial-control.js';
 import { registerPlatformRoutes } from './routes/platform.js';
 import { registerUpdatePolicyRoutes } from './routes/update-policy.js';
+import { registerBillingRoutes } from './routes/billing.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
@@ -132,6 +133,13 @@ export async function buildControlApp(
       service: commercialControl.updatePolicy,
       identity: commercialControl.identity,
     });
+    if (commercialControl.billing) {
+      capabilities.push('credit_billing', 'billing_statement_export');
+      await registerBillingRoutes(app, {
+        service: commercialControl.billing,
+        identity: commercialControl.identity,
+      });
+    }
     app.addHook('onClose', async () => commercialControl.service.close());
   }
   await registerPlatformRoutes(app, config, {

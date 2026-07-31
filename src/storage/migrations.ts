@@ -381,6 +381,110 @@ const MIGRATIONS: Migration[] = [
       `INSERT INTO control_admin_role_permissions (role_id, permission_id)
        SELECT 'auditor', id FROM control_admin_permissions
        WHERE id = 'license.usage.read'
+      ON CONFLICT DO NOTHING`,
+    ],
+  },
+  {
+    id: '008_credit_billing',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_credit_accounts (
+        customer_id TEXT PRIMARY KEY REFERENCES control_customers(id),
+        available_balance BIGINT NOT NULL DEFAULT 0
+          CHECK (available_balance BETWEEN 0 AND 9000000000000000),
+        frozen_balance BIGINT NOT NULL DEFAULT 0
+          CHECK (frozen_balance BETWEEN 0 AND 9000000000000000),
+        total_topped_up BIGINT NOT NULL DEFAULT 0
+          CHECK (total_topped_up BETWEEN 0 AND 9000000000000000),
+        total_consumed BIGINT NOT NULL DEFAULT 0
+          CHECK (total_consumed BETWEEN 0 AND 9000000000000000),
+        total_refunded BIGINT NOT NULL DEFAULT 0
+          CHECK (total_refunded BETWEEN 0 AND 9000000000000000),
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_billing_rates (
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        module TEXT NOT NULL CHECK (module IN (
+          'model_gateway', 'meeting_agent', 'park_service', 'atoa', 'feishu',
+          'enterprise_knowledge', 'skill_market', 'data_visualization',
+          'document_generation'
+        )),
+        unit_size BIGINT NOT NULL CHECK (unit_size > 0),
+        credits_per_unit BIGINT NOT NULL CHECK (credits_per_unit > 0),
+        updated_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (customer_id, module)
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_credit_holds (
+        id TEXT PRIMARY KEY,
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        organization_id TEXT NOT NULL,
+        deployment_id TEXT NOT NULL,
+        module TEXT NOT NULL CHECK (module IN (
+          'model_gateway', 'meeting_agent', 'park_service', 'atoa', 'feishu',
+          'enterprise_knowledge', 'skill_market', 'data_visualization',
+          'document_generation'
+        )),
+        amount BIGINT NOT NULL CHECK (amount > 0),
+        status TEXT NOT NULL CHECK (status IN ('active', 'captured', 'released', 'expired')),
+        idempotency_key TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (customer_id, idempotency_key)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_credit_holds_expiry
+       ON control_credit_holds(status, expires_at) WHERE status = 'active'`,
+      `CREATE TABLE IF NOT EXISTS control_credit_transactions (
+        id TEXT PRIMARY KEY,
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        organization_id TEXT,
+        deployment_id TEXT,
+        module TEXT CHECK (module IS NULL OR module IN (
+          'model_gateway', 'meeting_agent', 'park_service', 'atoa', 'feishu',
+          'enterprise_knowledge', 'skill_market', 'data_visualization',
+          'document_generation'
+        )),
+        type TEXT NOT NULL CHECK (type IN (
+          'topup', 'freeze', 'capture', 'release', 'consume', 'refund'
+        )),
+        available_delta BIGINT NOT NULL,
+        frozen_delta BIGINT NOT NULL,
+        billed_amount BIGINT NOT NULL DEFAULT 0 CHECK (billed_amount >= 0),
+        available_after BIGINT NOT NULL CHECK (available_after >= 0),
+        frozen_after BIGINT NOT NULL CHECK (frozen_after >= 0),
+        idempotency_key TEXT NOT NULL,
+        reference_id TEXT,
+        related_transaction_id TEXT REFERENCES control_credit_transactions(id),
+        description TEXT NOT NULL DEFAULT '',
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        occurred_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (customer_id, idempotency_key)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_credit_transactions_customer_time
+       ON control_credit_transactions(customer_id, occurred_at DESC, id DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_credit_transactions_statement
+       ON control_credit_transactions(customer_id, organization_id, module, occurred_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_credit_transactions_related
+       ON control_credit_transactions(related_transaction_id)
+       WHERE related_transaction_id IS NOT NULL`,
+      `INSERT INTO control_admin_permissions (id) VALUES
+        ('billing.read'), ('billing.topup'), ('billing.manage'), ('billing.refund')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'super_admin', id FROM control_admin_permissions
+       WHERE id IN ('billing.read', 'billing.topup', 'billing.manage', 'billing.refund')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'license_admin', id FROM control_admin_permissions
+       WHERE id IN ('billing.read', 'billing.topup', 'billing.manage', 'billing.refund')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'auditor', id FROM control_admin_permissions
+       WHERE id = 'billing.read'
        ON CONFLICT DO NOTHING`,
     ],
   },

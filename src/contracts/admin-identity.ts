@@ -19,6 +19,10 @@ export const ADMIN_PERMISSIONS = [
   'approval.request',
   'approval.read',
   'approval.decide',
+  'billing.read',
+  'billing.topup',
+  'billing.manage',
+  'billing.refund',
 ] as const;
 
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];

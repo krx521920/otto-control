@@ -31,6 +31,17 @@ import type {
   AdminRoleRecord,
   AdminSessionRecord,
 } from '../../src/contracts/admin-identity.js';
+import type {
+  BillingRateRecord,
+  CreditAccountRecord,
+  CreditHoldMutationResult,
+  CreditHoldRecord,
+  CreditMutationResult,
+  CreditStatement,
+  CreditTransactionRecord,
+  OttoBillingModule,
+} from '../../src/contracts/billing.js';
+import { conflict } from '../../src/errors.js';
 
 const role = (
   id: string,
@@ -45,6 +56,7 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'update_distribution.manage', 'update_release.create', 'update_release.read',
   'update_release.publish', 'identity.read', 'identity.manage', 'approval.request',
   'approval.read', 'approval.decide',
+  'billing.read', 'billing.topup', 'billing.manage', 'billing.refund',
 ];
 
 interface StoredTelemetryEvent extends OttoTelemetryEvent {
@@ -75,6 +87,10 @@ export class MemoryControlStore implements ControlStore {
   readonly adminSessions = new Map<string, AdminSessionRecord>();
   readonly adminApprovals = new Map<string, AdminApprovalRecord>();
   readonly adminApprovalDecisions = new Map<string, Map<string, 'approve' | 'reject'>>();
+  readonly creditAccounts = new Map<string, CreditAccountRecord>();
+  readonly billingRates = new Map<string, BillingRateRecord>();
+  readonly creditHolds = new Map<string, CreditHoldRecord>();
+  readonly creditTransactions = new Map<string, CreditTransactionRecord>();
   readonly adminRoles = new Map<string, AdminRoleRecord>([
     ['super_admin', role('super_admin', 'Super administrator', ALL_PERMISSIONS)],
     ['security_admin', role('security_admin', 'Security administrator', [
@@ -85,6 +101,7 @@ export class MemoryControlStore implements ControlStore {
       'customer.create', 'deployment.create', 'license.issue', 'license.read',
       'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
       'telemetry.read', 'approval.request', 'approval.read',
+      'billing.read', 'billing.topup', 'billing.manage', 'billing.refund',
     ])],
     ['release_admin', role('release_admin', 'Release administrator', [
       'update_distribution.manage', 'update_release.create', 'update_release.read',
@@ -93,6 +110,7 @@ export class MemoryControlStore implements ControlStore {
     ['auditor', role('auditor', 'Auditor', [
       'license.read', 'license.usage.read', 'signing_key.read', 'telemetry.read', 'update_release.read',
       'identity.read', 'approval.read',
+      'billing.read',
     ])],
   ]);
 
@@ -905,6 +923,522 @@ export class MemoryControlStore implements ControlStore {
     if (this.updatePolicyNonces.has(key)) return false;
     this.updatePolicyNonces.add(key);
     return true;
+  }
+
+  #creditAccount(customerId: string, create = false): CreditAccountRecord | null {
+    const existing = this.creditAccounts.get(customerId);
+    if (existing) return existing;
+    if (!create) return null;
+    if (!this.customers.has(customerId)) throw conflict('customer does not exist');
+    const now = new Date();
+    const account: CreditAccountRecord = {
+      customerId,
+      availableBalance: 0,
+      frozenBalance: 0,
+      totalToppedUp: 0,
+      totalConsumed: 0,
+      totalRefunded: 0,
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.creditAccounts.set(customerId, account);
+    return account;
+  }
+
+  #transactionByKey(customerId: string, key: string): CreditTransactionRecord | null {
+    return [...this.creditTransactions.values()].find((transaction) => (
+      transaction.customerId === customerId && transaction.idempotencyKey === key
+    )) ?? null;
+  }
+
+  #updateCreditAccount(
+    current: CreditAccountRecord,
+    values: Partial<CreditAccountRecord>,
+    changedAt: Date,
+  ): CreditAccountRecord {
+    const account = {
+      ...current,
+      ...values,
+      version: current.version + 1,
+      updatedAt: changedAt,
+    };
+    this.creditAccounts.set(current.customerId, account);
+    return account;
+  }
+
+  async getCreditAccount(customerId: string): Promise<CreditAccountRecord | null> {
+    return this.#creditAccount(customerId);
+  }
+
+  async setBillingRate(input: {
+    customerId: string;
+    module: OttoBillingModule;
+    unitSize: number;
+    creditsPerUnit: number;
+    actorId: string;
+    changedAt: Date;
+  }): Promise<BillingRateRecord> {
+    if (!this.customers.has(input.customerId)) throw conflict('customer does not exist');
+    const key = `${input.customerId}\0${input.module}`;
+    const existing = this.billingRates.get(key);
+    const rate: BillingRateRecord = {
+      customerId: input.customerId,
+      module: input.module,
+      unitSize: input.unitSize,
+      creditsPerUnit: input.creditsPerUnit,
+      updatedBy: input.actorId,
+      createdAt: existing?.createdAt ?? input.changedAt,
+      updatedAt: input.changedAt,
+    };
+    this.billingRates.set(key, rate);
+    return rate;
+  }
+
+  async getBillingRate(
+    customerId: string,
+    module: OttoBillingModule,
+  ): Promise<BillingRateRecord | null> {
+    return this.billingRates.get(`${customerId}\0${module}`) ?? null;
+  }
+
+  async listBillingRates(customerId: string): Promise<BillingRateRecord[]> {
+    return [...this.billingRates.values()]
+      .filter((rate) => rate.customerId === customerId)
+      .sort((left, right) => left.module.localeCompare(right.module));
+  }
+
+  async topUpCredits(input: {
+    transactionId: string;
+    customerId: string;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    metadata: Record<string, unknown>;
+    occurredAt: Date;
+  }): Promise<CreditMutationResult> {
+    const current = this.#creditAccount(input.customerId, true)!;
+    const replay = this.#transactionByKey(input.customerId, input.idempotencyKey);
+    if (replay) {
+      if (
+        replay.type !== 'topup' || replay.availableDelta !== input.amount ||
+        replay.referenceId !== input.referenceId
+      ) throw conflict('idempotency key was already used for a different operation');
+      return { account: current, transaction: replay, replayed: true };
+    }
+    const account = this.#updateCreditAccount(current, {
+      availableBalance: current.availableBalance + input.amount,
+      totalToppedUp: current.totalToppedUp + input.amount,
+    }, input.occurredAt);
+    const transaction: CreditTransactionRecord = {
+      id: input.transactionId,
+      customerId: input.customerId,
+      organizationId: null,
+      deploymentId: null,
+      module: null,
+      type: 'topup',
+      availableDelta: input.amount,
+      frozenDelta: 0,
+      billedAmount: 0,
+      availableAfter: account.availableBalance,
+      frozenAfter: account.frozenBalance,
+      idempotencyKey: input.idempotencyKey,
+      referenceId: input.referenceId,
+      relatedTransactionId: null,
+      description: input.description,
+      metadata: input.metadata,
+      occurredAt: input.occurredAt,
+      createdAt: input.occurredAt,
+    };
+    this.creditTransactions.set(transaction.id, transaction);
+    return { account, transaction, replayed: false };
+  }
+
+  async createCreditHold(input: {
+    holdId: string;
+    transactionId: string;
+    customerId: string;
+    organizationId: string;
+    deploymentId: string;
+    module: OttoBillingModule;
+    amount: number;
+    idempotencyKey: string;
+    expiresAt: Date;
+    occurredAt: Date;
+  }): Promise<CreditHoldMutationResult> {
+    const current = this.#creditAccount(input.customerId, true)!;
+    const replay = [...this.creditHolds.values()].find((hold) => (
+      hold.customerId === input.customerId && hold.idempotencyKey === input.idempotencyKey
+    ));
+    if (replay) {
+      if (
+        replay.organizationId !== input.organizationId || replay.deploymentId !== input.deploymentId ||
+        replay.module !== input.module || replay.amount !== input.amount
+      ) throw conflict('idempotency key was already used for a different hold');
+      return {
+        account: current,
+        hold: replay,
+        transaction: this.#transactionByKey(input.customerId, input.idempotencyKey)!,
+        replayed: true,
+      };
+    }
+    if (current.availableBalance < input.amount) throw conflict('insufficient available credits');
+    const account = this.#updateCreditAccount(current, {
+      availableBalance: current.availableBalance - input.amount,
+      frozenBalance: current.frozenBalance + input.amount,
+    }, input.occurredAt);
+    const hold: CreditHoldRecord = {
+      id: input.holdId,
+      customerId: input.customerId,
+      organizationId: input.organizationId,
+      deploymentId: input.deploymentId,
+      module: input.module,
+      amount: input.amount,
+      status: 'active',
+      idempotencyKey: input.idempotencyKey,
+      expiresAt: input.expiresAt,
+      createdAt: input.occurredAt,
+      updatedAt: input.occurredAt,
+    };
+    this.creditHolds.set(hold.id, hold);
+    const transaction: CreditTransactionRecord = {
+      id: input.transactionId,
+      customerId: input.customerId,
+      organizationId: input.organizationId,
+      deploymentId: input.deploymentId,
+      module: input.module,
+      type: 'freeze',
+      availableDelta: -input.amount,
+      frozenDelta: input.amount,
+      billedAmount: 0,
+      availableAfter: account.availableBalance,
+      frozenAfter: account.frozenBalance,
+      idempotencyKey: input.idempotencyKey,
+      referenceId: input.holdId,
+      relatedTransactionId: null,
+      description: 'Credit hold created',
+      metadata: {},
+      occurredAt: input.occurredAt,
+      createdAt: input.occurredAt,
+    };
+    this.creditTransactions.set(transaction.id, transaction);
+    return { account, hold, transaction, replayed: false };
+  }
+
+  async getCreditHold(id: string): Promise<CreditHoldRecord | null> {
+    return this.creditHolds.get(id) ?? null;
+  }
+
+  async listExpiredCreditHolds(input: {
+    customerId: string;
+    expiredBefore: Date;
+    limit: number;
+  }): Promise<CreditHoldRecord[]> {
+    return [...this.creditHolds.values()]
+      .filter((hold) => (
+        hold.customerId === input.customerId && hold.status === 'active'
+        && hold.expiresAt <= input.expiredBefore
+      ))
+      .sort((left, right) => left.expiresAt.getTime() - right.expiresAt.getTime())
+      .slice(0, input.limit);
+  }
+
+  async captureCreditHold(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    occurredAt: Date;
+  }): Promise<CreditHoldMutationResult | null> {
+    const current = this.#creditAccount(input.customerId);
+    if (!current) return null;
+    const replay = this.#transactionByKey(input.customerId, input.idempotencyKey);
+    if (replay) {
+      if (
+        replay.type !== 'capture' || replay.referenceId !== input.referenceId ||
+        replay.metadata.holdId !== input.holdId || replay.billedAmount !== input.amount
+      ) throw conflict('idempotency key was already used for a different operation');
+      return { account: current, hold: this.creditHolds.get(input.holdId)!, transaction: replay, replayed: true };
+    }
+    const hold = this.creditHolds.get(input.holdId);
+    if (!hold || hold.customerId !== input.customerId) return null;
+    if (hold.status !== 'active') throw conflict('credit hold is no longer active');
+    if (hold.expiresAt.getTime() <= input.occurredAt.getTime()) throw conflict('credit hold has expired');
+    const availableDelta = hold.amount - input.amount;
+    if (current.availableBalance + availableDelta < 0) {
+      throw conflict('insufficient available credits for capture');
+    }
+    const account = this.#updateCreditAccount(current, {
+      availableBalance: current.availableBalance + availableDelta,
+      frozenBalance: current.frozenBalance - hold.amount,
+      totalConsumed: current.totalConsumed + input.amount,
+    }, input.occurredAt);
+    const updatedHold = { ...hold, status: 'captured' as const, updatedAt: input.occurredAt };
+    this.creditHolds.set(hold.id, updatedHold);
+    const transaction: CreditTransactionRecord = {
+      id: input.transactionId,
+      customerId: input.customerId,
+      organizationId: hold.organizationId,
+      deploymentId: hold.deploymentId,
+      module: hold.module,
+      type: 'capture',
+      availableDelta,
+      frozenDelta: -hold.amount,
+      billedAmount: input.amount,
+      availableAfter: account.availableBalance,
+      frozenAfter: account.frozenBalance,
+      idempotencyKey: input.idempotencyKey,
+      referenceId: input.referenceId,
+      relatedTransactionId: null,
+      description: input.description,
+      metadata: { holdId: input.holdId },
+      occurredAt: input.occurredAt,
+      createdAt: input.occurredAt,
+    };
+    this.creditTransactions.set(transaction.id, transaction);
+    return { account, hold: updatedHold, transaction, replayed: false };
+  }
+
+  async releaseCreditHold(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    idempotencyKey: string;
+    reason: 'released' | 'expired';
+    description: string;
+    occurredAt: Date;
+  }): Promise<CreditHoldMutationResult | null> {
+    const current = this.#creditAccount(input.customerId);
+    if (!current) return null;
+    const replay = this.#transactionByKey(input.customerId, input.idempotencyKey);
+    if (replay) {
+      if (replay.type !== 'release' || replay.referenceId !== input.holdId) {
+        throw conflict('idempotency key was already used for a different operation');
+      }
+      return { account: current, hold: this.creditHolds.get(input.holdId)!, transaction: replay, replayed: true };
+    }
+    const hold = this.creditHolds.get(input.holdId);
+    if (!hold || hold.customerId !== input.customerId) return null;
+    if (hold.status !== 'active') throw conflict('credit hold is no longer active');
+    const account = this.#updateCreditAccount(current, {
+      availableBalance: current.availableBalance + hold.amount,
+      frozenBalance: current.frozenBalance - hold.amount,
+    }, input.occurredAt);
+    const updatedHold = { ...hold, status: input.reason, updatedAt: input.occurredAt };
+    this.creditHolds.set(hold.id, updatedHold);
+    const transaction: CreditTransactionRecord = {
+      id: input.transactionId,
+      customerId: input.customerId,
+      organizationId: hold.organizationId,
+      deploymentId: hold.deploymentId,
+      module: hold.module,
+      type: 'release',
+      availableDelta: hold.amount,
+      frozenDelta: -hold.amount,
+      billedAmount: 0,
+      availableAfter: account.availableBalance,
+      frozenAfter: account.frozenBalance,
+      idempotencyKey: input.idempotencyKey,
+      referenceId: input.holdId,
+      relatedTransactionId: null,
+      description: input.description,
+      metadata: { reason: input.reason },
+      occurredAt: input.occurredAt,
+      createdAt: input.occurredAt,
+    };
+    this.creditTransactions.set(transaction.id, transaction);
+    return { account, hold: updatedHold, transaction, replayed: false };
+  }
+
+  async consumeCredits(input: {
+    transactionId: string;
+    customerId: string;
+    organizationId: string;
+    deploymentId: string;
+    module: OttoBillingModule;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    metadata: Record<string, unknown>;
+    occurredAt: Date;
+  }): Promise<CreditMutationResult> {
+    const current = this.#creditAccount(input.customerId, true)!;
+    const replay = this.#transactionByKey(input.customerId, input.idempotencyKey);
+    if (replay) {
+      if (
+        replay.type !== 'consume' || replay.billedAmount !== input.amount ||
+        replay.organizationId !== input.organizationId || replay.deploymentId !== input.deploymentId ||
+        replay.module !== input.module || replay.referenceId !== input.referenceId
+      ) throw conflict('idempotency key was already used for a different operation');
+      return { account: current, transaction: replay, replayed: true };
+    }
+    if (current.availableBalance < input.amount) throw conflict('insufficient available credits');
+    const account = this.#updateCreditAccount(current, {
+      availableBalance: current.availableBalance - input.amount,
+      totalConsumed: current.totalConsumed + input.amount,
+    }, input.occurredAt);
+    const transaction: CreditTransactionRecord = {
+      id: input.transactionId,
+      customerId: input.customerId,
+      organizationId: input.organizationId,
+      deploymentId: input.deploymentId,
+      module: input.module,
+      type: 'consume',
+      availableDelta: -input.amount,
+      frozenDelta: 0,
+      billedAmount: input.amount,
+      availableAfter: account.availableBalance,
+      frozenAfter: account.frozenBalance,
+      idempotencyKey: input.idempotencyKey,
+      referenceId: input.referenceId,
+      relatedTransactionId: null,
+      description: input.description,
+      metadata: input.metadata,
+      occurredAt: input.occurredAt,
+      createdAt: input.occurredAt,
+    };
+    this.creditTransactions.set(transaction.id, transaction);
+    return { account, transaction, replayed: false };
+  }
+
+  async refundCredits(input: {
+    transactionId: string;
+    customerId: string;
+    relatedTransactionId: string;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    metadata: Record<string, unknown>;
+    occurredAt: Date;
+  }): Promise<CreditMutationResult | null> {
+    const current = this.#creditAccount(input.customerId);
+    if (!current) return null;
+    const replay = this.#transactionByKey(input.customerId, input.idempotencyKey);
+    if (replay) {
+      if (
+        replay.type !== 'refund' || replay.billedAmount !== input.amount ||
+        replay.relatedTransactionId !== input.relatedTransactionId ||
+        replay.referenceId !== input.referenceId
+      ) throw conflict('idempotency key was already used for a different operation');
+      return { account: current, transaction: replay, replayed: true };
+    }
+    const original = this.creditTransactions.get(input.relatedTransactionId);
+    if (!original || original.customerId !== input.customerId || !['consume', 'capture'].includes(original.type)) {
+      return null;
+    }
+    const refunded = [...this.creditTransactions.values()]
+      .filter((transaction) => transaction.type === 'refund' && transaction.relatedTransactionId === original.id)
+      .reduce((sum, transaction) => sum + transaction.billedAmount, 0);
+    if (refunded + input.amount > original.billedAmount) {
+      throw conflict('refund exceeds the remaining refundable amount');
+    }
+    const account = this.#updateCreditAccount(current, {
+      availableBalance: current.availableBalance + input.amount,
+      totalRefunded: current.totalRefunded + input.amount,
+    }, input.occurredAt);
+    const transaction: CreditTransactionRecord = {
+      id: input.transactionId,
+      customerId: input.customerId,
+      organizationId: original.organizationId,
+      deploymentId: original.deploymentId,
+      module: original.module,
+      type: 'refund',
+      availableDelta: input.amount,
+      frozenDelta: 0,
+      billedAmount: input.amount,
+      availableAfter: account.availableBalance,
+      frozenAfter: account.frozenBalance,
+      idempotencyKey: input.idempotencyKey,
+      referenceId: input.referenceId,
+      relatedTransactionId: original.id,
+      description: input.description,
+      metadata: input.metadata,
+      occurredAt: input.occurredAt,
+      createdAt: input.occurredAt,
+    };
+    this.creditTransactions.set(transaction.id, transaction);
+    return { account, transaction, replayed: false };
+  }
+
+  async listCreditTransactions(input: {
+    customerId: string;
+    from: Date;
+    to: Date;
+    organizationId?: string;
+    module?: OttoBillingModule;
+    limit: number;
+  }): Promise<CreditTransactionRecord[]> {
+    return [...this.creditTransactions.values()]
+      .filter((transaction) => (
+        transaction.customerId === input.customerId
+        && transaction.occurredAt >= input.from
+        && transaction.occurredAt < input.to
+        && (!input.organizationId || transaction.organizationId === input.organizationId)
+        && (!input.module || transaction.module === input.module)
+      ))
+      .sort((left, right) => right.occurredAt.getTime() - left.occurredAt.getTime())
+      .slice(0, input.limit);
+  }
+
+  async getCreditStatement(input: {
+    customerId: string;
+    from: Date;
+    to: Date;
+  }): Promise<CreditStatement | null> {
+    if (!this.#creditAccount(input.customerId)) return null;
+    const transactions = [...this.creditTransactions.values()]
+      .filter((transaction) => transaction.customerId === input.customerId);
+    const openingBalance = transactions
+      .filter((transaction) => transaction.occurredAt < input.from)
+      .reduce((sum, transaction) => sum + transaction.availableDelta + transaction.frozenDelta, 0);
+    const period = transactions.filter((transaction) => (
+      transaction.occurredAt >= input.from && transaction.occurredAt < input.to
+    ));
+    const lineMap = new Map<string, CreditStatement['lines'][number]>();
+    for (const transaction of period) {
+      if (!transaction.organizationId || !transaction.module) continue;
+      if (!['consume', 'capture', 'refund'].includes(transaction.type)) continue;
+      const key = `${transaction.organizationId}\0${transaction.module}`;
+      const line = lineMap.get(key) ?? {
+        organizationId: transaction.organizationId,
+        module: transaction.module,
+        consumedCredits: 0,
+        refundedCredits: 0,
+        netCredits: 0,
+        transactionCount: 0,
+      };
+      if (transaction.type === 'refund') line.refundedCredits += transaction.billedAmount;
+      else line.consumedCredits += transaction.billedAmount;
+      line.netCredits = line.consumedCredits - line.refundedCredits;
+      line.transactionCount += 1;
+      lineMap.set(key, line);
+    }
+    const periodDelta = period.reduce(
+      (sum, transaction) => sum + transaction.availableDelta + transaction.frozenDelta,
+      0,
+    );
+    return {
+      customerId: input.customerId,
+      from: input.from,
+      to: input.to,
+      openingBalance,
+      closingBalance: openingBalance + periodDelta,
+      totalToppedUp: period.filter((item) => item.type === 'topup')
+        .reduce((sum, item) => sum + item.availableDelta, 0),
+      totalConsumed: period.filter((item) => ['consume', 'capture'].includes(item.type))
+        .reduce((sum, item) => sum + item.billedAmount, 0),
+      totalRefunded: period.filter((item) => item.type === 'refund')
+        .reduce((sum, item) => sum + item.billedAmount, 0),
+      lines: [...lineMap.values()].sort((left, right) => (
+        left.organizationId.localeCompare(right.organizationId) || left.module.localeCompare(right.module)
+      )),
+    };
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

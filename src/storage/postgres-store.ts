@@ -42,6 +42,17 @@ import type {
   UpdateReleaseTransition,
 } from './control-store.js';
 import type { UpdateChannel, UpdateReleaseState } from '../contracts/update-policy.js';
+import type {
+  BillingRateRecord,
+  CreditAccountRecord,
+  CreditHoldMutationResult,
+  CreditHoldRecord,
+  CreditMutationResult,
+  CreditStatement,
+  CreditTransactionRecord,
+  CreditTransactionType,
+  OttoBillingModule,
+} from '../contracts/billing.js';
 import { runMigrations } from './migrations.js';
 
 const { Pool } = pg;
@@ -178,6 +189,63 @@ interface AdminApprovalRow {
 interface TelemetryCountRow {
   event_type: string;
   count: number;
+}
+
+interface CreditAccountRow {
+  customer_id: string;
+  available_balance: string;
+  frozen_balance: string;
+  total_topped_up: string;
+  total_consumed: string;
+  total_refunded: string;
+  version: number;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface BillingRateRow {
+  customer_id: string;
+  module: OttoBillingModule;
+  unit_size: string;
+  credits_per_unit: string;
+  updated_by: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface CreditHoldRow {
+  id: string;
+  customer_id: string;
+  organization_id: string;
+  deployment_id: string;
+  module: OttoBillingModule;
+  amount: string;
+  status: CreditHoldRecord['status'];
+  idempotency_key: string;
+  expires_at: Date;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface CreditTransactionRow {
+  id: string;
+  customer_id: string;
+  organization_id: string | null;
+  deployment_id: string | null;
+  module: OttoBillingModule | null;
+  type: CreditTransactionType;
+  available_delta: string;
+  frozen_delta: string;
+  billed_amount: string;
+  available_after: string;
+  frozen_after: string;
+  idempotency_key: string;
+  reference_id: string | null;
+  related_transaction_id: string | null;
+  description: string;
+  metadata: Record<string, unknown>;
+  occurred_at: Date;
+  created_at: Date;
 }
 
 interface LatestTelemetryRow {
@@ -403,6 +471,71 @@ function updateReleaseFromRow(row: UpdateReleaseRow): UpdateReleaseRecord {
     publishedAt: row.published_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function creditAccountFromRow(row: CreditAccountRow): CreditAccountRecord {
+  return {
+    customerId: row.customer_id,
+    availableBalance: Number(row.available_balance),
+    frozenBalance: Number(row.frozen_balance),
+    totalToppedUp: Number(row.total_topped_up),
+    totalConsumed: Number(row.total_consumed),
+    totalRefunded: Number(row.total_refunded),
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function billingRateFromRow(row: BillingRateRow): BillingRateRecord {
+  return {
+    customerId: row.customer_id,
+    module: row.module,
+    unitSize: Number(row.unit_size),
+    creditsPerUnit: Number(row.credits_per_unit),
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function creditHoldFromRow(row: CreditHoldRow): CreditHoldRecord {
+  return {
+    id: row.id,
+    customerId: row.customer_id,
+    organizationId: row.organization_id,
+    deploymentId: row.deployment_id,
+    module: row.module,
+    amount: Number(row.amount),
+    status: row.status,
+    idempotencyKey: row.idempotency_key,
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function creditTransactionFromRow(row: CreditTransactionRow): CreditTransactionRecord {
+  return {
+    id: row.id,
+    customerId: row.customer_id,
+    organizationId: row.organization_id,
+    deploymentId: row.deployment_id,
+    module: row.module,
+    type: row.type,
+    availableDelta: Number(row.available_delta),
+    frozenDelta: Number(row.frozen_delta),
+    billedAmount: Number(row.billed_amount),
+    availableAfter: Number(row.available_after),
+    frozenAfter: Number(row.frozen_after),
+    idempotencyKey: row.idempotency_key,
+    referenceId: row.reference_id,
+    relatedTransactionId: row.related_transaction_id,
+    description: row.description,
+    metadata: row.metadata,
+    occurredAt: row.occurred_at,
+    createdAt: row.created_at,
   };
 }
 
@@ -1958,6 +2091,758 @@ export class PostgresControlStore implements ControlStore {
     } finally {
       client.release();
     }
+  }
+
+  async getCreditAccount(customerId: string): Promise<CreditAccountRecord | null> {
+    const result = await this.#pool.query<CreditAccountRow>(
+      'SELECT * FROM control_credit_accounts WHERE customer_id = $1',
+      [customerId],
+    );
+    return result.rows[0] ? creditAccountFromRow(result.rows[0]) : null;
+  }
+
+  async setBillingRate(input: {
+    customerId: string;
+    module: OttoBillingModule;
+    unitSize: number;
+    creditsPerUnit: number;
+    actorId: string;
+    changedAt: Date;
+  }): Promise<BillingRateRecord> {
+    try {
+      const result = await this.#pool.query<BillingRateRow>(
+        `INSERT INTO control_billing_rates
+          (customer_id, module, unit_size, credits_per_unit, updated_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $6)
+         ON CONFLICT (customer_id, module) DO UPDATE SET
+           unit_size = EXCLUDED.unit_size,
+           credits_per_unit = EXCLUDED.credits_per_unit,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = EXCLUDED.updated_at
+         RETURNING *`,
+        [
+          input.customerId,
+          input.module,
+          input.unitSize,
+          input.creditsPerUnit,
+          input.actorId,
+          input.changedAt,
+        ],
+      );
+      return billingRateFromRow(result.rows[0]!);
+    } catch (error) {
+      if (postgresCode(error) === '23503') throw conflict('customer does not exist');
+      throw error;
+    }
+  }
+
+  async getBillingRate(
+    customerId: string,
+    module: OttoBillingModule,
+  ): Promise<BillingRateRecord | null> {
+    const result = await this.#pool.query<BillingRateRow>(
+      'SELECT * FROM control_billing_rates WHERE customer_id = $1 AND module = $2',
+      [customerId, module],
+    );
+    return result.rows[0] ? billingRateFromRow(result.rows[0]) : null;
+  }
+
+  async listBillingRates(customerId: string): Promise<BillingRateRecord[]> {
+    const result = await this.#pool.query<BillingRateRow>(
+      'SELECT * FROM control_billing_rates WHERE customer_id = $1 ORDER BY module',
+      [customerId],
+    );
+    return result.rows.map(billingRateFromRow);
+  }
+
+  async topUpCredits(input: {
+    transactionId: string;
+    customerId: string;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    metadata: Record<string, unknown>;
+    occurredAt: Date;
+  }): Promise<CreditMutationResult> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO control_credit_accounts (customer_id)
+         VALUES ($1) ON CONFLICT DO NOTHING`,
+        [input.customerId],
+      );
+      const accountResult = await client.query<CreditAccountRow>(
+        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
+        [input.customerId],
+      );
+      const current = accountResult.rows[0];
+      if (!current) throw conflict('customer does not exist');
+      const existing = await client.query<CreditTransactionRow>(
+        `SELECT * FROM control_credit_transactions
+         WHERE customer_id = $1 AND idempotency_key = $2`,
+        [input.customerId, input.idempotencyKey],
+      );
+      if (existing.rows[0]) {
+        const transaction = creditTransactionFromRow(existing.rows[0]);
+        if (
+          transaction.type !== 'topup' ||
+          transaction.availableDelta !== input.amount ||
+          transaction.referenceId !== input.referenceId
+        ) throw conflict('idempotency key was already used for a different operation');
+        await client.query('COMMIT');
+        return { account: creditAccountFromRow(current), transaction, replayed: true };
+      }
+      const updated = await client.query<CreditAccountRow>(
+        `UPDATE control_credit_accounts SET
+           available_balance = available_balance + $2,
+           total_topped_up = total_topped_up + $2,
+           version = version + 1,
+           updated_at = $3
+         WHERE customer_id = $1 RETURNING *`,
+        [input.customerId, input.amount, input.occurredAt],
+      );
+      const account = creditAccountFromRow(updated.rows[0]!);
+      const inserted = await client.query<CreditTransactionRow>(
+        `INSERT INTO control_credit_transactions
+          (id, customer_id, type, available_delta, frozen_delta, billed_amount,
+           available_after, frozen_after, idempotency_key, reference_id,
+           description, metadata, occurred_at)
+         VALUES ($1, $2, 'topup', $3, 0, 0, $4, $5, $6, $7, $8, $9::jsonb, $10)
+         RETURNING *`,
+        [input.transactionId, input.customerId, input.amount, account.availableBalance,
+          account.frozenBalance, input.idempotencyKey, input.referenceId,
+          input.description, JSON.stringify(input.metadata), input.occurredAt],
+      );
+      await client.query('COMMIT');
+      return {
+        account,
+        transaction: creditTransactionFromRow(inserted.rows[0]!),
+        replayed: false,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23503') throw conflict('customer does not exist');
+      if (postgresCode(error) === '23514') throw conflict('credit ledger limit exceeded');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async createCreditHold(input: {
+    holdId: string;
+    transactionId: string;
+    customerId: string;
+    organizationId: string;
+    deploymentId: string;
+    module: OttoBillingModule;
+    amount: number;
+    idempotencyKey: string;
+    expiresAt: Date;
+    occurredAt: Date;
+  }): Promise<CreditHoldMutationResult> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'INSERT INTO control_credit_accounts (customer_id) VALUES ($1) ON CONFLICT DO NOTHING',
+        [input.customerId],
+      );
+      const accountResult = await client.query<CreditAccountRow>(
+        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
+        [input.customerId],
+      );
+      const current = accountResult.rows[0];
+      if (!current) throw conflict('customer does not exist');
+      const existingHold = await client.query<CreditHoldRow>(
+        `SELECT * FROM control_credit_holds
+         WHERE customer_id = $1 AND idempotency_key = $2`,
+        [input.customerId, input.idempotencyKey],
+      );
+      if (existingHold.rows[0]) {
+        const hold = creditHoldFromRow(existingHold.rows[0]);
+        if (
+          hold.organizationId !== input.organizationId ||
+          hold.deploymentId !== input.deploymentId ||
+          hold.module !== input.module ||
+          hold.amount !== input.amount
+        ) throw conflict('idempotency key was already used for a different hold');
+        const transactionResult = await client.query<CreditTransactionRow>(
+          `SELECT * FROM control_credit_transactions
+           WHERE customer_id = $1 AND idempotency_key = $2`,
+          [input.customerId, input.idempotencyKey],
+        );
+        await client.query('COMMIT');
+        return {
+          account: creditAccountFromRow(current),
+          hold,
+          transaction: creditTransactionFromRow(transactionResult.rows[0]!),
+          replayed: true,
+        };
+      }
+      if (Number(current.available_balance) < input.amount) {
+        throw conflict('insufficient available credits');
+      }
+      const updated = await client.query<CreditAccountRow>(
+        `UPDATE control_credit_accounts SET
+           available_balance = available_balance - $2,
+           frozen_balance = frozen_balance + $2,
+           version = version + 1,
+           updated_at = $3
+         WHERE customer_id = $1 RETURNING *`,
+        [input.customerId, input.amount, input.occurredAt],
+      );
+      const account = creditAccountFromRow(updated.rows[0]!);
+      const holdResult = await client.query<CreditHoldRow>(
+        `INSERT INTO control_credit_holds
+          (id, customer_id, organization_id, deployment_id, module, amount, status,
+           idempotency_key, expires_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $9)
+         RETURNING *`,
+        [input.holdId, input.customerId, input.organizationId, input.deploymentId,
+          input.module, input.amount, input.idempotencyKey, input.expiresAt, input.occurredAt],
+      );
+      const transactionResult = await client.query<CreditTransactionRow>(
+        `INSERT INTO control_credit_transactions
+          (id, customer_id, organization_id, deployment_id, module, type,
+           available_delta, frozen_delta, billed_amount, available_after, frozen_after,
+           idempotency_key, reference_id, description, occurred_at)
+         VALUES ($1, $2, $3, $4, $5, 'freeze', $6, $7, 0, $8, $9, $10, $11, $12, $13)
+         RETURNING *`,
+        [input.transactionId, input.customerId, input.organizationId, input.deploymentId,
+          input.module, -input.amount, input.amount, account.availableBalance,
+          account.frozenBalance, input.idempotencyKey, input.holdId,
+          'Credit hold created', input.occurredAt],
+      );
+      await client.query('COMMIT');
+      return {
+        account,
+        hold: creditHoldFromRow(holdResult.rows[0]!),
+        transaction: creditTransactionFromRow(transactionResult.rows[0]!),
+        replayed: false,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23503') throw conflict('customer does not exist');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getCreditHold(id: string): Promise<CreditHoldRecord | null> {
+    const result = await this.#pool.query<CreditHoldRow>(
+      'SELECT * FROM control_credit_holds WHERE id = $1',
+      [id],
+    );
+    return result.rows[0] ? creditHoldFromRow(result.rows[0]) : null;
+  }
+
+  async listExpiredCreditHolds(input: {
+    customerId: string;
+    expiredBefore: Date;
+    limit: number;
+  }): Promise<CreditHoldRecord[]> {
+    const result = await this.#pool.query<CreditHoldRow>(
+      `SELECT * FROM control_credit_holds
+       WHERE customer_id = $1 AND status = 'active' AND expires_at <= $2
+       ORDER BY expires_at, id LIMIT $3`,
+      [input.customerId, input.expiredBefore, input.limit],
+    );
+    return result.rows.map(creditHoldFromRow);
+  }
+
+  async captureCreditHold(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    occurredAt: Date;
+  }): Promise<CreditHoldMutationResult | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const accountResult = await client.query<CreditAccountRow>(
+        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
+        [input.customerId],
+      );
+      const current = accountResult.rows[0];
+      if (!current) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const existing = await client.query<CreditTransactionRow>(
+        `SELECT * FROM control_credit_transactions
+         WHERE customer_id = $1 AND idempotency_key = $2`,
+        [input.customerId, input.idempotencyKey],
+      );
+      if (existing.rows[0]) {
+        const transaction = creditTransactionFromRow(existing.rows[0]);
+        if (
+          transaction.type !== 'capture' || transaction.referenceId !== input.referenceId ||
+          transaction.metadata.holdId !== input.holdId || transaction.billedAmount !== input.amount
+        ) throw conflict('idempotency key was already used for a different operation');
+        const holdResult = await client.query<CreditHoldRow>(
+          'SELECT * FROM control_credit_holds WHERE id = $1', [input.holdId],
+        );
+        await client.query('COMMIT');
+        return {
+          account: creditAccountFromRow(current),
+          hold: creditHoldFromRow(holdResult.rows[0]!),
+          transaction,
+          replayed: true,
+        };
+      }
+      const holdResult = await client.query<CreditHoldRow>(
+        `SELECT * FROM control_credit_holds
+         WHERE id = $1 AND customer_id = $2 FOR UPDATE`,
+        [input.holdId, input.customerId],
+      );
+      const holdRow = holdResult.rows[0];
+      if (!holdRow) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (holdRow.status !== 'active') throw conflict('credit hold is no longer active');
+      if (holdRow.expires_at.getTime() <= input.occurredAt.getTime()) {
+        throw conflict('credit hold has expired');
+      }
+      const heldAmount = Number(holdRow.amount);
+      const availableDelta = heldAmount - input.amount;
+      if (Number(current.available_balance) + availableDelta < 0) {
+        throw conflict('insufficient available credits for capture');
+      }
+      const updated = await client.query<CreditAccountRow>(
+        `UPDATE control_credit_accounts SET
+           available_balance = available_balance + $2,
+           frozen_balance = frozen_balance - $3,
+           total_consumed = total_consumed + $4,
+           version = version + 1,
+           updated_at = $5
+         WHERE customer_id = $1 RETURNING *`,
+        [input.customerId, availableDelta, heldAmount, input.amount, input.occurredAt],
+      );
+      const account = creditAccountFromRow(updated.rows[0]!);
+      const updatedHold = await client.query<CreditHoldRow>(
+        `UPDATE control_credit_holds SET status = 'captured', updated_at = $2
+         WHERE id = $1 RETURNING *`,
+        [input.holdId, input.occurredAt],
+      );
+      const transactionResult = await client.query<CreditTransactionRow>(
+        `INSERT INTO control_credit_transactions
+          (id, customer_id, organization_id, deployment_id, module, type,
+           available_delta, frozen_delta, billed_amount, available_after, frozen_after,
+           idempotency_key, reference_id, description, metadata, occurred_at)
+         VALUES ($1, $2, $3, $4, $5, 'capture', $6, $7, $8, $9, $10,
+                 $11, $12, $13, $14::jsonb, $15)
+         RETURNING *`,
+        [input.transactionId, input.customerId, holdRow.organization_id, holdRow.deployment_id,
+          holdRow.module, availableDelta, -heldAmount, input.amount, account.availableBalance,
+          account.frozenBalance, input.idempotencyKey, input.referenceId,
+          input.description, JSON.stringify({ holdId: input.holdId }), input.occurredAt],
+      );
+      await client.query('COMMIT');
+      return {
+        account,
+        hold: creditHoldFromRow(updatedHold.rows[0]!),
+        transaction: creditTransactionFromRow(transactionResult.rows[0]!),
+        replayed: false,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23514') throw conflict('credit ledger limit exceeded');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async releaseCreditHold(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    idempotencyKey: string;
+    reason: 'released' | 'expired';
+    description: string;
+    occurredAt: Date;
+  }): Promise<CreditHoldMutationResult | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const accountResult = await client.query<CreditAccountRow>(
+        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
+        [input.customerId],
+      );
+      const current = accountResult.rows[0];
+      if (!current) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const existing = await client.query<CreditTransactionRow>(
+        `SELECT * FROM control_credit_transactions
+         WHERE customer_id = $1 AND idempotency_key = $2`,
+        [input.customerId, input.idempotencyKey],
+      );
+      if (existing.rows[0]) {
+        const transaction = creditTransactionFromRow(existing.rows[0]);
+        if (transaction.type !== 'release' || transaction.referenceId !== input.holdId) {
+          throw conflict('idempotency key was already used for a different operation');
+        }
+        const holdResult = await client.query<CreditHoldRow>(
+          'SELECT * FROM control_credit_holds WHERE id = $1', [input.holdId],
+        );
+        await client.query('COMMIT');
+        return {
+          account: creditAccountFromRow(current),
+          hold: creditHoldFromRow(holdResult.rows[0]!),
+          transaction,
+          replayed: true,
+        };
+      }
+      const holdResult = await client.query<CreditHoldRow>(
+        `SELECT * FROM control_credit_holds
+         WHERE id = $1 AND customer_id = $2 FOR UPDATE`,
+        [input.holdId, input.customerId],
+      );
+      const holdRow = holdResult.rows[0];
+      if (!holdRow) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (holdRow.status !== 'active') throw conflict('credit hold is no longer active');
+      const amount = Number(holdRow.amount);
+      const updated = await client.query<CreditAccountRow>(
+        `UPDATE control_credit_accounts SET
+           available_balance = available_balance + $2,
+           frozen_balance = frozen_balance - $2,
+           version = version + 1,
+           updated_at = $3
+         WHERE customer_id = $1 RETURNING *`,
+        [input.customerId, amount, input.occurredAt],
+      );
+      const account = creditAccountFromRow(updated.rows[0]!);
+      const updatedHold = await client.query<CreditHoldRow>(
+        `UPDATE control_credit_holds SET status = $2, updated_at = $3
+         WHERE id = $1 RETURNING *`,
+        [input.holdId, input.reason, input.occurredAt],
+      );
+      const transactionResult = await client.query<CreditTransactionRow>(
+        `INSERT INTO control_credit_transactions
+          (id, customer_id, organization_id, deployment_id, module, type,
+           available_delta, frozen_delta, billed_amount, available_after, frozen_after,
+           idempotency_key, reference_id, description, occurred_at)
+         VALUES ($1, $2, $3, $4, $5, 'release', $6, $7, 0, $8, $9,
+                 $10, $11, $12, $13)
+         RETURNING *`,
+        [input.transactionId, input.customerId, holdRow.organization_id, holdRow.deployment_id,
+          holdRow.module, amount, -amount, account.availableBalance, account.frozenBalance,
+          input.idempotencyKey, input.holdId, input.description, input.occurredAt],
+      );
+      await client.query('COMMIT');
+      return {
+        account,
+        hold: creditHoldFromRow(updatedHold.rows[0]!),
+        transaction: creditTransactionFromRow(transactionResult.rows[0]!),
+        replayed: false,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async consumeCredits(input: {
+    transactionId: string;
+    customerId: string;
+    organizationId: string;
+    deploymentId: string;
+    module: OttoBillingModule;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    metadata: Record<string, unknown>;
+    occurredAt: Date;
+  }): Promise<CreditMutationResult> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'INSERT INTO control_credit_accounts (customer_id) VALUES ($1) ON CONFLICT DO NOTHING',
+        [input.customerId],
+      );
+      const accountResult = await client.query<CreditAccountRow>(
+        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
+        [input.customerId],
+      );
+      const current = accountResult.rows[0];
+      if (!current) throw conflict('customer does not exist');
+      const existing = await client.query<CreditTransactionRow>(
+        `SELECT * FROM control_credit_transactions
+         WHERE customer_id = $1 AND idempotency_key = $2`,
+        [input.customerId, input.idempotencyKey],
+      );
+      if (existing.rows[0]) {
+        const transaction = creditTransactionFromRow(existing.rows[0]);
+        if (
+          transaction.type !== 'consume' || transaction.billedAmount !== input.amount ||
+          transaction.organizationId !== input.organizationId ||
+          transaction.deploymentId !== input.deploymentId || transaction.module !== input.module ||
+          transaction.referenceId !== input.referenceId
+        ) throw conflict('idempotency key was already used for a different operation');
+        await client.query('COMMIT');
+        return { account: creditAccountFromRow(current), transaction, replayed: true };
+      }
+      if (Number(current.available_balance) < input.amount) {
+        throw conflict('insufficient available credits');
+      }
+      const updated = await client.query<CreditAccountRow>(
+        `UPDATE control_credit_accounts SET
+           available_balance = available_balance - $2,
+           total_consumed = total_consumed + $2,
+           version = version + 1,
+           updated_at = $3
+         WHERE customer_id = $1 RETURNING *`,
+        [input.customerId, input.amount, input.occurredAt],
+      );
+      const account = creditAccountFromRow(updated.rows[0]!);
+      const transactionResult = await client.query<CreditTransactionRow>(
+        `INSERT INTO control_credit_transactions
+          (id, customer_id, organization_id, deployment_id, module, type,
+           available_delta, frozen_delta, billed_amount, available_after, frozen_after,
+           idempotency_key, reference_id, description, metadata, occurred_at)
+         VALUES ($1, $2, $3, $4, $5, 'consume', $6, 0, $7, $8, $9,
+                 $10, $11, $12, $13::jsonb, $14)
+         RETURNING *`,
+        [input.transactionId, input.customerId, input.organizationId, input.deploymentId,
+          input.module, -input.amount, input.amount, account.availableBalance,
+          account.frozenBalance, input.idempotencyKey, input.referenceId,
+          input.description, JSON.stringify(input.metadata), input.occurredAt],
+      );
+      await client.query('COMMIT');
+      return {
+        account,
+        transaction: creditTransactionFromRow(transactionResult.rows[0]!),
+        replayed: false,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23503') throw conflict('customer does not exist');
+      if (postgresCode(error) === '23514') throw conflict('credit ledger limit exceeded');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async refundCredits(input: {
+    transactionId: string;
+    customerId: string;
+    relatedTransactionId: string;
+    amount: number;
+    idempotencyKey: string;
+    referenceId: string;
+    description: string;
+    metadata: Record<string, unknown>;
+    occurredAt: Date;
+  }): Promise<CreditMutationResult | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const accountResult = await client.query<CreditAccountRow>(
+        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
+        [input.customerId],
+      );
+      const current = accountResult.rows[0];
+      if (!current) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const existing = await client.query<CreditTransactionRow>(
+        `SELECT * FROM control_credit_transactions
+         WHERE customer_id = $1 AND idempotency_key = $2`,
+        [input.customerId, input.idempotencyKey],
+      );
+      if (existing.rows[0]) {
+        const transaction = creditTransactionFromRow(existing.rows[0]);
+        if (
+          transaction.type !== 'refund' || transaction.billedAmount !== input.amount ||
+          transaction.relatedTransactionId !== input.relatedTransactionId ||
+          transaction.referenceId !== input.referenceId
+        ) throw conflict('idempotency key was already used for a different operation');
+        await client.query('COMMIT');
+        return { account: creditAccountFromRow(current), transaction, replayed: true };
+      }
+      const originalResult = await client.query<CreditTransactionRow>(
+        `SELECT * FROM control_credit_transactions
+         WHERE id = $1 AND customer_id = $2 FOR UPDATE`,
+        [input.relatedTransactionId, input.customerId],
+      );
+      const original = originalResult.rows[0];
+      if (!original || !['consume', 'capture'].includes(original.type)) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const refundedResult = await client.query<{ total: string }>(
+        `SELECT COALESCE(SUM(billed_amount), 0)::text AS total
+         FROM control_credit_transactions
+         WHERE related_transaction_id = $1 AND type = 'refund'`,
+        [input.relatedTransactionId],
+      );
+      if (Number(refundedResult.rows[0]!.total) + input.amount > Number(original.billed_amount)) {
+        throw conflict('refund exceeds the remaining refundable amount');
+      }
+      const updated = await client.query<CreditAccountRow>(
+        `UPDATE control_credit_accounts SET
+           available_balance = available_balance + $2,
+           total_refunded = total_refunded + $2,
+           version = version + 1,
+           updated_at = $3
+         WHERE customer_id = $1 RETURNING *`,
+        [input.customerId, input.amount, input.occurredAt],
+      );
+      const account = creditAccountFromRow(updated.rows[0]!);
+      const transactionResult = await client.query<CreditTransactionRow>(
+        `INSERT INTO control_credit_transactions
+          (id, customer_id, organization_id, deployment_id, module, type,
+           available_delta, frozen_delta, billed_amount, available_after, frozen_after,
+           idempotency_key, reference_id, related_transaction_id, description, metadata,
+           occurred_at)
+         VALUES ($1, $2, $3, $4, $5, 'refund', $6, 0, $6, $7, $8,
+                 $9, $10, $11, $12, $13::jsonb, $14)
+         RETURNING *`,
+        [input.transactionId, input.customerId, original.organization_id,
+          original.deployment_id, original.module, input.amount, account.availableBalance,
+          account.frozenBalance, input.idempotencyKey, input.referenceId,
+          input.relatedTransactionId, input.description, JSON.stringify(input.metadata),
+          input.occurredAt],
+      );
+      await client.query('COMMIT');
+      return {
+        account,
+        transaction: creditTransactionFromRow(transactionResult.rows[0]!),
+        replayed: false,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23514') throw conflict('credit ledger limit exceeded');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listCreditTransactions(input: {
+    customerId: string;
+    from: Date;
+    to: Date;
+    organizationId?: string;
+    module?: OttoBillingModule;
+    limit: number;
+  }): Promise<CreditTransactionRecord[]> {
+    const values: unknown[] = [input.customerId, input.from, input.to];
+    const conditions = [
+      'customer_id = $1',
+      'occurred_at >= $2',
+      'occurred_at < $3',
+    ];
+    if (input.organizationId) {
+      values.push(input.organizationId);
+      conditions.push(`organization_id = $${values.length}`);
+    }
+    if (input.module) {
+      values.push(input.module);
+      conditions.push(`module = $${values.length}`);
+    }
+    values.push(input.limit);
+    const result = await this.#pool.query<CreditTransactionRow>(
+      `SELECT * FROM control_credit_transactions
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY occurred_at DESC, id DESC
+       LIMIT $${values.length}`,
+      values,
+    );
+    return result.rows.map(creditTransactionFromRow);
+  }
+
+  async getCreditStatement(input: {
+    customerId: string;
+    from: Date;
+    to: Date;
+  }): Promise<CreditStatement | null> {
+    const account = await this.getCreditAccount(input.customerId);
+    if (!account) return null;
+    const totals = await this.#pool.query<{
+      opening_balance: string;
+      period_delta: string;
+      topped_up: string;
+      consumed: string;
+      refunded: string;
+    }>(
+      `SELECT
+         COALESCE(SUM(available_delta + frozen_delta)
+           FILTER (WHERE occurred_at < $2), 0)::text AS opening_balance,
+         COALESCE(SUM(available_delta + frozen_delta)
+           FILTER (WHERE occurred_at >= $2 AND occurred_at < $3), 0)::text AS period_delta,
+         COALESCE(SUM(available_delta)
+           FILTER (WHERE type = 'topup' AND occurred_at >= $2 AND occurred_at < $3), 0)::text
+           AS topped_up,
+         COALESCE(SUM(billed_amount)
+           FILTER (WHERE type IN ('consume', 'capture') AND occurred_at >= $2 AND occurred_at < $3), 0)::text
+           AS consumed,
+         COALESCE(SUM(billed_amount)
+           FILTER (WHERE type = 'refund' AND occurred_at >= $2 AND occurred_at < $3), 0)::text
+           AS refunded
+       FROM control_credit_transactions WHERE customer_id = $1`,
+      [input.customerId, input.from, input.to],
+    );
+    const lines = await this.#pool.query<{
+      organization_id: string;
+      module: OttoBillingModule;
+      consumed: string;
+      refunded: string;
+      transaction_count: string;
+    }>(
+      `SELECT organization_id, module,
+         COALESCE(SUM(billed_amount) FILTER (WHERE type IN ('consume', 'capture')), 0)::text
+           AS consumed,
+         COALESCE(SUM(billed_amount) FILTER (WHERE type = 'refund'), 0)::text AS refunded,
+         COUNT(*)::text AS transaction_count
+       FROM control_credit_transactions
+       WHERE customer_id = $1 AND occurred_at >= $2 AND occurred_at < $3
+         AND organization_id IS NOT NULL AND module IS NOT NULL
+         AND type IN ('consume', 'capture', 'refund')
+       GROUP BY organization_id, module
+       ORDER BY organization_id, module`,
+      [input.customerId, input.from, input.to],
+    );
+    const summary = totals.rows[0]!;
+    const openingBalance = Number(summary.opening_balance);
+    return {
+      customerId: input.customerId,
+      from: input.from,
+      to: input.to,
+      openingBalance,
+      closingBalance: openingBalance + Number(summary.period_delta),
+      totalToppedUp: Number(summary.topped_up),
+      totalConsumed: Number(summary.consumed),
+      totalRefunded: Number(summary.refunded),
+      lines: lines.rows.map((line) => ({
+        organizationId: line.organization_id,
+        module: line.module,
+        consumedCredits: Number(line.consumed),
+        refundedCredits: Number(line.refunded),
+        netCredits: Number(line.consumed) - Number(line.refunded),
+        transactionCount: Number(line.transaction_count),
+      })),
+    };
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

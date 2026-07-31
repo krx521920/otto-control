@@ -15,6 +15,7 @@ import { generateTotpCode } from '../src/modules/admin-identity/crypto.js';
 import { AdminIdentityService } from '../src/modules/admin-identity/service.js';
 import { CommercialControlService } from '../src/modules/commercial-control/service.js';
 import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
+import { BillingService } from '../src/modules/billing/service.js';
 import { UpdatePolicyService } from '../src/modules/update-policy/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
@@ -105,6 +106,7 @@ describe('commercial control HTTP routes', () => {
         adminToken: ADMIN_TOKEN,
         identity,
         service,
+        billing: new BillingService({ store, tokenIssuer }),
         updatePolicy: new UpdatePolicyService({ store, signer: keyring, tokenIssuer }),
       },
     });
@@ -199,6 +201,8 @@ describe('commercial control HTTP routes', () => {
       'admin_rbac',
       'admin_mfa',
       'dual_control_approval',
+      'credit_billing',
+      'billing_statement_export',
     ]);
 
     const signingKey = await app.inject({
@@ -216,6 +220,115 @@ describe('commercial control HTTP routes', () => {
       keyring: { version: 1, activeKeyId: signingKey.json().signingKey.keyId },
       signingKeyId: signingKey.json().signingKey.keyId,
     });
+  });
+
+  it('runs approved top-up, central pricing, idempotent usage, and CSV export', async () => {
+    const authorization = { authorization: `Bearer ${adminSessionToken}` };
+    const customerResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/customers',
+      headers: authorization,
+      payload: { name: 'Billing Route Customer' },
+    });
+    expect(customerResponse.statusCode).toBe(201);
+    const customerId = customerResponse.json().customer.id as string;
+    const deploymentId = 'dep_billingroute0001';
+    const fingerprint = 'c'.repeat(64);
+    await app.inject({
+      method: 'POST',
+      url: '/v1/admin/deployments',
+      headers: authorization,
+      payload: {
+        deploymentId,
+        customerId,
+        organizationId: 'org_billing_route',
+        machineFingerprint: fingerprint,
+        name: 'Billing route deployment',
+      },
+    });
+    const licenseResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/licenses',
+      headers: authorization,
+      payload: {
+        deploymentId,
+        plan: 'enterprise',
+        expiresAt: '2028-07-31T00:00:00.000Z',
+        seatLimit: 20,
+        modules: ['enterprise_tree'],
+      },
+    });
+    expect(licenseResponse.statusCode).toBe(201);
+    const license = licenseResponse.json().license as Record<string, unknown>;
+
+    const rateRequest = { module: 'model_gateway', unitSize: 1_000, creditsPerUnit: 2 };
+    const rateApproval = await approvedOperation(
+      'billing.rate.set', 'customer', customerId, rateRequest,
+    );
+    const rateResponse = await app.inject({
+      method: 'PUT',
+      url: `/v1/admin/billing/customers/${customerId}/rates/model_gateway`,
+      headers: { ...authorization, 'x-otto-approval-id': rateApproval },
+      payload: { unitSize: 1_000, creditsPerUnit: 2 },
+    });
+    expect(rateResponse.statusCode).toBe(200);
+
+    const topupRequest = {
+      amount: 50,
+      idempotencyKey: 'topup:route-1',
+      referenceId: 'invoice-route-1',
+    };
+    const topupApproval = await approvedOperation(
+      'billing.topup', 'customer', customerId, topupRequest,
+    );
+    const topupResponse = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/billing/customers/${customerId}/topups`,
+      headers: { ...authorization, 'x-otto-approval-id': topupApproval },
+      payload: topupRequest,
+    });
+    expect(topupResponse.statusCode).toBe(201);
+
+    const usageRequest = {
+      version: 1,
+      licenseId: license.id,
+      deploymentId,
+      organizationId: 'org_billing_route',
+      machineFingerprint: fingerprint,
+      module: 'model_gateway',
+      units: 1_001,
+      referenceId: 'usage_route_1',
+      idempotencyKey: 'usage:route-1',
+    };
+    const usageResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/billing/usage/consume',
+      headers: { authorization: `Bearer ${license.leaseToken as string}` },
+      payload: usageRequest,
+    });
+    expect(usageResponse.statusCode).toBe(201);
+    expect(usageResponse.json()).toMatchObject({
+      account: { availableBalance: 46 },
+      transaction: { billedAmount: 4, module: 'model_gateway' },
+      replayed: false,
+    });
+    const replay = await app.inject({
+      method: 'POST',
+      url: '/v1/billing/usage/consume',
+      headers: { authorization: `Bearer ${license.leaseToken as string}` },
+      payload: usageRequest,
+    });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json().replayed).toBe(true);
+
+    const exported = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/billing/customers/${customerId}/export.csv`,
+      headers: authorization,
+    });
+    expect(exported.statusCode).toBe(200);
+    expect(exported.headers['content-type']).toContain('text/csv');
+    expect(exported.body).toContain('usage:route-1');
   });
 
   it('creates a deployment, issues a License, and serves Otto lease refreshes', async () => {

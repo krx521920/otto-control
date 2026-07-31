@@ -34,6 +34,7 @@ export interface OttoLicensePayload {
   offline: boolean;
   telemetryAllowed: boolean;
   leaseEndpoint?: string;
+  billingEndpoint?: string;
   leaseToken?: string;
   telemetryToken?: string;
 }

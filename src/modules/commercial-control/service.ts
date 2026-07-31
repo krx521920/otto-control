@@ -172,6 +172,7 @@ function licensePayload(
   };
   if (!license.offline) {
     payload.leaseEndpoint = license.leaseEndpoint!;
+    payload.billingEndpoint = new URL('/v1/billing/usage/consume', license.leaseEndpoint!).toString();
     payload.leaseToken = tokens.issue({
       purpose: 'lease',
       licenseId: license.id,

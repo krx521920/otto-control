@@ -43,6 +43,11 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Draft, canary, stable, and required release policy with deterministic deployment cohorts
 - SHA-256-pinned full and incremental manifests with short-lived Ed25519 policy envelopes
 - Audited activation, pause, and rollback to the previous release policy
+- Per-customer integer credit accounts with separate available and frozen balances
+- Immutable top-up, freeze, capture, release, consumption, and refund transactions
+- Centrally controlled per-module rates; private deployments report units, not prices
+- Request idempotency, original-charge refund limits, and automatic expired-hold release
+- Organization/module statements plus UTF-8 CSV transaction exports
 - Production Compose stack with isolated PostgreSQL, automatic HTTPS, persistent
   volumes, read-only control runtime, and file-mounted secrets
 - One-command Ed25519 key and random credential bootstrap that refuses to
@@ -170,7 +175,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.7.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.9.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -239,6 +244,32 @@ Every lifecycle change is immutable, actor-attributed, revisioned, and available
 through the lifecycle API. Machine transfer and deployment rebinding require a
 request-bound second-administrator approval. Seat usage is kept separately from
 the signed contract so frequent reports do not rewrite License history.
+
+### Credits and billing
+
+Credits are positive integers. PostgreSQL stores an account summary for fast
+reads, but the immutable transaction ledger is the source of truth. Top-ups,
+rate changes, and refunds are audited; the HTTP routes require RBAC permissions,
+and financial mutations require request-bound second-administrator approval.
+
+Configure each customer's module rate before enabling usage. `unitSize` defines
+one billing unit and `creditsPerUnit` defines its integer price. Otto submits only
+the deployment/organization binding, stable module ID, aggregate units, and an
+opaque request reference. The control plane calculates the charge, so a customer
+server cannot submit a lower price. Prompts, replies, chats, files, filenames, and
+meeting content are not part of the billing protocol.
+
+`POST /v1/billing/holds` freezes estimated credits before long work. Capture
+settles the actual amount and immediately releases any remainder; explicit
+release and automatic expiry both return unused credits. Direct usage calls and
+every hold mutation require a customer-scoped idempotency key. Reusing that key
+with different parameters fails with `409` instead of silently changing money.
+
+Administrators can query the account, rates, transactions, and period statement
+under `/v1/admin/billing/customers/:customerId/*`. The `export.csv` endpoint
+includes balances, deltas, references, related refund transactions, and
+idempotency keys for reconciliation. Refunds must reference a consume/capture
+transaction, and cumulative refunds cannot exceed its billed amount.
 
 ### Administrator identity and approvals
 
