@@ -4,6 +4,7 @@ import type {
   OttoTelemetryEvent,
   OttoTelemetryReceipt,
 } from '../contracts/telemetry.js';
+import type { UpdateChannel, UpdateReleaseState } from '../contracts/update-policy.js';
 
 export type RecordStatus = 'active' | 'suspended';
 
@@ -59,6 +60,49 @@ export interface AuditEventInput {
   detail: Record<string, unknown>;
 }
 
+export interface UpdateDistributionRecord {
+  id: string;
+  name: string;
+  status: RecordStatus;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface UpdateReleaseRecord {
+  id: string;
+  distributionId: string;
+  version: string;
+  sourceCommit: string;
+  channel: UpdateChannel;
+  rolloutPercent: number;
+  state: UpdateReleaseState;
+  notes: string;
+  fullManifestUrl: string | null;
+  fullManifestSha256: string | null;
+  incrementalManifestUrl: string | null;
+  incrementalManifestSha256: string | null;
+  previousReleaseId: string | null;
+  publishedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type CreateUpdateReleaseRecordInput = Omit<
+  UpdateReleaseRecord,
+  'state' | 'previousReleaseId' | 'publishedAt' | 'createdAt' | 'updatedAt'
+>;
+
+export interface UpdateReleaseTransition {
+  release: UpdateReleaseRecord;
+  fallback: UpdateReleaseRecord | null;
+}
+
+export interface DeploymentUpdateAssignmentRecord {
+  deploymentId: string;
+  distributionId: string;
+  updatedAt: Date;
+}
+
 export interface ControlStore {
   ping(): Promise<void>;
   close(): Promise<void>;
@@ -92,5 +136,27 @@ export interface ControlStore {
     deploymentId: string;
     sinceMs: number;
   }): Promise<DeploymentTelemetrySummary>;
+  createUpdateDistribution(input: { id: string; name: string }): Promise<UpdateDistributionRecord>;
+  getUpdateDistribution(id: string): Promise<UpdateDistributionRecord | null>;
+  assignDeploymentUpdateDistribution(input: {
+    deploymentId: string;
+    distributionId: string;
+    updatedAt: Date;
+  }): Promise<DeploymentUpdateAssignmentRecord>;
+  getDeploymentUpdateAssignment(
+    deploymentId: string,
+  ): Promise<DeploymentUpdateAssignmentRecord | null>;
+  createUpdateRelease(input: CreateUpdateReleaseRecordInput): Promise<UpdateReleaseRecord>;
+  getUpdateRelease(id: string): Promise<UpdateReleaseRecord | null>;
+  listUpdateReleases(distributionId: string): Promise<UpdateReleaseRecord[]>;
+  activateUpdateRelease(id: string, publishedAt: Date): Promise<UpdateReleaseTransition | null>;
+  pauseUpdateRelease(id: string, updatedAt: Date): Promise<UpdateReleaseRecord | null>;
+  rollbackUpdateRelease(id: string, updatedAt: Date): Promise<UpdateReleaseTransition | null>;
+  getActiveUpdateReleases(distributionId: string): Promise<UpdateReleaseRecord[]>;
+  consumeUpdatePolicyNonce(input: {
+    deploymentId: string;
+    nonce: string;
+    expiresAtMs: number;
+  }): Promise<boolean>;
   appendAuditEvent(input: AuditEventInput): Promise<void>;
 }

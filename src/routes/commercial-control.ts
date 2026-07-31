@@ -1,31 +1,12 @@
-import { timingSafeEqual } from 'node:crypto';
-
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 
 import { unauthorized } from '../errors.js';
 import type { CommercialControlService } from '../modules/commercial-control/service.js';
+import { actorId, bearerToken, secretMatches } from './route-auth.js';
 
 export interface CommercialControlRouteOptions {
   service: CommercialControlService;
   adminToken: string;
-}
-
-function bearerToken(request: FastifyRequest): string {
-  const authorization = request.headers.authorization?.trim() || '';
-  return /^Bearer\s+(.+)$/iu.exec(authorization)?.[1] || '';
-}
-
-function secretMatches(candidate: string, expected: string): boolean {
-  const left = Buffer.from(candidate, 'utf8');
-  const right = Buffer.from(expected, 'utf8');
-  return left.length === right.length && timingSafeEqual(left, right);
-}
-
-function actorId(request: FastifyRequest): string {
-  const value = request.headers['x-otto-actor-id'];
-  return typeof value === 'string' && /^[a-zA-Z0-9_.:@-]{2,128}$/u.test(value)
-    ? value
-    : 'control-admin';
 }
 
 export async function registerCommercialControlRoutes(

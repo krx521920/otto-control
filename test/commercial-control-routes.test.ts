@@ -12,6 +12,7 @@ import {
 } from '../src/crypto/telemetry-request.js';
 import { CommercialControlService } from '../src/modules/commercial-control/service.js';
 import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
+import { UpdatePolicyService } from '../src/modules/update-policy/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
 const ADMIN_TOKEN = 'test-admin-token-that-is-at-least-32-bytes';
@@ -30,6 +31,7 @@ const config: Readonly<ControlConfig> = {
   signerPrivateKeyFile: null,
   leaseDurationMs: 600_000,
   telemetryRetentionDays: 90,
+  updatePolicyDurationMs: 300_000,
 };
 
 describe('commercial control HTTP routes', () => {
@@ -37,18 +39,25 @@ describe('commercial control HTTP routes', () => {
 
   beforeEach(async () => {
     const keys = generateKeyPairSync('ed25519');
+    const store = new MemoryControlStore();
+    const signer = new LocalEd25519Signer(
+      keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+    );
+    const tokenIssuer = new ControlTokenIssuer(config.tokenSecret!);
     const service = new CommercialControlService({
-      store: new MemoryControlStore(),
-      signer: new LocalEd25519Signer(
-        keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
-      ),
-      tokenIssuer: new ControlTokenIssuer(config.tokenSecret!),
+      store,
+      signer,
+      tokenIssuer,
       publicBaseUrl: config.publicBaseUrl!,
     });
     app = await buildControlApp({
       config,
       logger: false,
-      commercialControl: { adminToken: ADMIN_TOKEN, service },
+      commercialControl: {
+        adminToken: ADMIN_TOKEN,
+        service,
+        updatePolicy: new UpdatePolicyService({ store, signer, tokenIssuer }),
+      },
     });
   });
 
@@ -70,6 +79,7 @@ describe('commercial control HTTP routes', () => {
       'license_authority',
       'lease_revocation',
       'telemetry_health',
+      'update_policy',
     ]);
 
     const signingKey = await app.inject({
@@ -315,5 +325,115 @@ describe('commercial control HTTP routes', () => {
         payload: eventPayload,
       },
     });
+  });
+
+  it('publishes and resolves an authenticated distribution-specific update policy', async () => {
+    const authorization = { authorization: `Bearer ${ADMIN_TOKEN}` };
+    const customer = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/customers',
+      headers: authorization,
+      payload: { name: 'Update customer' },
+    });
+    const customerId = customer.json().customer.id as string;
+    const deploymentId = 'dep_update1234567890';
+    const machineFingerprint = 'd'.repeat(64);
+    await app.inject({
+      method: 'POST',
+      url: '/v1/admin/deployments',
+      headers: authorization,
+      payload: {
+        deploymentId,
+        customerId,
+        organizationId: 'org_update',
+        machineFingerprint,
+        name: 'Update server',
+      },
+    });
+    const distribution = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/update-distributions',
+      headers: authorization,
+      payload: { id: 'otto-green', name: 'Otto Green' },
+    });
+    expect(distribution.statusCode).toBe(201);
+    const assignment = await app.inject({
+      method: 'PUT',
+      url: `/v1/admin/deployments/${deploymentId}/update-distribution`,
+      headers: authorization,
+      payload: { distributionId: 'otto-green' },
+    });
+    expect(assignment.statusCode).toBe(200);
+    const releaseResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/update-releases',
+      headers: authorization,
+      payload: {
+        distributionId: 'otto-green',
+        version: '1.9.11',
+        sourceCommit: 'abcdef1234567',
+        channel: 'stable',
+        fullManifest: {
+          url: 'https://updates.example.test/otto-green/latest.json',
+          sha256: 'e'.repeat(64),
+        },
+      },
+    });
+    expect(releaseResponse.statusCode).toBe(201);
+    const releaseId = releaseResponse.json().release.id as string;
+    const activated = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/update-releases/${releaseId}/activate`,
+      headers: authorization,
+    });
+    expect(activated.statusCode).toBe(200);
+    const licenseResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/licenses',
+      headers: authorization,
+      payload: {
+        deploymentId,
+        plan: 'enterprise',
+        expiresAt: '2030-01-01T00:00:00.000Z',
+        seatLimit: 100,
+        modules: ['enterprise_tree'],
+      },
+    });
+    const license = licenseResponse.json().license as Record<string, unknown>;
+    const body = {
+      version: 1,
+      licenseId: license.id,
+      deploymentId,
+      machineFingerprint,
+      distributionId: 'otto-green',
+      currentVersion: '1.9.10',
+    };
+    const timestamp = Date.now();
+    const nonce = 'update_route_nonce_123456';
+    const resolved = await app.inject({
+      method: 'POST',
+      url: '/v1/update-policy/resolve',
+      headers: {
+        authorization: `Bearer ${license.leaseToken as string}`,
+        'x-otto-timestamp': String(timestamp),
+        'x-otto-nonce': nonce,
+        'x-otto-signature': signTelemetryRequest({
+          token: license.leaseToken as string,
+          timestamp,
+          nonce,
+          body,
+        }),
+      },
+      payload: body,
+    });
+    expect(resolved.statusCode).toBe(200);
+    expect(resolved.json()).toMatchObject({
+      policy: {
+        decision: 'update',
+        distributionId: 'otto-green',
+        release: { id: releaseId, version: '1.9.11' },
+      },
+    });
+    expect(resolved.json().signature).toMatch(/^ed25519:/u);
   });
 });

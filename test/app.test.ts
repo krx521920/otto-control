@@ -19,6 +19,7 @@ const testConfig: Readonly<ControlConfig> = {
   signerPrivateKeyFile: null,
   leaseDurationMs: 600_000,
   telemetryRetentionDays: 90,
+  updatePolicyDurationMs: 300_000,
 };
 
 let app: FastifyInstance | undefined;

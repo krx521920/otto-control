@@ -8,6 +8,7 @@ import { ControlPlaneError } from './errors.js';
 import type { CommercialControlRuntime } from './runtime.js';
 import { registerCommercialControlRoutes } from './routes/commercial-control.js';
 import { registerPlatformRoutes } from './routes/platform.js';
+import { registerUpdatePolicyRoutes } from './routes/update-policy.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
@@ -114,8 +115,13 @@ export async function buildControlApp(
       'license_authority',
       'lease_revocation',
       'telemetry_health',
+      'update_policy',
     );
     await registerCommercialControlRoutes(app, commercialControl);
+    await registerUpdatePolicyRoutes(app, {
+      adminToken: commercialControl.adminToken,
+      service: commercialControl.updatePolicy,
+    });
     app.addHook('onClose', async () => commercialControl.service.close());
   }
   await registerPlatformRoutes(app, config, {

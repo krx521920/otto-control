@@ -26,6 +26,10 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Authenticated operational telemetry ingest with HMAC, nonce replay protection,
   event integrity checks, idempotent storage, and retention cleanup
 - Per-deployment health summaries without uploading chats, files, prompts, or transcripts
+- Independent update distributions for Otto, Otto Green, and future private editions
+- Draft, canary, stable, and required release policy with deterministic deployment cohorts
+- SHA-256-pinned full and incremental manifests with short-lived Ed25519 policy envelopes
+- Audited activation, pause, and rollback to the previous release policy
 
 ## Development
 
@@ -62,7 +66,7 @@ npm run check
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.3.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.4.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_SSL` | production: `true` | Require verified TLS to PostgreSQL |
 | `CONTROL_ADMIN_TOKEN` | empty | 32-byte minimum bearer token for `/v1/admin/*` |
@@ -70,6 +74,7 @@ npm run check
 | `CONTROL_SIGNER_PRIVATE_KEY_FILE` | empty | Read-only Ed25519 PKCS#8 secret mount |
 | `CONTROL_LEASE_DURATION_MS` | `600000` | Online lease lifetime; Otto refreshes every two minutes |
 | `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
+| `CONTROL_UPDATE_POLICY_DURATION_MS` | `300000` | Signed update decision lifetime, from one minute to one hour |
 
 ## Commercial control flow
 
@@ -103,6 +108,29 @@ audio, transcripts, prompts, completions, and documents are rejected before
 storage. The customer-side queue continues to retry independently when this
 control service is unavailable.
 
+## Update policy flow
+
+1. Create independent distributions such as `otto` and `otto-green` with
+   `POST /v1/admin/update-distributions`.
+2. Bind each registered deployment to exactly one distribution with
+   `PUT /v1/admin/deployments/:deploymentId/update-distribution`.
+3. Register a draft release with HTTPS full and/or incremental manifest URLs.
+   Every manifest reference requires its lowercase SHA-256 digest.
+4. Activate the release. A canary uses a stable 1-100 cohort derived from the
+   distribution, release, and deployment IDs. Stable and required releases are
+   always 100 percent; required responses set `mandatory: true`.
+5. Otto signs `POST /v1/update-policy/resolve` with its derived lease token,
+   timestamp, and one-time nonce. The returned policy is Ed25519 signed and
+   expires after five minutes by default.
+6. Pause immediately stops new decisions. Rollback withdraws the selected
+   policy and restores its previous active policy when available.
+
+Policy rollback does not claim to downgrade clients that already installed an
+artifact. Client-side component receipts and full-installer rollback remain
+separate execution concerns. Distribution binding prevents an Otto deployment
+from requesting Otto Green artifacts even though both may share one control
+plane and signing authority.
+
 ## Implemented APIs
 
 ```text
@@ -116,8 +144,16 @@ GET  /v1/admin/licenses/:licenseId
 POST /v1/admin/licenses/:licenseId/revoke
 GET  /v1/admin/signing-key
 GET  /v1/admin/deployments/:deploymentId/health?hours=24
+POST /v1/admin/update-distributions
+PUT  /v1/admin/deployments/:deploymentId/update-distribution
+POST /v1/admin/update-releases
+GET  /v1/admin/update-distributions/:distributionId/releases
+POST /v1/admin/update-releases/:releaseId/activate
+POST /v1/admin/update-releases/:releaseId/pause
+POST /v1/admin/update-releases/:releaseId/rollback
 POST /v1/licenses/:licenseId/lease
 POST /v1/telemetry/ingest
+POST /v1/update-policy/resolve
 ```
 
 ## Planned module boundaries
@@ -130,9 +166,10 @@ Traefik
        -> license_authority (implemented foundation)
        -> lease_revocation (implemented foundation)
        -> telemetry_health (implemented foundation)
-       -> update_policy
+       -> update_policy (implemented foundation)
        -> audit
 ```
 
-The next phase is update policy and signed release-channel management. A richer
-operator dashboard and federation remain separate later phases.
+The next phase is the Otto server/client adapter that consumes this signed
+policy and maps it onto the existing `latest.json` and incremental manifest
+engines. A richer operator dashboard and federation remain separate later phases.

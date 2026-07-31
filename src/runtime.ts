@@ -4,11 +4,13 @@ import type { ControlConfig } from './config.js';
 import { LocalEd25519Signer } from './crypto/signed-envelope.js';
 import { CommercialControlService } from './modules/commercial-control/service.js';
 import { ControlTokenIssuer } from './modules/commercial-control/token-issuer.js';
+import { UpdatePolicyService } from './modules/update-policy/service.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 
 export interface CommercialControlRuntime {
   adminToken: string;
   service: CommercialControlService;
+  updatePolicy: UpdatePolicyService;
 }
 
 function missingConfiguration(config: Readonly<ControlConfig>): string[] {
@@ -39,15 +41,22 @@ export async function createCommercialControlRuntime(
     // The path should be a read-only Docker/Kubernetes secret mount in production.
     const privateKey = await readFile(config.signerPrivateKeyFile!, 'utf8');
     const signer = new LocalEd25519Signer(privateKey);
+    const tokenIssuer = new ControlTokenIssuer(config.tokenSecret!);
     return {
       adminToken: config.adminToken!,
       service: new CommercialControlService({
         store,
         signer,
-        tokenIssuer: new ControlTokenIssuer(config.tokenSecret!),
+        tokenIssuer,
         publicBaseUrl: config.publicBaseUrl!,
         leaseDurationMs: config.leaseDurationMs,
         telemetryRetentionDays: config.telemetryRetentionDays,
+      }),
+      updatePolicy: new UpdatePolicyService({
+        store,
+        signer,
+        tokenIssuer,
+        policyDurationMs: config.updatePolicyDurationMs,
       }),
     };
   } catch (error) {

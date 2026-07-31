@@ -106,6 +106,63 @@ const MIGRATIONS: Migration[] = [
        ON control_telemetry_events(deployment_id, event_type, source_created_at_ms DESC)`,
     ],
   },
+  {
+    id: '003_update_policy',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_update_distributions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_update_releases (
+        id TEXT PRIMARY KEY,
+        distribution_id TEXT NOT NULL REFERENCES control_update_distributions(id),
+        version TEXT NOT NULL,
+        source_commit TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('canary', 'stable', 'required')),
+        rollout_percent INTEGER NOT NULL CHECK (rollout_percent BETWEEN 1 AND 100),
+        state TEXT NOT NULL DEFAULT 'draft'
+          CHECK (state IN ('draft', 'active', 'paused', 'rolled_back')),
+        notes TEXT NOT NULL DEFAULT '',
+        full_manifest_url TEXT,
+        full_manifest_sha256 TEXT,
+        incremental_manifest_url TEXT,
+        incremental_manifest_sha256 TEXT,
+        previous_release_id TEXT REFERENCES control_update_releases(id),
+        published_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (distribution_id, version, channel),
+        CHECK (full_manifest_url IS NOT NULL OR incremental_manifest_url IS NOT NULL),
+        CHECK ((full_manifest_url IS NULL) = (full_manifest_sha256 IS NULL)),
+        CHECK ((incremental_manifest_url IS NULL) = (incremental_manifest_sha256 IS NULL)),
+        CHECK (channel = 'canary' OR rollout_percent = 100),
+        CHECK (state <> 'active' OR published_at IS NOT NULL)
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_deployment_update_assignments (
+        deployment_id TEXT PRIMARY KEY REFERENCES control_deployments(id),
+        distribution_id TEXT NOT NULL REFERENCES control_update_distributions(id),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_deployment_update_distribution
+       ON control_deployment_update_assignments(distribution_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_update_release_lookup
+       ON control_update_releases(distribution_id, state, channel, published_at DESC)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_update_release_active_channel
+       ON control_update_releases(distribution_id, channel) WHERE state = 'active'`,
+      `CREATE TABLE IF NOT EXISTS control_update_policy_nonces (
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id),
+        nonce TEXT NOT NULL,
+        expires_at_ms BIGINT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (deployment_id, nonce)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_update_policy_nonces_expiry
+       ON control_update_policy_nonces(expires_at_ms)`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

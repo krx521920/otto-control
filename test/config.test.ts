@@ -25,6 +25,9 @@ describe('control configuration', () => {
     expect(() => loadControlConfig({ CONTROL_TELEMETRY_RETENTION_DAYS: '0' })).toThrow(
       'CONTROL_TELEMETRY_RETENTION_DAYS must be between 1 and 3650',
     );
+    expect(() => loadControlConfig({ CONTROL_UPDATE_POLICY_DURATION_MS: '1000' })).toThrow(
+      'CONTROL_UPDATE_POLICY_DURATION_MS must be between 60000 and 3600000',
+    );
   });
 
   it('requires an HTTPS public URL in production', () => {
