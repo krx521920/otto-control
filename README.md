@@ -21,6 +21,10 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - PostgreSQL customer, deployment, License, replay-nonce, and audit tables
 - Otto-compatible Ed25519 License envelopes and 10-minute online leases
 - License binding to deployment ID, organization ID, and machine fingerprint
+- Audited License renewal, seat expansion/downgrade, machine transfer, and
+  same-customer deployment rebinding with optimistic concurrency protection
+- Real-time active-seat reporting, monitor/enforce modes, and independently
+  enforced expiration and seat-overage grace periods
 - Administrator accounts with scrypt password hashes, TOTP MFA, one-time recovery
   codes, short-lived sessions, idle expiry, login lockout, and server-side revocation
 - Built-in RBAC roles for super, security, License, release, and audit operators
@@ -201,7 +205,9 @@ a misleading success report.
    License verification keys. Pin at least one trusted key out of band before
    accepting a downloaded keyring.
 6. Import the signed envelope into Otto. Online deployments refresh
-   `POST /v1/licenses/:licenseId/lease` every two minutes.
+   `POST /v1/licenses/:licenseId/lease` every two minutes, report their current
+   active enterprise-account count, and automatically install renewed License
+   terms returned with the lease.
 7. Configure `OTTO_TELEMETRY_ENDPOINT` on the private Otto server as
    `https://<control-host>/v1/telemetry/ingest`.
 
@@ -211,6 +217,28 @@ lease/telemetry tokens. Local private key paths must point to read-only secret
 mounts. `PayloadSigner` is the provider boundary, so remote KMS/HSM providers
 use the same key ID, public key, and asynchronous signing operation without
 changing the License or update-policy services.
+
+### Commercial License lifecycle
+
+Online Licenses have a monotonically increasing `revision`. Renewal and seat
+changes re-sign the License without rotating its derived client tokens, so a
+healthy deployment keeps running and receives the new envelope on its next
+lease refresh. Machine transfer and deployment rebinding increment both the
+revision and token version, immediately invalidating the previous machine's
+lease and telemetry credentials. Rebinding is restricted to another active
+deployment owned by the same customer.
+
+Seat enforcement defaults to `monitor` for compatibility. Otto reports the
+number of active, non-deleted enterprise accounts with every two-minute lease
+request. In `enforce` mode, excess seats start the configured 0-30 day grace
+period; leases expose the overage state during grace and fail closed afterward.
+The same signed grace period applies after License expiry. Offline Licenses may
+be monitored contractually but cannot claim real-time seat enforcement.
+
+Every lifecycle change is immutable, actor-attributed, revisioned, and available
+through the lifecycle API. Machine transfer and deployment rebinding require a
+request-bound second-administrator approval. Seat usage is kept separately from
+the signed contract so frequent reports do not rewrite License history.
 
 ### Administrator identity and approvals
 
@@ -248,6 +276,8 @@ self-approval, and is consumed once. Supported protected operation names are:
 
 ```text
 license.revoke
+license.transfer_machine
+license.rebind_deployment
 signing_key.activate
 signing_key.retire
 signing_key.revoke
@@ -378,6 +408,12 @@ POST /v1/admin/customers
 POST /v1/admin/deployments
 POST /v1/admin/licenses
 GET  /v1/admin/licenses/:licenseId
+POST /v1/admin/licenses/:licenseId/renew
+POST /v1/admin/licenses/:licenseId/resize
+POST /v1/admin/licenses/:licenseId/transfer-machine
+POST /v1/admin/licenses/:licenseId/rebind-deployment
+GET  /v1/admin/licenses/:licenseId/lifecycle?limit=50
+GET  /v1/admin/licenses/:licenseId/seats
 POST /v1/admin/licenses/:licenseId/revoke
 GET  /v1/admin/signing-key
 GET  /v1/admin/signing-keys
@@ -405,7 +441,7 @@ Traefik
   -> Otto Control Fastify edge
        -> identity_admin (accounts, MFA, sessions, RBAC, dual control)
        -> customer_deployment (implemented foundation)
-       -> license_authority (implemented foundation)
+       -> license_authority (commercial lifecycle implemented)
        -> signing_key_rotation (implemented foundation)
        -> lease_revocation (implemented foundation)
        -> telemetry_health (implemented foundation)

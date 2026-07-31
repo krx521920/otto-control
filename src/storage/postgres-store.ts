@@ -1,6 +1,10 @@
 import pg from 'pg';
 
-import type { OttoLicenseCapability } from '../contracts/license.js';
+import type {
+  OttoLicenseCapability,
+  OttoSeatEnforcement,
+  OttoSeatStatus,
+} from '../contracts/license.js';
 import type {
   AdminAccountRecord,
   AdminApprovalRecord,
@@ -24,13 +28,16 @@ import type {
   CustomerRecord,
   DeploymentUpdateAssignmentRecord,
   DeploymentRecord,
+  LicenseLifecycleEventRecord,
   LicenseRecord,
+  LicenseSeatUsageRecord,
   RecordStatus,
   SigningKeyProvider,
   SigningKeyRecord,
   SigningKeyState,
   SigningKeyTransition,
   UpdateDistributionRecord,
+  UpdateLicenseRecordInput,
   UpdateReleaseRecord,
   UpdateReleaseTransition,
 } from './control-store.js';
@@ -66,6 +73,7 @@ interface DeploymentRow {
 
 interface LicenseRow {
   id: string;
+  revision: number;
   deployment_id: string;
   customer_name: string;
   organization_id: string;
@@ -74,6 +82,8 @@ interface LicenseRow {
   issued_at_ms: string;
   expires_at_ms: string;
   seat_limit: number;
+  grace_period_ms: string;
+  seat_enforcement: OttoSeatEnforcement;
   modules: OttoLicenseCapability[];
   offline: boolean;
   telemetry_allowed: boolean;
@@ -84,6 +94,27 @@ interface LicenseRow {
   revoked_at_ms: string | null;
   created_at: Date;
   updated_at: Date;
+}
+
+interface LicenseLifecycleEventRow {
+  id: string;
+  license_id: string;
+  revision: number;
+  change_type: LicenseLifecycleEventRecord['changeType'];
+  actor_id: string;
+  detail: Record<string, unknown>;
+  created_at: Date;
+}
+
+interface LicenseSeatUsageRow {
+  license_id: string;
+  deployment_id: string;
+  active_seats: number;
+  seat_limit: number;
+  status: OttoSeatStatus;
+  overage_started_at_ms: string | null;
+  grace_expires_at_ms: string | null;
+  last_reported_at_ms: string;
 }
 
 interface SigningKeyRow {
@@ -221,6 +252,7 @@ function deploymentFromRow(row: DeploymentRow): DeploymentRecord {
 function licenseFromRow(row: LicenseRow): LicenseRecord {
   return {
     id: row.id,
+    revision: row.revision,
     deploymentId: row.deployment_id,
     customerName: row.customer_name,
     organizationId: row.organization_id,
@@ -229,6 +261,8 @@ function licenseFromRow(row: LicenseRow): LicenseRecord {
     issuedAtMs: Number(row.issued_at_ms),
     expiresAtMs: Number(row.expires_at_ms),
     seatLimit: row.seat_limit,
+    gracePeriodMs: Number(row.grace_period_ms),
+    seatEnforcement: row.seat_enforcement,
     modules: row.modules,
     offline: row.offline,
     telemetryAllowed: row.telemetry_allowed,
@@ -239,6 +273,35 @@ function licenseFromRow(row: LicenseRow): LicenseRecord {
     revokedAtMs: row.revoked_at_ms === null ? null : Number(row.revoked_at_ms),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function lifecycleEventFromRow(row: LicenseLifecycleEventRow): LicenseLifecycleEventRecord {
+  return {
+    id: Number(row.id),
+    licenseId: row.license_id,
+    revision: row.revision,
+    changeType: row.change_type,
+    actorId: row.actor_id,
+    detail: row.detail,
+    createdAt: row.created_at,
+  };
+}
+
+function seatUsageFromRow(row: LicenseSeatUsageRow): LicenseSeatUsageRecord {
+  return {
+    licenseId: row.license_id,
+    deploymentId: row.deployment_id,
+    activeSeats: row.active_seats,
+    seatLimit: row.seat_limit,
+    status: row.status,
+    overageStartedAtMs: row.overage_started_at_ms === null
+      ? null
+      : Number(row.overage_started_at_ms),
+    graceExpiresAtMs: row.grace_expires_at_ms === null
+      ? null
+      : Number(row.grace_expires_at_ms),
+    lastReportedAtMs: Number(row.last_reported_at_ms),
   };
 }
 
@@ -446,16 +509,18 @@ export class PostgresControlStore implements ControlStore {
     try {
       const result = await this.#pool.query<LicenseRow>(
         `INSERT INTO control_licenses
-          (id, deployment_id, customer_name, organization_id, machine_fingerprint,
-           plan, issued_at_ms, expires_at_ms, seat_limit, modules, offline,
+          (id, revision, deployment_id, customer_name, organization_id, machine_fingerprint,
+           plan, issued_at_ms, expires_at_ms, seat_limit, grace_period_ms, seat_enforcement,
+           modules, offline,
            telemetry_allowed, lease_endpoint, token_version, signature, signing_key_id,
            revoked_at_ms)
          VALUES
-          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12,
-           $13, $14, $15, $16, $17)
+          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+           $13::jsonb, $14, $15, $16, $17, $18, $19, $20)
          RETURNING *`,
         [
           input.id,
+          input.revision,
           input.deploymentId,
           input.customerName,
           input.organizationId,
@@ -464,6 +529,8 @@ export class PostgresControlStore implements ControlStore {
           input.issuedAtMs,
           input.expiresAtMs,
           input.seatLimit,
+          input.gracePeriodMs,
+          input.seatEnforcement,
           JSON.stringify(input.modules),
           input.offline,
           input.telemetryAllowed,
@@ -498,6 +565,196 @@ export class PostgresControlStore implements ControlStore {
       [id, revokedAtMs],
     );
     return result.rows[0] ? licenseFromRow(result.rows[0]) : null;
+  }
+
+  async updateLicense(input: UpdateLicenseRecordInput): Promise<LicenseRecord | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const current = await client.query<LicenseRow>(
+        'SELECT * FROM control_licenses WHERE id = $1 FOR UPDATE',
+        [input.id],
+      );
+      if (!current.rows[0] || current.rows[0].revision !== input.expectedRevision) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (input.deploymentMachineFingerprint) {
+        const binding = input.deploymentMachineFingerprint;
+        const deployment = await client.query<DeploymentRow>(
+          'SELECT * FROM control_deployments WHERE id = $1 FOR UPDATE',
+          [binding.deploymentId],
+        );
+        if (
+          !deployment.rows[0] ||
+          deployment.rows[0].machine_fingerprint !== binding.expectedFingerprint
+        ) {
+          await client.query('ROLLBACK');
+          return null;
+        }
+        await client.query(
+          `UPDATE control_deployments
+           SET machine_fingerprint = $2, updated_at = now()
+           WHERE id = $1`,
+          [binding.deploymentId, binding.newFingerprint],
+        );
+      }
+      const updated = await client.query<LicenseRow>(
+        `UPDATE control_licenses
+         SET revision = $2, deployment_id = $3, customer_name = $4,
+             organization_id = $5, machine_fingerprint = $6, plan = $7,
+             issued_at_ms = $8, expires_at_ms = $9, seat_limit = $10,
+             grace_period_ms = $11, seat_enforcement = $12, modules = $13::jsonb,
+             offline = $14, telemetry_allowed = $15, lease_endpoint = $16,
+             token_version = $17, signature = $18, signing_key_id = $19,
+             revoked_at_ms = $20, updated_at = now()
+         WHERE id = $1
+         RETURNING *`,
+        [
+          input.id,
+          input.revision,
+          input.deploymentId,
+          input.customerName,
+          input.organizationId,
+          input.machineFingerprint,
+          input.plan,
+          input.issuedAtMs,
+          input.expiresAtMs,
+          input.seatLimit,
+          input.gracePeriodMs,
+          input.seatEnforcement,
+          JSON.stringify(input.modules),
+          input.offline,
+          input.telemetryAllowed,
+          input.leaseEndpoint,
+          input.tokenVersion,
+          input.signature,
+          input.signingKeyId,
+          input.revokedAtMs,
+        ],
+      );
+      if (input.resetSeatUsage) {
+        await client.query(
+          'DELETE FROM control_license_seat_usage WHERE license_id = $1',
+          [input.id],
+        );
+      }
+      await client.query(
+        `INSERT INTO control_license_lifecycle_events
+          (license_id, revision, change_type, actor_id, detail)
+         VALUES ($1, $2, $3, $4, $5::jsonb)`,
+        [
+          input.id,
+          input.revision,
+          input.changeType,
+          input.actorId,
+          JSON.stringify(input.changeDetail),
+        ],
+      );
+      await client.query('COMMIT');
+      return licenseFromRow(updated.rows[0]!);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23505') {
+        throw conflict('License lifecycle change conflicts with an existing binding');
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listLicenseLifecycleEvents(
+    licenseId: string,
+    limit: number,
+  ): Promise<LicenseLifecycleEventRecord[]> {
+    const result = await this.#pool.query<LicenseLifecycleEventRow>(
+      `SELECT * FROM control_license_lifecycle_events
+       WHERE license_id = $1
+       ORDER BY revision DESC
+       LIMIT $2`,
+      [licenseId, limit],
+    );
+    return result.rows.map(lifecycleEventFromRow);
+  }
+
+  async getLicenseSeatUsage(licenseId: string): Promise<LicenseSeatUsageRecord | null> {
+    const result = await this.#pool.query<LicenseSeatUsageRow>(
+      'SELECT * FROM control_license_seat_usage WHERE license_id = $1',
+      [licenseId],
+    );
+    return result.rows[0] ? seatUsageFromRow(result.rows[0]) : null;
+  }
+
+  async recordLicenseSeatUsage(input: {
+    licenseId: string;
+    deploymentId: string;
+    activeSeats: number;
+    seatLimit: number;
+    gracePeriodMs: number;
+    enforcement: OttoSeatEnforcement;
+    reportedAtMs: number;
+  }): Promise<LicenseSeatUsageRecord> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'SELECT id FROM control_licenses WHERE id = $1 FOR UPDATE',
+        [input.licenseId],
+      );
+      const existing = await client.query<LicenseSeatUsageRow>(
+        'SELECT * FROM control_license_seat_usage WHERE license_id = $1 FOR UPDATE',
+        [input.licenseId],
+      );
+      const previous = existing.rows[0] ? seatUsageFromRow(existing.rows[0]) : null;
+      const overLimit = input.activeSeats > input.seatLimit;
+      const overageStartedAtMs = overLimit && input.enforcement === 'enforce'
+        ? previous?.overageStartedAtMs ?? input.reportedAtMs
+        : null;
+      const graceExpiresAtMs = overageStartedAtMs === null
+        ? null
+        : overageStartedAtMs + input.gracePeriodMs;
+      const status: OttoSeatStatus = !overLimit
+        ? 'within_limit'
+        : input.enforcement === 'monitor'
+          ? 'over_limit_monitor'
+          : input.reportedAtMs >= graceExpiresAtMs!
+            ? 'blocked'
+            : 'overage_grace';
+      const result = await client.query<LicenseSeatUsageRow>(
+        `INSERT INTO control_license_seat_usage
+          (license_id, deployment_id, active_seats, seat_limit, status,
+           overage_started_at_ms, grace_expires_at_ms, last_reported_at_ms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (license_id) DO UPDATE SET
+           deployment_id = EXCLUDED.deployment_id,
+           active_seats = EXCLUDED.active_seats,
+           seat_limit = EXCLUDED.seat_limit,
+           status = EXCLUDED.status,
+           overage_started_at_ms = EXCLUDED.overage_started_at_ms,
+           grace_expires_at_ms = EXCLUDED.grace_expires_at_ms,
+           last_reported_at_ms = EXCLUDED.last_reported_at_ms,
+           updated_at = now()
+         RETURNING *`,
+        [
+          input.licenseId,
+          input.deploymentId,
+          input.activeSeats,
+          input.seatLimit,
+          status,
+          overageStartedAtMs,
+          graceExpiresAtMs,
+          input.reportedAtMs,
+        ],
+      );
+      await client.query('COMMIT');
+      return seatUsageFromRow(result.rows[0]!);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async registerSigningKey(input: {

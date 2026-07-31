@@ -9,9 +9,17 @@ export const OTTO_LICENSE_CAPABILITIES = [
 ] as const;
 
 export type OttoLicenseCapability = (typeof OTTO_LICENSE_CAPABILITIES)[number];
+export type OttoSeatEnforcement = 'monitor' | 'enforce';
+export type OttoSeatStatus =
+  | 'unreported'
+  | 'within_limit'
+  | 'over_limit_monitor'
+  | 'overage_grace'
+  | 'blocked';
 
 export interface OttoLicensePayload {
   id: string;
+  revision: number;
   deploymentId: string;
   organizationId: string;
   machineFingerprint: string;
@@ -20,6 +28,8 @@ export interface OttoLicensePayload {
   issuedAtMs: number;
   expiresAtMs: number;
   seatLimit: number;
+  gracePeriodMs: number;
+  seatEnforcement: OttoSeatEnforcement;
   modules: OttoLicenseCapability[];
   offline: boolean;
   telemetryAllowed: boolean;
@@ -41,6 +51,7 @@ export interface OttoLeaseRequest {
   organizationId: string;
   machineFingerprint: string;
   nonce: string;
+  activeSeatCount?: number;
 }
 
 export interface OttoLeasePayload {
@@ -48,14 +59,21 @@ export interface OttoLeasePayload {
   licenseId: string;
   deploymentId: string;
   machineFingerprint: string;
+  licenseRevision: number;
   issuedAtMs: number;
   expiresAtMs: number;
+  seatLimit: number;
+  activeSeatCount: number | null;
+  seatStatus: OttoSeatStatus;
+  graceReasons: Array<'expiration' | 'seat_overage'>;
+  graceExpiresAtMs: number | null;
 }
 
 export interface OttoSignedLeaseEnvelope {
   lease: OttoLeasePayload;
   signingKeyId: string;
   signature: string;
+  licenseEnvelope: OttoSignedLicenseEnvelope;
 }
 
 export interface IssueLicenseInput {
@@ -63,6 +81,8 @@ export interface IssueLicenseInput {
   plan: string;
   expiresAt: string;
   seatLimit: number;
+  gracePeriodDays?: number;
+  seatEnforcement?: OttoSeatEnforcement;
   modules: OttoLicenseCapability[];
   offline?: boolean;
   telemetryAllowed?: boolean;

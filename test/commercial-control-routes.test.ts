@@ -270,6 +270,7 @@ describe('commercial control HTTP routes', () => {
         organizationId: license.organizationId,
         machineFingerprint: license.machineFingerprint,
         nonce: 'nonce_1234567890abcdef',
+        activeSeatCount: 80,
       },
     });
     expect(leaseResponse.statusCode).toBe(200);
@@ -279,6 +280,47 @@ describe('commercial control HTTP routes', () => {
         deploymentId: license.deploymentId,
       },
     });
+
+    const seatResponse = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/licenses/${license.id as string}/seats`,
+      headers: authorization,
+    });
+    expect(seatResponse.statusCode).toBe(200);
+    expect(seatResponse.json().usage).toMatchObject({
+      activeSeats: 80,
+      seatLimit: 100,
+      status: 'within_limit',
+    });
+
+    const renewalResponse = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/licenses/${license.id as string}/renew`,
+      headers: authorization,
+      payload: { expiresAt: '2031-01-01T00:00:00.000Z' },
+    });
+    expect(renewalResponse.statusCode).toBe(200);
+    expect(renewalResponse.json().license).toMatchObject({ revision: 2 });
+
+    const resizeResponse = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/licenses/${license.id as string}/resize`,
+      headers: authorization,
+      payload: { seatLimit: 50, seatEnforcement: 'monitor' },
+    });
+    expect(resizeResponse.statusCode).toBe(200);
+    expect(resizeResponse.json().license).toMatchObject({ revision: 3, seatLimit: 50 });
+
+    const lifecycleResponse = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/licenses/${license.id as string}/lifecycle`,
+      headers: authorization,
+    });
+    expect(lifecycleResponse.statusCode).toBe(200);
+    expect(lifecycleResponse.json().events).toMatchObject([
+      { revision: 3, changeType: 'downgraded' },
+      { revision: 2, changeType: 'renewed' },
+    ]);
   });
 
   it('ingests authenticated operational telemetry and exposes deployment health', async () => {

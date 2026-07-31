@@ -1,4 +1,8 @@
-import type { OttoLicenseCapability } from '../contracts/license.js';
+import type {
+  OttoLicenseCapability,
+  OttoSeatEnforcement,
+  OttoSeatStatus,
+} from '../contracts/license.js';
 import type {
   AdminAccountRecord,
   AdminApprovalRecord,
@@ -60,6 +64,7 @@ export interface DeploymentRecord {
 
 export interface LicenseRecord {
   id: string;
+  revision: number;
   deploymentId: string;
   customerName: string;
   organizationId: string;
@@ -68,6 +73,8 @@ export interface LicenseRecord {
   issuedAtMs: number;
   expiresAtMs: number;
   seatLimit: number;
+  gracePeriodMs: number;
+  seatEnforcement: OttoSeatEnforcement;
   modules: OttoLicenseCapability[];
   offline: boolean;
   telemetryAllowed: boolean;
@@ -81,6 +88,48 @@ export interface LicenseRecord {
 }
 
 export type CreateLicenseRecordInput = Omit<LicenseRecord, 'createdAt' | 'updatedAt'>;
+
+export type LicenseLifecycleChangeType =
+  | 'renewed'
+  | 'expanded'
+  | 'downgraded'
+  | 'terms_changed'
+  | 'machine_transferred'
+  | 'deployment_rebound';
+
+export interface UpdateLicenseRecordInput extends CreateLicenseRecordInput {
+  expectedRevision: number;
+  actorId: string;
+  changeType: LicenseLifecycleChangeType;
+  changeDetail: Record<string, unknown>;
+  deploymentMachineFingerprint?: {
+    deploymentId: string;
+    expectedFingerprint: string;
+    newFingerprint: string;
+  };
+  resetSeatUsage?: boolean;
+}
+
+export interface LicenseLifecycleEventRecord {
+  id: number;
+  licenseId: string;
+  revision: number;
+  changeType: LicenseLifecycleChangeType;
+  actorId: string;
+  detail: Record<string, unknown>;
+  createdAt: Date;
+}
+
+export interface LicenseSeatUsageRecord {
+  licenseId: string;
+  deploymentId: string;
+  activeSeats: number;
+  seatLimit: number;
+  status: OttoSeatStatus;
+  overageStartedAtMs: number | null;
+  graceExpiresAtMs: number | null;
+  lastReportedAtMs: number;
+}
 
 export interface AuditEventInput {
   actorId: string;
@@ -148,6 +197,18 @@ export interface ControlStore {
   createLicense(input: CreateLicenseRecordInput): Promise<LicenseRecord>;
   getLicense(id: string): Promise<LicenseRecord | null>;
   revokeLicense(id: string, revokedAtMs: number): Promise<LicenseRecord | null>;
+  updateLicense(input: UpdateLicenseRecordInput): Promise<LicenseRecord | null>;
+  listLicenseLifecycleEvents(licenseId: string, limit: number): Promise<LicenseLifecycleEventRecord[]>;
+  getLicenseSeatUsage(licenseId: string): Promise<LicenseSeatUsageRecord | null>;
+  recordLicenseSeatUsage(input: {
+    licenseId: string;
+    deploymentId: string;
+    activeSeats: number;
+    seatLimit: number;
+    gracePeriodMs: number;
+    enforcement: OttoSeatEnforcement;
+    reportedAtMs: number;
+  }): Promise<LicenseSeatUsageRecord>;
   registerSigningKey(input: {
     keyId: string;
     publicKeyPem: string;

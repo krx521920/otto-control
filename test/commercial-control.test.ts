@@ -145,6 +145,190 @@ describe('commercial control service', () => {
     }, license.license.leaseToken!)).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
   });
 
+  it('renews and resizes without invalidating the current deployment token', async () => {
+    const issued = await service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'enterprise',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 20,
+      modules: ['enterprise_tree'],
+    }, ADMIN);
+    const leaseToken = issued.license.leaseToken!;
+    const renewed = await service.renewLicense(issued.license.id, {
+      expiresAt: '2028-07-31T02:00:00.000Z',
+      gracePeriodDays: 10,
+    }, ADMIN);
+    const resized = await service.resizeLicense(issued.license.id, {
+      seatLimit: 12,
+      seatEnforcement: 'enforce',
+      gracePeriodDays: 2,
+    }, ADMIN);
+
+    expect(renewed.license).toMatchObject({ revision: 2, gracePeriodMs: 10 * 86_400_000 });
+    expect(resized.license).toMatchObject({
+      revision: 3,
+      seatLimit: 12,
+      seatEnforcement: 'enforce',
+      gracePeriodMs: 2 * 86_400_000,
+    });
+    expect(renewed.license.leaseToken).toBe(leaseToken);
+    expect(resized.license.leaseToken).toBe(leaseToken);
+    expect(await service.licenseLifecycle(issued.license.id, 20)).toMatchObject([
+      { revision: 3, changeType: 'downgraded' },
+      { revision: 2, changeType: 'renewed' },
+    ]);
+  });
+
+  it('enforces seat overage only after the configured grace period', async () => {
+    const issued = await service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'enterprise',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 2,
+      gracePeriodDays: 1,
+      seatEnforcement: 'enforce',
+      modules: ['enterprise_tree'],
+    }, ADMIN);
+    const request = (nonce: string) => ({
+      version: 1 as const,
+      licenseId: issued.license.id,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: FINGERPRINT,
+      nonce,
+      activeSeatCount: 3,
+    });
+    const duringGrace = await service.issueLease(
+      issued.license.id,
+      request('seat_overage_nonce_0001'),
+      issued.license.leaseToken!,
+    );
+    expect(duringGrace.lease).toMatchObject({
+      activeSeatCount: 3,
+      seatLimit: 2,
+      seatStatus: 'overage_grace',
+      graceReasons: ['seat_overage'],
+    });
+
+    now += 86_400_000;
+    await expect(service.issueLease(
+      issued.license.id,
+      request('seat_overage_nonce_0002'),
+      issued.license.leaseToken!,
+    )).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    expect(await service.licenseSeatUsage(issued.license.id)).toMatchObject({
+      activeSeats: 3,
+      status: 'blocked',
+    });
+  });
+
+  it('keeps online deployments running during expiry grace and stops afterward', async () => {
+    const expiresAtMs = now + 24 * 60 * 60 * 1000;
+    const issued = await service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'enterprise',
+      expiresAt: new Date(expiresAtMs).toISOString(),
+      seatLimit: 20,
+      gracePeriodDays: 2,
+      modules: ['enterprise_tree'],
+    }, ADMIN);
+    now = expiresAtMs + 60 * 60 * 1000;
+    const duringGrace = await service.issueLease(issued.license.id, {
+      version: 1,
+      licenseId: issued.license.id,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: FINGERPRINT,
+      nonce: 'expiration_grace_nonce_01',
+    }, issued.license.leaseToken!);
+    expect(duringGrace.lease).toMatchObject({
+      graceReasons: ['expiration'],
+      graceExpiresAtMs: expiresAtMs + 2 * 24 * 60 * 60 * 1000,
+    });
+
+    now = expiresAtMs + 2 * 24 * 60 * 60 * 1000;
+    await expect(service.issueLease(issued.license.id, {
+      version: 1,
+      licenseId: issued.license.id,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: FINGERPRINT,
+      nonce: 'expiration_grace_nonce_02',
+    }, issued.license.leaseToken!)).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+  });
+
+  it('rotates tokens and atomically moves the deployment machine binding', async () => {
+    const issued = await service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'enterprise',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 20,
+      modules: ['enterprise_tree'],
+    }, ADMIN);
+    const previousToken = issued.license.leaseToken!;
+    const nextFingerprint = 'b'.repeat(64);
+    const transferred = await service.transferLicenseMachine(issued.license.id, {
+      machineFingerprint: nextFingerprint,
+    }, ADMIN);
+
+    expect(transferred.license).toMatchObject({
+      revision: 2,
+      machineFingerprint: nextFingerprint,
+    });
+    expect(transferred.license.leaseToken).not.toBe(previousToken);
+    expect(store.deployments.get(DEPLOYMENT_ID)?.machineFingerprint).toBe(nextFingerprint);
+    await expect(service.issueLease(issued.license.id, {
+      version: 1,
+      licenseId: issued.license.id,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: nextFingerprint,
+      nonce: 'machine_transfer_nonce_01',
+    }, previousToken)).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+  });
+
+  it('rebinds only to another active deployment owned by the same customer', async () => {
+    const customerId = store.deployments.get(DEPLOYMENT_ID)!.customerId;
+    const targetDeploymentId = 'dep_abcdef1234567890';
+    await service.createDeployment({
+      deploymentId: targetDeploymentId,
+      customerId,
+      organizationId: 'org_acme_replacement',
+      machineFingerprint: 'c'.repeat(64),
+      name: 'Acme replacement server',
+    }, ADMIN);
+    const otherCustomer = await service.createCustomer({ name: 'Other customer' }, ADMIN);
+    const foreignDeploymentId = 'dep_feedface12345678';
+    await service.createDeployment({
+      deploymentId: foreignDeploymentId,
+      customerId: otherCustomer.id,
+      organizationId: 'org_other_customer',
+      machineFingerprint: 'd'.repeat(64),
+      name: 'Foreign server',
+    }, ADMIN);
+    const issued = await service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'enterprise',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 20,
+      modules: ['enterprise_tree'],
+    }, ADMIN);
+
+    await expect(service.rebindLicenseDeployment(issued.license.id, {
+      deploymentId: foreignDeploymentId,
+    }, ADMIN)).rejects.toMatchObject({ code: 'CONFLICT' });
+    const rebound = await service.rebindLicenseDeployment(issued.license.id, {
+      deploymentId: targetDeploymentId,
+    }, ADMIN);
+    expect(rebound.license).toMatchObject({
+      revision: 2,
+      deploymentId: targetDeploymentId,
+      organizationId: 'org_acme_replacement',
+      machineFingerprint: 'c'.repeat(64),
+    });
+    expect(rebound.license.leaseToken).not.toBe(issued.license.leaseToken);
+  });
+
   it('matches Otto telemetry HMAC bytes independently', () => {
     const token = 'telemetry-token-that-is-at-least-32-characters';
     const timestamp = 1_785_463_200_000;

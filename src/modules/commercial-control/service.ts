@@ -3,8 +3,10 @@ import { randomUUID } from 'node:crypto';
 import {
   isOttoLicenseCapability,
   type IssueLicenseInput,
+  type OttoLeasePayload,
   type OttoLeaseRequest,
   type OttoLicensePayload,
+  type OttoSeatEnforcement,
   type OttoSignedLeaseEnvelope,
   type OttoSignedLicenseEnvelope,
 } from '../../contracts/license.js';
@@ -29,9 +31,12 @@ import type {
 import { conflict, invalidRequest, notFound, unauthorized } from '../../errors.js';
 import type {
   ControlStore,
+  LicenseLifecycleChangeType,
+  LicenseLifecycleEventRecord,
   CustomerRecord,
   DeploymentRecord,
   LicenseRecord,
+  LicenseSeatUsageRecord,
 } from '../../storage/control-store.js';
 import type { ControlTokenIssuer } from './token-issuer.js';
 
@@ -41,6 +46,7 @@ const MACHINE_FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u;
 const SIGNING_KEY_ID_PATTERN = /^[a-f0-9]{16}$/u;
 const NONCE_PATTERN = /^[a-zA-Z0-9._:-]{16,128}$/u;
 const MAX_LICENSE_DURATION_MS = 5 * 366 * 24 * 60 * 60 * 1000;
+const DEFAULT_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
 const TELEMETRY_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const TELEMETRY_MAX_EVENT_BYTES = 64 * 1024;
 const FORBIDDEN_TELEMETRY_KEYS = new Set([
@@ -149,6 +155,7 @@ function licensePayload(
 ): OttoLicensePayload {
   const payload: OttoLicensePayload = {
     id: license.id,
+    revision: license.revision,
     deploymentId: license.deploymentId,
     organizationId: license.organizationId,
     machineFingerprint: license.machineFingerprint,
@@ -157,6 +164,8 @@ function licensePayload(
     issuedAtMs: license.issuedAtMs,
     expiresAtMs: license.expiresAtMs,
     seatLimit: license.seatLimit,
+    gracePeriodMs: license.gracePeriodMs,
+    seatEnforcement: license.seatEnforcement,
     modules: license.modules,
     offline: license.offline,
     telemetryAllowed: license.telemetryAllowed,
@@ -405,6 +414,287 @@ export class CommercialControlService {
     return deployment;
   }
 
+  async #changeLicense(
+    existing: LicenseRecord,
+    changes: Partial<LicenseRecord>,
+    actorId: string,
+    changeType: LicenseLifecycleChangeType,
+    changeDetail: Record<string, unknown>,
+    options: {
+      rotateTokens?: boolean;
+      deploymentMachineFingerprint?: {
+        deploymentId: string;
+        expectedFingerprint: string;
+        newFingerprint: string;
+      };
+      resetSeatUsage?: boolean;
+    } = {},
+  ): Promise<OttoSignedLicenseEnvelope> {
+    if (existing.revokedAtMs !== null) throw conflict('revoked License cannot be changed');
+    const now = this.#now();
+    const candidate: LicenseRecord = {
+      ...existing,
+      ...changes,
+      revision: existing.revision + 1,
+      tokenVersion: existing.tokenVersion + (options.rotateTokens ? 1 : 0),
+      signature: '',
+      signingKeyId: '',
+      updatedAt: new Date(now),
+    };
+    const signed = await signPayload(this.#signer, licensePayload(candidate, this.#tokens));
+    const stored = await this.#store.updateLicense({
+      id: candidate.id,
+      revision: candidate.revision,
+      deploymentId: candidate.deploymentId,
+      customerName: candidate.customerName,
+      organizationId: candidate.organizationId,
+      machineFingerprint: candidate.machineFingerprint,
+      plan: candidate.plan,
+      issuedAtMs: candidate.issuedAtMs,
+      expiresAtMs: candidate.expiresAtMs,
+      seatLimit: candidate.seatLimit,
+      gracePeriodMs: candidate.gracePeriodMs,
+      seatEnforcement: candidate.seatEnforcement,
+      modules: candidate.modules,
+      offline: candidate.offline,
+      telemetryAllowed: candidate.telemetryAllowed,
+      leaseEndpoint: candidate.leaseEndpoint,
+      tokenVersion: candidate.tokenVersion,
+      signature: signed.signature,
+      signingKeyId: signed.signingKeyId,
+      revokedAtMs: candidate.revokedAtMs,
+      expectedRevision: existing.revision,
+      actorId,
+      changeType,
+      changeDetail,
+      deploymentMachineFingerprint: options.deploymentMachineFingerprint,
+      resetSeatUsage: options.resetSeatUsage,
+    });
+    if (!stored) throw conflict('License changed concurrently; reload and retry');
+    await this.#store.appendAuditEvent({
+      actorId,
+      action: `license.${changeType}`,
+      targetType: 'license',
+      targetId: stored.id,
+      detail: { revision: stored.revision, ...changeDetail },
+    });
+    return {
+      license: licensePayload(stored, this.#tokens),
+      signingKeyId: stored.signingKeyId,
+      signature: stored.signature,
+    };
+  }
+
+  async renewLicense(
+    id: string,
+    raw: unknown,
+    actorId: string,
+  ): Promise<OttoSignedLicenseEnvelope> {
+    const body = objectValue(raw);
+    const expiresAt = requiredString(body, 'expiresAt', 64);
+    const expiresAtMs = Date.parse(expiresAt);
+    const license = await this.#store.getLicense(id);
+    if (!license) throw notFound('license not found');
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= license.expiresAtMs) {
+      throw invalidRequest('renewal expiresAt must be later than the current expiry');
+    }
+    if (expiresAtMs - this.#now() > MAX_LICENSE_DURATION_MS) {
+      throw invalidRequest('renewal cannot extend more than five years from now');
+    }
+    let gracePeriodMs = license.gracePeriodMs;
+    if (body.gracePeriodDays !== undefined) {
+      const days = Number(body.gracePeriodDays);
+      if (!Number.isInteger(days) || days < 0 || days > 30) {
+        throw invalidRequest('gracePeriodDays must be an integer between 0 and 30');
+      }
+      gracePeriodMs = days * 24 * 60 * 60 * 1000;
+    }
+    return this.#changeLicense(
+      license,
+      { expiresAtMs, gracePeriodMs },
+      actorId,
+      'renewed',
+      {
+        previousExpiresAtMs: license.expiresAtMs,
+        expiresAtMs,
+        previousGracePeriodMs: license.gracePeriodMs,
+        gracePeriodMs,
+      },
+    );
+  }
+
+  async resizeLicense(
+    id: string,
+    raw: unknown,
+    actorId: string,
+  ): Promise<OttoSignedLicenseEnvelope> {
+    const body = objectValue(raw);
+    const seatLimit = Number(body.seatLimit);
+    if (!Number.isInteger(seatLimit) || seatLimit < 1 || seatLimit > 100_000) {
+      throw invalidRequest('seatLimit must be an integer between 1 and 100000');
+    }
+    const license = await this.#store.getLicense(id);
+    if (!license) throw notFound('license not found');
+    if (seatLimit === license.seatLimit && body.seatEnforcement === undefined) {
+      throw invalidRequest('seatLimit or seatEnforcement must change');
+    }
+    const seatEnforcement: OttoSeatEnforcement = body.seatEnforcement === undefined
+      ? license.seatEnforcement
+      : body.seatEnforcement as OttoSeatEnforcement;
+    if (!['monitor', 'enforce'].includes(seatEnforcement)) {
+      throw invalidRequest('seatEnforcement must be monitor or enforce');
+    }
+    if (license.offline && seatEnforcement === 'enforce') {
+      throw invalidRequest('offline License cannot enforce real-time seat usage');
+    }
+    let gracePeriodMs = license.gracePeriodMs;
+    if (body.gracePeriodDays !== undefined) {
+      const days = Number(body.gracePeriodDays);
+      if (!Number.isInteger(days) || days < 0 || days > 30) {
+        throw invalidRequest('gracePeriodDays must be an integer between 0 and 30');
+      }
+      gracePeriodMs = days * 24 * 60 * 60 * 1000;
+    }
+    const changeType: LicenseLifecycleChangeType = seatLimit === license.seatLimit
+      ? 'terms_changed'
+      : seatLimit > license.seatLimit
+        ? 'expanded'
+        : 'downgraded';
+    const envelope = await this.#changeLicense(
+      license,
+      { seatLimit, seatEnforcement, gracePeriodMs },
+      actorId,
+      changeType,
+      {
+        previousSeatLimit: license.seatLimit,
+        seatLimit,
+        previousSeatEnforcement: license.seatEnforcement,
+        seatEnforcement,
+        previousGracePeriodMs: license.gracePeriodMs,
+        gracePeriodMs,
+      },
+    );
+    const existingUsage = await this.#store.getLicenseSeatUsage(id);
+    if (existingUsage) {
+      const usage = await this.#store.recordLicenseSeatUsage({
+        licenseId: id,
+        deploymentId: envelope.license.deploymentId,
+        activeSeats: existingUsage.activeSeats,
+        seatLimit,
+        gracePeriodMs,
+        enforcement: seatEnforcement,
+        reportedAtMs: this.#now(),
+      });
+      if (usage.status !== existingUsage.status || usage.seatLimit !== existingUsage.seatLimit) {
+        await this.#store.appendAuditEvent({
+          actorId,
+          action: 'license.seat_status_changed',
+          targetType: 'license',
+          targetId: id,
+          detail: {
+            previousStatus: existingUsage.status,
+            status: usage.status,
+            activeSeats: usage.activeSeats,
+            previousSeatLimit: existingUsage.seatLimit,
+            seatLimit: usage.seatLimit,
+            graceExpiresAtMs: usage.graceExpiresAtMs,
+          },
+        });
+      }
+    }
+    return envelope;
+  }
+
+  async transferLicenseMachine(
+    id: string,
+    raw: unknown,
+    actorId: string,
+  ): Promise<OttoSignedLicenseEnvelope> {
+    const body = objectValue(raw);
+    const machineFingerprint = requiredString(body, 'machineFingerprint', 64).toLowerCase();
+    if (!MACHINE_FINGERPRINT_PATTERN.test(machineFingerprint)) {
+      throw invalidRequest('machineFingerprint must be a SHA-256 hex digest');
+    }
+    const license = await this.#store.getLicense(id);
+    if (!license) throw notFound('license not found');
+    if (machineFingerprint === license.machineFingerprint) {
+      throw invalidRequest('machineFingerprint is unchanged');
+    }
+    return this.#changeLicense(
+      license,
+      { machineFingerprint },
+      actorId,
+      'machine_transferred',
+      {
+        previousMachineFingerprint: license.machineFingerprint,
+        machineFingerprint,
+      },
+      {
+        rotateTokens: true,
+        deploymentMachineFingerprint: {
+          deploymentId: license.deploymentId,
+          expectedFingerprint: license.machineFingerprint,
+          newFingerprint: machineFingerprint,
+        },
+        resetSeatUsage: true,
+      },
+    );
+  }
+
+  async rebindLicenseDeployment(
+    id: string,
+    raw: unknown,
+    actorId: string,
+  ): Promise<OttoSignedLicenseEnvelope> {
+    const body = objectValue(raw);
+    const deploymentId = requiredString(body, 'deploymentId', 68);
+    if (!DEPLOYMENT_ID_PATTERN.test(deploymentId)) throw invalidRequest('deploymentId is invalid');
+    const license = await this.#store.getLicense(id);
+    if (!license) throw notFound('license not found');
+    if (deploymentId === license.deploymentId) throw invalidRequest('deploymentId is unchanged');
+    const [currentDeployment, targetDeployment] = await Promise.all([
+      this.#store.getDeployment(license.deploymentId),
+      this.#store.getDeployment(deploymentId),
+    ]);
+    if (!currentDeployment) throw conflict('current deployment no longer exists');
+    if (!targetDeployment) throw notFound('target deployment not found');
+    if (targetDeployment.status !== 'active') throw conflict('target deployment is suspended');
+    if (targetDeployment.customerId !== currentDeployment.customerId) {
+      throw conflict('License can only be rebound within the same customer');
+    }
+    return this.#changeLicense(
+      license,
+      {
+        deploymentId: targetDeployment.id,
+        customerName: targetDeployment.customerName,
+        organizationId: targetDeployment.organizationId,
+        machineFingerprint: targetDeployment.machineFingerprint,
+      },
+      actorId,
+      'deployment_rebound',
+      {
+        previousDeploymentId: license.deploymentId,
+        deploymentId: targetDeployment.id,
+        previousOrganizationId: license.organizationId,
+        organizationId: targetDeployment.organizationId,
+      },
+      { rotateTokens: true, resetSeatUsage: true },
+    );
+  }
+
+  async licenseLifecycle(id: string, limit: number): Promise<LicenseLifecycleEventRecord[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw invalidRequest('limit must be an integer between 1 and 200');
+    }
+    if (!await this.#store.getLicense(id)) throw notFound('license not found');
+    return this.#store.listLicenseLifecycleEvents(id, limit);
+  }
+
+  async licenseSeatUsage(id: string): Promise<LicenseSeatUsageRecord | null> {
+    if (!await this.#store.getLicense(id)) throw notFound('license not found');
+    return this.#store.getLicenseSeatUsage(id);
+  }
+
   async issueLicense(raw: unknown, actorId: string): Promise<OttoSignedLicenseEnvelope> {
     const body = objectValue(raw);
     const deploymentId = requiredString(body, 'deploymentId', 68);
@@ -436,12 +726,29 @@ export class CommercialControlService {
     if (deployment.status !== 'active') throw conflict('deployment is suspended');
     const offline = body.offline === true;
     const telemetryAllowed = body.telemetryAllowed !== false;
+    const gracePeriodDays = body.gracePeriodDays === undefined
+      ? DEFAULT_GRACE_PERIOD_MS / (24 * 60 * 60 * 1000)
+      : Number(body.gracePeriodDays);
+    if (!Number.isInteger(gracePeriodDays) || gracePeriodDays < 0 || gracePeriodDays > 30) {
+      throw invalidRequest('gracePeriodDays must be an integer between 0 and 30');
+    }
+    const gracePeriodMs = gracePeriodDays * 24 * 60 * 60 * 1000;
+    const seatEnforcement: OttoSeatEnforcement = body.seatEnforcement === undefined
+      ? 'monitor'
+      : body.seatEnforcement as OttoSeatEnforcement;
+    if (!['monitor', 'enforce'].includes(seatEnforcement)) {
+      throw invalidRequest('seatEnforcement must be monitor or enforce');
+    }
+    if (offline && seatEnforcement === 'enforce') {
+      throw invalidRequest('offline License cannot enforce real-time seat usage');
+    }
     const id = prefixedId('lic');
     const leaseEndpoint = offline
       ? null
       : `${this.#publicBaseUrl}/v1/licenses/${encodeURIComponent(id)}/lease`;
     const unsigned: LicenseRecord = {
       id,
+      revision: 1,
       deploymentId,
       customerName: deployment.customerName,
       organizationId: deployment.organizationId,
@@ -450,6 +757,8 @@ export class CommercialControlService {
       issuedAtMs,
       expiresAtMs,
       seatLimit,
+      gracePeriodMs,
+      seatEnforcement,
       modules,
       offline,
       telemetryAllowed,
@@ -477,6 +786,8 @@ export class CommercialControlService {
         deploymentId,
         plan,
         seatLimit,
+        gracePeriodDays,
+        seatEnforcement,
         modules,
         offline,
         expiresAtMs,
@@ -543,7 +854,10 @@ export class CommercialControlService {
     }
     const issuedAtMs = this.#now();
     if (license.revokedAtMs !== null) throw unauthorized('License has been revoked');
-    if (license.expiresAtMs <= issuedAtMs) throw unauthorized('License has expired');
+    const expirationGraceExpiresAtMs = license.expiresAtMs + license.gracePeriodMs;
+    if (issuedAtMs >= expirationGraceExpiresAtMs) {
+      throw unauthorized('License and its grace period have expired');
+    }
     await this.#keyring?.assertLicenseSigningKeyUsable(license.signingKeyId);
     const nonceAccepted = await this.#store.consumeLeaseNonce({
       deploymentId: license.deploymentId,
@@ -551,16 +865,90 @@ export class CommercialControlService {
       expiresAtMs: issuedAtMs + 20 * 60 * 1000,
     });
     if (!nonceAccepted) throw conflict('lease request replay detected');
-    const lease = {
+    let activeSeatCount: number | null = null;
+    let seatStatus: OttoLeasePayload['seatStatus'] = 'unreported';
+    let seatGraceExpiresAtMs: number | null = null;
+    if (body.activeSeatCount === undefined) {
+      if (license.seatEnforcement === 'enforce') {
+        throw invalidRequest('activeSeatCount is required when seat enforcement is enabled');
+      }
+    } else {
+      activeSeatCount = Number(body.activeSeatCount);
+      if (!Number.isInteger(activeSeatCount) || activeSeatCount < 0 || activeSeatCount > 10_000_000) {
+        throw invalidRequest('activeSeatCount must be an integer between 0 and 10000000');
+      }
+      const previousUsage = await this.#store.getLicenseSeatUsage(license.id);
+      const usage = await this.#store.recordLicenseSeatUsage({
+        licenseId: license.id,
+        deploymentId: license.deploymentId,
+        activeSeats: activeSeatCount,
+        seatLimit: license.seatLimit,
+        gracePeriodMs: license.gracePeriodMs,
+        enforcement: license.seatEnforcement,
+        reportedAtMs: issuedAtMs,
+      });
+      seatStatus = usage.status;
+      seatGraceExpiresAtMs = usage.graceExpiresAtMs;
+      if (
+        previousUsage?.status !== usage.status ||
+        previousUsage?.seatLimit !== usage.seatLimit
+      ) {
+        await this.#store.appendAuditEvent({
+          actorId: `deployment:${license.deploymentId}`,
+          action: 'license.seat_status_changed',
+          targetType: 'license',
+          targetId: license.id,
+          detail: {
+            previousStatus: previousUsage?.status ?? 'unreported',
+            status: usage.status,
+            activeSeats: usage.activeSeats,
+            seatLimit: usage.seatLimit,
+            graceExpiresAtMs: usage.graceExpiresAtMs,
+          },
+        });
+      }
+      if (usage.status === 'blocked') {
+        throw unauthorized('active seats exceed the licensed limit and grace period');
+      }
+    }
+    const graceReasons: OttoLeasePayload['graceReasons'] = [];
+    const graceDeadlines: number[] = [];
+    if (issuedAtMs >= license.expiresAtMs) {
+      graceReasons.push('expiration');
+      graceDeadlines.push(expirationGraceExpiresAtMs);
+    }
+    if (seatStatus === 'overage_grace' && seatGraceExpiresAtMs !== null) {
+      graceReasons.push('seat_overage');
+      graceDeadlines.push(seatGraceExpiresAtMs);
+    }
+    const graceExpiresAtMs = graceDeadlines.length > 0 ? Math.min(...graceDeadlines) : null;
+    const lease: OttoLeasePayload = {
       id: prefixedId('lease'),
       licenseId: license.id,
       deploymentId: license.deploymentId,
       machineFingerprint: license.machineFingerprint,
+      licenseRevision: license.revision,
       issuedAtMs,
-      expiresAtMs: Math.min(issuedAtMs + this.#leaseDurationMs, license.expiresAtMs),
+      expiresAtMs: Math.min(
+        issuedAtMs + this.#leaseDurationMs,
+        graceExpiresAtMs ?? license.expiresAtMs,
+      ),
+      seatLimit: license.seatLimit,
+      activeSeatCount,
+      seatStatus,
+      graceReasons,
+      graceExpiresAtMs,
     };
     const signed = await signPayload(this.#signer, lease);
-    return { lease, ...signed };
+    return {
+      lease,
+      ...signed,
+      licenseEnvelope: {
+        license: licensePayload(license, this.#tokens),
+        signingKeyId: license.signingKeyId,
+        signature: license.signature,
+      },
+    };
   }
 
   async ingestTelemetry(
@@ -583,7 +971,9 @@ export class CommercialControlService {
     }
     const now = this.#now();
     if (license.revokedAtMs !== null) throw unauthorized('License has been revoked');
-    if (license.expiresAtMs <= now) throw unauthorized('License has expired');
+    if (license.expiresAtMs + license.gracePeriodMs <= now) {
+      throw unauthorized('License and its grace period have expired');
+    }
     if (!license.telemetryAllowed) throw unauthorized('License does not allow telemetry');
     const deployment = await this.#store.getDeployment(deploymentId);
     if (!deployment || deployment.status !== 'active') {

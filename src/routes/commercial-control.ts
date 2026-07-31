@@ -100,6 +100,79 @@ export async function registerCommercialControlRoutes(
     });
 
     admin.post<{ Params: { licenseId: string } }>(
+      '/licenses/:licenseId/renew',
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'license.manage');
+        return options.service.renewLicense(request.params.licenseId, request.body, auth.actorId);
+      },
+    );
+
+    admin.post<{ Params: { licenseId: string } }>(
+      '/licenses/:licenseId/resize',
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'license.manage');
+        return options.service.resizeLicense(request.params.licenseId, request.body, auth.actorId);
+      },
+    );
+
+    admin.post<{ Params: { licenseId: string } }>(
+      '/licenses/:licenseId/transfer-machine',
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'license.transfer');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'license.transfer_machine',
+          targetType: 'license',
+          targetId: request.params.licenseId,
+          request: request.body ?? {},
+        });
+        return options.service.transferLicenseMachine(
+          request.params.licenseId,
+          request.body,
+          auth.actorId,
+        );
+      },
+    );
+
+    admin.post<{ Params: { licenseId: string } }>(
+      '/licenses/:licenseId/rebind-deployment',
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'license.transfer');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'license.rebind_deployment',
+          targetType: 'license',
+          targetId: request.params.licenseId,
+          request: request.body ?? {},
+        });
+        return options.service.rebindLicenseDeployment(
+          request.params.licenseId,
+          request.body,
+          auth.actorId,
+        );
+      },
+    );
+
+    admin.get<{
+      Params: { licenseId: string };
+      Querystring: { limit?: string };
+    }>('/licenses/:licenseId/lifecycle', async (request) => {
+      await authenticateAdmin(request, options, 'license.usage.read');
+      return {
+        events: await options.service.licenseLifecycle(
+          request.params.licenseId,
+          request.query.limit === undefined ? 50 : Number(request.query.limit),
+        ),
+      };
+    });
+
+    admin.get<{ Params: { licenseId: string } }>(
+      '/licenses/:licenseId/seats',
+      async (request) => {
+        await authenticateAdmin(request, options, 'license.usage.read');
+        return { usage: await options.service.licenseSeatUsage(request.params.licenseId) };
+      },
+    );
+
+    admin.post<{ Params: { licenseId: string } }>(
       '/licenses/:licenseId/revoke',
       async (request) => {
         const auth = await authenticateAdmin(request, options, 'license.revoke');

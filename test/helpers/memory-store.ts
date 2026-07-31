@@ -6,14 +6,18 @@ import type {
   CustomerRecord,
   DeploymentUpdateAssignmentRecord,
   DeploymentRecord,
+  LicenseLifecycleEventRecord,
   LicenseRecord,
+  LicenseSeatUsageRecord,
   SigningKeyProvider,
   SigningKeyRecord,
   SigningKeyTransition,
   UpdateDistributionRecord,
+  UpdateLicenseRecordInput,
   UpdateReleaseRecord,
   UpdateReleaseTransition,
 } from '../../src/storage/control-store.js';
+import type { OttoSeatEnforcement, OttoSeatStatus } from '../../src/contracts/license.js';
 import type {
   DeploymentTelemetrySummary,
   OttoTelemetryEvent,
@@ -36,7 +40,8 @@ const role = (
 
 const ALL_PERMISSIONS: AdminPermission[] = [
   'customer.create', 'deployment.create', 'license.issue', 'license.read',
-  'license.revoke', 'signing_key.read', 'signing_key.manage', 'telemetry.read',
+  'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
+  'signing_key.read', 'signing_key.manage', 'telemetry.read',
   'update_distribution.manage', 'update_release.create', 'update_release.read',
   'update_release.publish', 'identity.read', 'identity.manage', 'approval.request',
   'approval.read', 'approval.decide',
@@ -52,6 +57,8 @@ export class MemoryControlStore implements ControlStore {
   readonly customers = new Map<string, CustomerRecord>();
   readonly deployments = new Map<string, DeploymentRecord>();
   readonly licenses = new Map<string, LicenseRecord>();
+  readonly licenseLifecycleEvents: LicenseLifecycleEventRecord[] = [];
+  readonly licenseSeatUsage = new Map<string, LicenseSeatUsageRecord>();
   readonly signingKeys = new Map<string, SigningKeyRecord>();
   readonly nonces = new Set<string>();
   readonly audits: AuditEventInput[] = [];
@@ -76,14 +83,15 @@ export class MemoryControlStore implements ControlStore {
     ])],
     ['license_admin', role('license_admin', 'License administrator', [
       'customer.create', 'deployment.create', 'license.issue', 'license.read',
-      'license.revoke', 'telemetry.read', 'approval.request', 'approval.read',
+      'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
+      'telemetry.read', 'approval.request', 'approval.read',
     ])],
     ['release_admin', role('release_admin', 'Release administrator', [
       'update_distribution.manage', 'update_release.create', 'update_release.read',
       'update_release.publish', 'approval.request', 'approval.read',
     ])],
     ['auditor', role('auditor', 'Auditor', [
-      'license.read', 'signing_key.read', 'telemetry.read', 'update_release.read',
+      'license.read', 'license.usage.read', 'signing_key.read', 'telemetry.read', 'update_release.read',
       'identity.read', 'approval.read',
     ])],
   ]);
@@ -150,6 +158,90 @@ export class MemoryControlStore implements ControlStore {
     };
     this.licenses.set(id, updated);
     return updated;
+  }
+
+  async updateLicense(input: UpdateLicenseRecordInput): Promise<LicenseRecord | null> {
+    const existing = this.licenses.get(input.id);
+    if (!existing || existing.revision !== input.expectedRevision) return null;
+    if (input.deploymentMachineFingerprint) {
+      const binding = input.deploymentMachineFingerprint;
+      const deployment = this.deployments.get(binding.deploymentId);
+      if (!deployment || deployment.machineFingerprint !== binding.expectedFingerprint) return null;
+      this.deployments.set(binding.deploymentId, {
+        ...deployment,
+        machineFingerprint: binding.newFingerprint,
+        updatedAt: new Date(),
+      });
+    }
+    const updated: LicenseRecord = {
+      ...input,
+      createdAt: existing.createdAt,
+      updatedAt: new Date(),
+    };
+    this.licenses.set(input.id, updated);
+    if (input.resetSeatUsage) this.licenseSeatUsage.delete(input.id);
+    this.licenseLifecycleEvents.push({
+      id: this.licenseLifecycleEvents.length + 1,
+      licenseId: input.id,
+      revision: input.revision,
+      changeType: input.changeType,
+      actorId: input.actorId,
+      detail: input.changeDetail,
+      createdAt: updated.updatedAt,
+    });
+    return updated;
+  }
+
+  async listLicenseLifecycleEvents(
+    licenseId: string,
+    limit: number,
+  ): Promise<LicenseLifecycleEventRecord[]> {
+    return this.licenseLifecycleEvents
+      .filter((event) => event.licenseId === licenseId)
+      .sort((left, right) => right.revision - left.revision)
+      .slice(0, limit);
+  }
+
+  async getLicenseSeatUsage(licenseId: string): Promise<LicenseSeatUsageRecord | null> {
+    return this.licenseSeatUsage.get(licenseId) ?? null;
+  }
+
+  async recordLicenseSeatUsage(input: {
+    licenseId: string;
+    deploymentId: string;
+    activeSeats: number;
+    seatLimit: number;
+    gracePeriodMs: number;
+    enforcement: OttoSeatEnforcement;
+    reportedAtMs: number;
+  }): Promise<LicenseSeatUsageRecord> {
+    const previous = this.licenseSeatUsage.get(input.licenseId);
+    const overLimit = input.activeSeats > input.seatLimit;
+    const overageStartedAtMs = overLimit && input.enforcement === 'enforce'
+      ? previous?.overageStartedAtMs ?? input.reportedAtMs
+      : null;
+    const graceExpiresAtMs = overageStartedAtMs === null
+      ? null
+      : overageStartedAtMs + input.gracePeriodMs;
+    const status: OttoSeatStatus = !overLimit
+      ? 'within_limit'
+      : input.enforcement === 'monitor'
+        ? 'over_limit_monitor'
+        : input.reportedAtMs >= graceExpiresAtMs!
+          ? 'blocked'
+          : 'overage_grace';
+    const record: LicenseSeatUsageRecord = {
+      licenseId: input.licenseId,
+      deploymentId: input.deploymentId,
+      activeSeats: input.activeSeats,
+      seatLimit: input.seatLimit,
+      status,
+      overageStartedAtMs,
+      graceExpiresAtMs,
+      lastReportedAtMs: input.reportedAtMs,
+    };
+    this.licenseSeatUsage.set(input.licenseId, record);
+    return record;
   }
 
   async registerSigningKey(input: {

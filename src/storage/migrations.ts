@@ -327,6 +327,63 @@ const MIGRATIONS: Migration[] = [
        ON CONFLICT DO NOTHING`,
     ],
   },
+  {
+    id: '007_license_lifecycle',
+    statements: [
+      `ALTER TABLE control_licenses
+       ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1
+         CHECK (revision > 0)`,
+      `ALTER TABLE control_licenses
+       ADD COLUMN IF NOT EXISTS grace_period_ms BIGINT NOT NULL DEFAULT 604800000
+         CHECK (grace_period_ms >= 0 AND grace_period_ms <= 2592000000)`,
+      `ALTER TABLE control_licenses
+       ADD COLUMN IF NOT EXISTS seat_enforcement TEXT NOT NULL DEFAULT 'monitor'
+         CHECK (seat_enforcement IN ('monitor', 'enforce'))`,
+      `CREATE TABLE IF NOT EXISTS control_license_lifecycle_events (
+        id BIGSERIAL PRIMARY KEY,
+        license_id TEXT NOT NULL REFERENCES control_licenses(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision > 1),
+        change_type TEXT NOT NULL
+          CHECK (change_type IN ('renewed', 'expanded', 'downgraded',
+                                 'terms_changed', 'machine_transferred',
+                                 'deployment_rebound')),
+        actor_id TEXT NOT NULL,
+        detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (license_id, revision)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_license_lifecycle_events_license
+       ON control_license_lifecycle_events(license_id, created_at DESC)`,
+      `CREATE TABLE IF NOT EXISTS control_license_seat_usage (
+        license_id TEXT PRIMARY KEY REFERENCES control_licenses(id) ON DELETE CASCADE,
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id),
+        active_seats INTEGER NOT NULL CHECK (active_seats >= 0),
+        seat_limit INTEGER NOT NULL CHECK (seat_limit > 0),
+        status TEXT NOT NULL
+          CHECK (status IN ('unreported', 'within_limit', 'over_limit_monitor',
+                            'overage_grace', 'blocked')),
+        overage_started_at_ms BIGINT,
+        grace_expires_at_ms BIGINT,
+        last_reported_at_ms BIGINT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `INSERT INTO control_admin_permissions (id) VALUES
+        ('license.manage'), ('license.transfer'), ('license.usage.read')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'super_admin', id FROM control_admin_permissions
+       WHERE id IN ('license.manage', 'license.transfer', 'license.usage.read')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'license_admin', id FROM control_admin_permissions
+       WHERE id IN ('license.manage', 'license.transfer', 'license.usage.read')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'auditor', id FROM control_admin_permissions
+       WHERE id = 'license.usage.read'
+       ON CONFLICT DO NOTHING`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {
