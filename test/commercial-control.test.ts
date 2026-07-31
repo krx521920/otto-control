@@ -1,0 +1,146 @@
+import { generateKeyPairSync, verify, type KeyObject } from 'node:crypto';
+
+import { beforeEach, describe, expect, it } from 'vitest';
+
+import { canonicalJson, LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import { CommercialControlService } from '../src/modules/commercial-control/service.js';
+import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
+import { MemoryControlStore } from './helpers/memory-store.js';
+
+const ADMIN = 'admin@example.test';
+const DEPLOYMENT_ID = 'dep_1234567890abcdef';
+const ORGANIZATION_ID = 'org_acme';
+const FINGERPRINT = 'a'.repeat(64);
+const TOKEN_SECRET = 'test-control-token-secret-that-is-long-enough';
+
+function verifyEnvelope(
+  publicKey: KeyObject,
+  payload: unknown,
+  signature: string,
+): boolean {
+  return verify(
+    null,
+    Buffer.from(canonicalJson(payload)),
+    publicKey,
+    Buffer.from(signature.slice('ed25519:'.length), 'base64url'),
+  );
+}
+
+describe('commercial control service', () => {
+  let store: MemoryControlStore;
+  let service: CommercialControlService;
+  let publicKey: KeyObject;
+  let now: number;
+
+  beforeEach(async () => {
+    store = new MemoryControlStore();
+    const keys = generateKeyPairSync('ed25519');
+    publicKey = keys.publicKey;
+    const privateKey = keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
+    now = Date.parse('2026-07-31T02:00:00.000Z');
+    service = new CommercialControlService({
+      store,
+      signer: new LocalEd25519Signer(privateKey),
+      tokenIssuer: new ControlTokenIssuer(TOKEN_SECRET),
+      publicBaseUrl: 'https://control.otto.test',
+      now: () => now,
+    });
+    const customer = await service.createCustomer({ name: 'Acme Park' }, ADMIN);
+    await service.createDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      customerId: customer.id,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: FINGERPRINT,
+      name: 'Acme primary server',
+    }, ADMIN);
+  });
+
+  it('issues an Otto-compatible online License without storing plaintext tokens', async () => {
+    const envelope = await service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'enterprise',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 200,
+      modules: ['enterprise_tree', 'direct_messages', 'park_service'],
+    }, ADMIN);
+
+    expect(envelope.license).toMatchObject({
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: FINGERPRINT,
+      offline: false,
+      telemetryAllowed: true,
+      issuedAtMs: now,
+    });
+    expect(envelope.license.leaseEndpoint).toBe(
+      `https://control.otto.test/v1/licenses/${envelope.license.id}/lease`,
+    );
+    expect(envelope.license.leaseToken).toHaveLength(43);
+    expect(envelope.license.telemetryToken).toHaveLength(43);
+    expect(envelope.signature).toMatch(/^ed25519:/u);
+    expect(verifyEnvelope(publicKey, envelope.license, envelope.signature)).toBe(true);
+
+    const stored = store.licenses.get(envelope.license.id)!;
+    expect(JSON.stringify(stored)).not.toContain(envelope.license.leaseToken!);
+    expect(JSON.stringify(stored)).not.toContain(envelope.license.telemetryToken!);
+  });
+
+  it('issues a ten-minute signed lease and rejects replayed nonces', async () => {
+    const license = await service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'enterprise',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 20,
+      modules: ['enterprise_tree'],
+    }, ADMIN);
+    const request = {
+      version: 1,
+      licenseId: license.license.id,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: FINGERPRINT,
+      nonce: 'nonce_1234567890abcdef',
+    } as const;
+    const lease = await service.issueLease(
+      license.license.id,
+      request,
+      license.license.leaseToken!,
+    );
+
+    expect(lease.lease.expiresAtMs - lease.lease.issuedAtMs).toBe(10 * 60 * 1000);
+    expect(verifyEnvelope(publicKey, lease.lease, lease.signature)).toBe(true);
+    await expect(service.issueLease(
+      license.license.id,
+      request,
+      license.license.leaseToken!,
+    )).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('fails closed after revocation and on deployment binding mismatches', async () => {
+    const license = await service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'enterprise',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 20,
+      modules: ['enterprise_tree'],
+    }, ADMIN);
+    await expect(service.issueLease(license.license.id, {
+      version: 1,
+      licenseId: license.license.id,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: 'org_other',
+      machineFingerprint: FINGERPRINT,
+      nonce: 'nonce_1234567890abcdef',
+    }, license.license.leaseToken!)).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+
+    await service.revokeLicense(license.license.id, ADMIN);
+    await expect(service.issueLease(license.license.id, {
+      version: 1,
+      licenseId: license.license.id,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: FINGERPRINT,
+      nonce: 'nonce_abcdef1234567890',
+    }, license.license.leaseToken!)).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+  });
+});

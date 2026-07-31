@@ -10,4 +10,10 @@ code.
 - License: MIT
 - Copyright: Fastify contributors
 
+## node-postgres (`pg`)
+
+- Project: https://github.com/brianc/node-postgres
+- License: MIT
+- Copyright: Brian Carlson and contributors
+
 The complete dependency inventory is recorded in `package-lock.json`.

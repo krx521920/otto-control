@@ -18,6 +18,11 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Logger redaction for credentials and License/telemetry tokens
 - Strict configuration validation
 - Container build running as a non-root user
+- PostgreSQL customer, deployment, License, replay-nonce, and audit tables
+- Otto-compatible Ed25519 License envelopes and 10-minute online leases
+- License binding to deployment ID, organization ID, and machine fingerprint
+- Administrator bearer authentication and fail-closed License revocation
+- Derived lease/telemetry tokens that are never stored as plaintext in PostgreSQL
 
 ## Development
 
@@ -33,6 +38,10 @@ curl http://127.0.0.1:7788/health/live
 curl http://127.0.0.1:7788/health/ready
 curl http://127.0.0.1:7788/v1
 ```
+
+The health-only development server starts without commercial configuration. A
+production server fails at startup unless every commercial secret and database
+setting below is present.
 
 Run all local gates:
 
@@ -50,7 +59,50 @@ npm run check
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.1.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.2.0` | Runtime version exposed by health APIs |
+| `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
+| `CONTROL_DATABASE_SSL` | production: `true` | Require verified TLS to PostgreSQL |
+| `CONTROL_ADMIN_TOKEN` | empty | 32-byte minimum bearer token for `/v1/admin/*` |
+| `CONTROL_TOKEN_SECRET` | empty | 32-byte minimum root secret used to derive scoped tokens |
+| `CONTROL_SIGNER_PRIVATE_KEY_FILE` | empty | Read-only Ed25519 PKCS#8 secret mount |
+| `CONTROL_LEASE_DURATION_MS` | `600000` | Online lease lifetime; Otto refreshes every two minutes |
+
+## Commercial control flow
+
+1. Create a customer with `POST /v1/admin/customers`.
+2. Read the Otto server's deployment ID, organization ID, and machine
+   fingerprint, then register them with `POST /v1/admin/deployments`.
+3. Issue an online or offline License with `POST /v1/admin/licenses`.
+4. Configure the returned public key from `GET /v1/admin/signing-key` as an
+   Otto License verification key.
+5. Import the signed envelope into Otto. Online deployments refresh
+   `POST /v1/licenses/:licenseId/lease` every two minutes.
+
+The control database stores License metadata, signatures, and a token version.
+It does not store the License private key or plaintext lease/telemetry tokens.
+The private key path must point to a read-only secret mount. The signer is an
+interface so a KMS/HSM adapter can replace the mounted-file signer without
+changing the License service or HTTP contract.
+
+Revoking an online License prevents the next lease renewal, so normal access is
+removed within the 10-minute lease window. Offline Licenses cannot receive live
+revocation and must use short, explicit expiry periods appropriate to the
+customer contract.
+
+## Implemented APIs
+
+```text
+GET  /health/live
+GET  /health/ready
+GET  /v1
+POST /v1/admin/customers
+POST /v1/admin/deployments
+POST /v1/admin/licenses
+GET  /v1/admin/licenses/:licenseId
+POST /v1/admin/licenses/:licenseId/revoke
+GET  /v1/admin/signing-key
+POST /v1/licenses/:licenseId/lease
+```
 
 ## Planned module boundaries
 
@@ -58,14 +110,14 @@ npm run check
 Traefik
   -> Otto Control Fastify edge
        -> identity_admin
-       -> customer_deployment
-       -> license_authority
-       -> lease_revocation
+       -> customer_deployment (implemented foundation)
+       -> license_authority (implemented foundation)
+       -> lease_revocation (implemented foundation)
        -> telemetry_health
        -> update_policy
        -> audit
 ```
 
-License private keys must never be stored in the database or ordinary runtime
-configuration. The License authority module will receive a signer interface so
-production deployments can use an offline signer, KMS, or HSM.
+The next phase is the authenticated telemetry ingest worker and operational
+health dashboard contract. Update policy and federation remain separate later
+phases.

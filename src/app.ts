@@ -3,11 +3,15 @@ import { randomUUID } from 'node:crypto';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyServerOptions } from 'fastify';
 
 import { loadControlConfig, type ControlConfig } from './config.js';
+import { ControlPlaneError } from './errors.js';
+import type { CommercialControlRuntime } from './runtime.js';
+import { registerCommercialControlRoutes } from './routes/commercial-control.js';
 import { registerPlatformRoutes } from './routes/platform.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
   logger?: FastifyServerOptions['logger'];
+  commercialControl?: CommercialControlRuntime | null;
 }
 
 function fastifyError(error: unknown): FastifyError | null {
@@ -15,6 +19,7 @@ function fastifyError(error: unknown): FastifyError | null {
 }
 
 function statusCodeFor(error: unknown): number {
+  if (error instanceof ControlPlaneError) return error.statusCode;
   const candidate = fastifyError(error);
   if (candidate?.validation) return 400;
   const statusCode = candidate?.statusCode ?? 500;
@@ -81,7 +86,9 @@ export async function buildControlApp(
     if (statusCode >= 500) request.log.error({ err: error }, 'request failed');
     await reply.code(statusCode).send({
       error: {
-        code: statusCode === 400 ? 'INVALID_REQUEST' : 'REQUEST_FAILED',
+        code: error instanceof ControlPlaneError
+          ? error.code
+          : statusCode === 400 ? 'INVALID_REQUEST' : 'REQUEST_FAILED',
         message: statusCode >= 500
           ? 'Internal server error'
           : candidate?.message || 'Invalid request',
@@ -90,6 +97,16 @@ export async function buildControlApp(
     });
   });
 
-  await registerPlatformRoutes(app, config);
+  const commercialControl = options.commercialControl ?? null;
+  const capabilities = ['health'];
+  if (commercialControl) {
+    capabilities.push('customer_deployment', 'license_authority', 'lease_revocation');
+    await registerCommercialControlRoutes(app, commercialControl);
+    app.addHook('onClose', async () => commercialControl.service.close());
+  }
+  await registerPlatformRoutes(app, config, {
+    capabilities,
+    readiness: commercialControl ? () => commercialControl.service.ready() : undefined,
+  });
   return app;
 }

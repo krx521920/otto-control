@@ -19,6 +19,9 @@ describe('control configuration', () => {
     expect(() => loadControlConfig({ CONTROL_TRUST_PROXY: 'yes' })).toThrow(
       'CONTROL_TRUST_PROXY must be true or false',
     );
+    expect(() => loadControlConfig({ CONTROL_ADMIN_TOKEN: 'short' })).toThrow(
+      'CONTROL_ADMIN_TOKEN must contain at least 32 bytes',
+    );
   });
 
   it('requires an HTTPS public URL in production', () => {

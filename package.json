@@ -1,6 +1,6 @@
 {
   "name": "otto-control",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Commercial control plane for Otto private deployments",
   "type": "module",
@@ -18,10 +18,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "fastify": "^5.8.5"
+    "fastify": "^5.8.5",
+    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
+    "@types/pg": "^8.15.5",
     "eslint": "^10.8.0",
     "globals": "^17.8.0",
     "tsx": "^4.20.3",

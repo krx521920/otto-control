@@ -9,6 +9,12 @@ export interface ControlConfig {
   trustProxy: boolean;
   publicBaseUrl: string | null;
   version: string;
+  databaseUrl: string | null;
+  databaseSsl: boolean;
+  adminToken: string | null;
+  tokenSecret: string | null;
+  signerPrivateKeyFile: string | null;
+  leaseDurationMs: number;
 }
 
 const LOG_LEVELS = new Set<ControlLogLevel>([
@@ -37,11 +43,47 @@ function parsePort(value: string | undefined): number {
   return port;
 }
 
-function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+function parseBoolean(value: string | undefined, fallback: boolean, name: string): boolean {
   if (value === undefined || value.trim() === '') return fallback;
   if (value === 'true') return true;
   if (value === 'false') return false;
-  throw new Error('CONTROL_TRUST_PROXY must be true or false');
+  throw new Error(`${name} must be true or false`);
+}
+
+function optionalSecret(value: string | undefined, name: string): string | null {
+  const normalized = value?.trim();
+  if (!normalized) return null;
+  if (Buffer.byteLength(normalized, 'utf8') < 32) {
+    throw new Error(`${name} must contain at least 32 bytes`);
+  }
+  return normalized;
+}
+
+function parseDatabaseUrl(value: string | undefined): string | null {
+  const normalized = value?.trim();
+  if (!normalized) return null;
+  let url: URL;
+  try {
+    url = new URL(normalized);
+  } catch {
+    throw new Error('CONTROL_DATABASE_URL must be an absolute PostgreSQL URL');
+  }
+  if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
+    throw new Error('CONTROL_DATABASE_URL must use postgres:// or postgresql://');
+  }
+  return normalized;
+}
+
+function parseLeaseDuration(value: string | undefined): number {
+  const normalized = value?.trim() || '600000';
+  if (!/^\d+$/u.test(normalized)) {
+    throw new Error('CONTROL_LEASE_DURATION_MS must be an integer');
+  }
+  const duration = Number(normalized);
+  if (duration < 120_000 || duration > 86_400_000) {
+    throw new Error('CONTROL_LEASE_DURATION_MS must be between 120000 and 86400000');
+  }
+  return duration;
 }
 
 function parseLogLevel(value: string | undefined): ControlLogLevel {
@@ -74,8 +116,18 @@ export function loadControlConfig(
     host: env.CONTROL_HOST?.trim() || '127.0.0.1',
     port: parsePort(env.CONTROL_PORT),
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
-    trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false),
+    trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.1.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.2.0',
+    databaseUrl: parseDatabaseUrl(env.CONTROL_DATABASE_URL),
+    databaseSsl: parseBoolean(
+      env.CONTROL_DATABASE_SSL,
+      environment === 'production',
+      'CONTROL_DATABASE_SSL',
+    ),
+    adminToken: optionalSecret(env.CONTROL_ADMIN_TOKEN, 'CONTROL_ADMIN_TOKEN'),
+    tokenSecret: optionalSecret(env.CONTROL_TOKEN_SECRET, 'CONTROL_TOKEN_SECRET'),
+    signerPrivateKeyFile: env.CONTROL_SIGNER_PRIVATE_KEY_FILE?.trim() || null,
+    leaseDurationMs: parseLeaseDuration(env.CONTROL_LEASE_DURATION_MS),
   });
 }

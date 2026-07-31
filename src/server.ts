@@ -1,8 +1,10 @@
 import { buildControlApp } from './app.js';
 import { loadControlConfig } from './config.js';
+import { createCommercialControlRuntime } from './runtime.js';
 
 const config = loadControlConfig();
-const app = await buildControlApp({ config });
+const commercialControl = await createCommercialControlRuntime(config);
+const app = await buildControlApp({ config, commercialControl });
 let closing = false;
 
 async function close(signal: string): Promise<void> {

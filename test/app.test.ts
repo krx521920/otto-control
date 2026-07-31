@@ -12,6 +12,12 @@ const testConfig: Readonly<ControlConfig> = {
   trustProxy: false,
   publicBaseUrl: null,
   version: '0.1.0-test',
+  databaseUrl: null,
+  databaseSsl: false,
+  adminToken: null,
+  tokenSecret: null,
+  signerPrivateKeyFile: null,
+  leaseDurationMs: 600_000,
 };
 
 let app: FastifyInstance | undefined;
