@@ -1,4 +1,9 @@
 import type { OttoLicenseCapability } from '../contracts/license.js';
+import type {
+  DeploymentTelemetrySummary,
+  OttoTelemetryEvent,
+  OttoTelemetryReceipt,
+} from '../contracts/telemetry.js';
 
 export type RecordStatus = 'active' | 'suspended';
 
@@ -74,5 +79,18 @@ export interface ControlStore {
     nonce: string;
     expiresAtMs: number;
   }): Promise<boolean>;
+  ingestTelemetryBatch(input: {
+    deploymentId: string;
+    licenseId: string;
+    nonce: string;
+    nonceExpiresAtMs: number;
+    retentionBeforeMs: number;
+    receivedAtMs: number;
+    events: OttoTelemetryEvent[];
+  }): Promise<OttoTelemetryReceipt | null>;
+  getDeploymentTelemetrySummary(input: {
+    deploymentId: string;
+    sinceMs: number;
+  }): Promise<DeploymentTelemetrySummary>;
   appendAuditEvent(input: AuditEventInput): Promise<void>;
 }

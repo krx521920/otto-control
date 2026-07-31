@@ -22,6 +22,9 @@ describe('control configuration', () => {
     expect(() => loadControlConfig({ CONTROL_ADMIN_TOKEN: 'short' })).toThrow(
       'CONTROL_ADMIN_TOKEN must contain at least 32 bytes',
     );
+    expect(() => loadControlConfig({ CONTROL_TELEMETRY_RETENTION_DAYS: '0' })).toThrow(
+      'CONTROL_TELEMETRY_RETENTION_DAYS must be between 1 and 3650',
+    );
   });
 
   it('requires an HTTPS public URL in production', () => {

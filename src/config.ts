@@ -15,6 +15,7 @@ export interface ControlConfig {
   tokenSecret: string | null;
   signerPrivateKeyFile: string | null;
   leaseDurationMs: number;
+  telemetryRetentionDays: number;
 }
 
 const LOG_LEVELS = new Set<ControlLogLevel>([
@@ -86,6 +87,18 @@ function parseLeaseDuration(value: string | undefined): number {
   return duration;
 }
 
+function parseRetentionDays(value: string | undefined): number {
+  const normalized = value?.trim() || '90';
+  if (!/^\d+$/u.test(normalized)) {
+    throw new Error('CONTROL_TELEMETRY_RETENTION_DAYS must be an integer');
+  }
+  const days = Number(normalized);
+  if (days < 1 || days > 3650) {
+    throw new Error('CONTROL_TELEMETRY_RETENTION_DAYS must be between 1 and 3650');
+  }
+  return days;
+}
+
 function parseLogLevel(value: string | undefined): ControlLogLevel {
   const normalized = (value?.trim() || 'info') as ControlLogLevel;
   if (!LOG_LEVELS.has(normalized)) throw new Error('CONTROL_LOG_LEVEL is invalid');
@@ -118,7 +131,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.2.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.3.0',
     databaseUrl: parseDatabaseUrl(env.CONTROL_DATABASE_URL),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -129,5 +142,6 @@ export function loadControlConfig(
     tokenSecret: optionalSecret(env.CONTROL_TOKEN_SECRET, 'CONTROL_TOKEN_SECRET'),
     signerPrivateKeyFile: env.CONTROL_SIGNER_PRIVATE_KEY_FILE?.trim() || null,
     leaseDurationMs: parseLeaseDuration(env.CONTROL_LEASE_DURATION_MS),
+    telemetryRetentionDays: parseRetentionDays(env.CONTROL_TELEMETRY_RETENTION_DAYS),
   });
 }

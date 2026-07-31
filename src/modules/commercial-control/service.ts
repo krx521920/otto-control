@@ -8,6 +8,18 @@ import {
   type OttoSignedLeaseEnvelope,
   type OttoSignedLicenseEnvelope,
 } from '../../contracts/license.js';
+import type {
+  DeploymentTelemetrySummary,
+  OttoTelemetryBatch,
+  OttoTelemetryEvent,
+  OttoTelemetryReceipt,
+  TelemetryRequestAuthentication,
+} from '../../contracts/telemetry.js';
+import {
+  secureTextMatches,
+  signTelemetryRequest,
+  telemetryIntegrityHash,
+} from '../../crypto/telemetry-request.js';
 import type { PayloadSigner } from '../../crypto/signed-envelope.js';
 import { conflict, invalidRequest, notFound, unauthorized } from '../../errors.js';
 import type {
@@ -23,6 +35,24 @@ const DEPLOYMENT_ID_PATTERN = /^dep_[a-zA-Z0-9]{16,64}$/u;
 const MACHINE_FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u;
 const NONCE_PATTERN = /^[a-zA-Z0-9._:-]{16,128}$/u;
 const MAX_LICENSE_DURATION_MS = 5 * 366 * 24 * 60 * 60 * 1000;
+const TELEMETRY_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const TELEMETRY_MAX_EVENT_BYTES = 64 * 1024;
+const FORBIDDEN_TELEMETRY_KEYS = new Set([
+  'message',
+  'messages',
+  'content',
+  'file',
+  'files',
+  'attachment',
+  'attachments',
+  'audio',
+  'meetingaudio',
+  'transcript',
+  'prompt',
+  'completion',
+  'document',
+  'documents',
+]);
 
 function objectValue(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -44,6 +74,67 @@ function requiredString(
 
 function prefixedId(prefix: string): string {
   return `${prefix}_${randomUUID().replace(/-/gu, '')}`;
+}
+
+function bearerToken(authorization: string | undefined): string {
+  return /^Bearer\s+(.+)$/iu.exec(authorization?.trim() || '')?.[1] || '';
+}
+
+function telemetryContainsContent(value: unknown, depth = 0): boolean {
+  if (depth > 8) return true;
+  if (Array.isArray(value)) {
+    return value.some((item) => telemetryContainsContent(item, depth + 1));
+  }
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value as Record<string, unknown>).some(([key, item]) => (
+    FORBIDDEN_TELEMETRY_KEYS.has(key.toLowerCase().replace(/[_-]/gu, '')) ||
+    telemetryContainsContent(item, depth + 1)
+  ));
+}
+
+function telemetryEvent(
+  raw: unknown,
+  batch: Pick<OttoTelemetryBatch, 'deploymentId'>,
+  now: number,
+  retentionBeforeMs: number,
+): OttoTelemetryEvent {
+  const event = objectValue(raw);
+  const id = requiredString(event, 'id', 68);
+  const eventType = requiredString(event, 'eventType', 80);
+  const createdAtMs = Number(event.createdAtMs);
+  const integrity = requiredString(event, 'integrity', 128);
+  const organizationId = event.organizationId === null
+    ? null
+    : requiredString(event, 'organizationId', 128);
+  const payload = objectValue(event.payload);
+  if (!/^tel_[a-zA-Z0-9]{16,64}$/u.test(id)) throw invalidRequest('telemetry event id is invalid');
+  if (!/^[a-zA-Z0-9_.:-]{2,80}$/u.test(eventType)) {
+    throw invalidRequest('telemetry event type is invalid');
+  }
+  if (!Number.isFinite(createdAtMs) || createdAtMs <= retentionBeforeMs || createdAtMs > now + 5 * 60 * 1000) {
+    throw invalidRequest('telemetry event timestamp is outside the retention window');
+  }
+  if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > TELEMETRY_MAX_EVENT_BYTES) {
+    throw invalidRequest('telemetry event payload exceeds 64 KiB');
+  }
+  if (telemetryContainsContent(payload)) {
+    throw invalidRequest('telemetry content payload is forbidden');
+  }
+  if (
+    payload.deploymentId !== batch.deploymentId ||
+    payload.organizationId !== organizationId ||
+    payload.eventType !== eventType ||
+    Number(payload.createdAtMs) !== createdAtMs ||
+    !payload.payload ||
+    typeof payload.payload !== 'object' ||
+    Array.isArray(payload.payload)
+  ) {
+    throw invalidRequest('telemetry event envelope binding is invalid');
+  }
+  if (!secureTextMatches(telemetryIntegrityHash(payload), integrity)) {
+    throw invalidRequest('telemetry event integrity is invalid');
+  }
+  return { id, organizationId, eventType, createdAtMs, payload, integrity };
 }
 
 function licensePayload(
@@ -90,6 +181,7 @@ export interface CommercialControlServiceOptions {
   tokenIssuer: ControlTokenIssuer;
   publicBaseUrl: string;
   leaseDurationMs?: number;
+  telemetryRetentionDays?: number;
   now?: () => number;
 }
 
@@ -99,6 +191,7 @@ export class CommercialControlService {
   readonly #tokens: ControlTokenIssuer;
   readonly #publicBaseUrl: string;
   readonly #leaseDurationMs: number;
+  readonly #telemetryRetentionMs: number;
   readonly #now: () => number;
 
   constructor(options: CommercialControlServiceOptions) {
@@ -107,6 +200,11 @@ export class CommercialControlService {
     this.#tokens = options.tokenIssuer;
     this.#publicBaseUrl = options.publicBaseUrl.replace(/\/$/u, '');
     this.#leaseDurationMs = options.leaseDurationMs ?? 10 * 60 * 1000;
+    const telemetryRetentionDays = options.telemetryRetentionDays ?? 90;
+    if (!Number.isInteger(telemetryRetentionDays) || telemetryRetentionDays < 1 || telemetryRetentionDays > 3650) {
+      throw new Error('telemetry retention must be between 1 and 3650 days');
+    }
+    this.#telemetryRetentionMs = telemetryRetentionDays * 24 * 60 * 60 * 1000;
     this.#now = options.now ?? Date.now;
     if (this.#leaseDurationMs < 2 * 60 * 1000 || this.#leaseDurationMs > 24 * 60 * 60 * 1000) {
       throw new Error('lease duration must be between 2 minutes and 24 hours');
@@ -323,5 +421,95 @@ export class CommercialControlService {
     };
     const signature = await this.#signer.sign(lease);
     return { lease, signature };
+  }
+
+  async ingestTelemetry(
+    raw: unknown,
+    authentication: TelemetryRequestAuthentication,
+  ): Promise<OttoTelemetryReceipt> {
+    const body = objectValue(raw);
+    if (body.version !== 1) throw invalidRequest('telemetry version is invalid');
+    const deploymentId = requiredString(body, 'deploymentId', 68);
+    const machineFingerprint = requiredString(body, 'machineFingerprint', 64).toLowerCase();
+    const licenseId = requiredString(body, 'licenseId', 68);
+    if (!DEPLOYMENT_ID_PATTERN.test(deploymentId)) throw invalidRequest('deploymentId is invalid');
+    if (!MACHINE_FINGERPRINT_PATTERN.test(machineFingerprint)) {
+      throw invalidRequest('machineFingerprint is invalid');
+    }
+    const license = await this.#store.getLicense(licenseId);
+    if (!license) throw notFound('license not found');
+    if (license.deploymentId !== deploymentId || license.machineFingerprint !== machineFingerprint) {
+      throw unauthorized('telemetry deployment binding is invalid');
+    }
+    const now = this.#now();
+    if (license.revokedAtMs !== null) throw unauthorized('License has been revoked');
+    if (license.expiresAtMs <= now) throw unauthorized('License has expired');
+    if (!license.telemetryAllowed) throw unauthorized('License does not allow telemetry');
+    const deployment = await this.#store.getDeployment(deploymentId);
+    if (!deployment || deployment.status !== 'active') {
+      throw unauthorized('deployment is not active');
+    }
+    const telemetryToken = this.#tokens.issue({
+      purpose: 'telemetry',
+      licenseId,
+      deploymentId,
+      version: license.tokenVersion,
+    });
+    if (!this.#tokens.matches(bearerToken(authentication.authorization), telemetryToken)) {
+      throw unauthorized('telemetry token is invalid');
+    }
+    const timestamp = Number(authentication.timestamp);
+    const nonce = authentication.nonce?.trim() || '';
+    const signature = authentication.signature?.trim() || '';
+    if (!Number.isFinite(timestamp) || Math.abs(now - timestamp) > TELEMETRY_MAX_CLOCK_SKEW_MS) {
+      throw unauthorized('telemetry request timestamp is invalid');
+    }
+    if (!NONCE_PATTERN.test(nonce)) throw invalidRequest('telemetry nonce is invalid');
+    const expectedSignature = signTelemetryRequest({
+      token: telemetryToken,
+      timestamp,
+      nonce,
+      body,
+    });
+    if (!secureTextMatches(signature, expectedSignature)) {
+      throw unauthorized('telemetry request signature is invalid');
+    }
+    if (telemetryContainsContent(body)) {
+      throw invalidRequest('telemetry content payload is forbidden');
+    }
+    if (!Array.isArray(body.events) || body.events.length === 0 || body.events.length > 100) {
+      throw invalidRequest('telemetry events must contain between 1 and 100 items');
+    }
+    const retentionBeforeMs = now - this.#telemetryRetentionMs;
+    const events = body.events.map((event) => telemetryEvent(
+      event,
+      { deploymentId },
+      now,
+      retentionBeforeMs,
+    ));
+    const receipt = await this.#store.ingestTelemetryBatch({
+      deploymentId,
+      licenseId,
+      nonce,
+      nonceExpiresAtMs: now + TELEMETRY_MAX_CLOCK_SKEW_MS * 2,
+      retentionBeforeMs,
+      receivedAtMs: now,
+      events,
+    });
+    if (!receipt) throw conflict('telemetry request replay detected');
+    return receipt;
+  }
+
+  async deploymentHealth(deploymentId: string, hours: number): Promise<DeploymentTelemetrySummary> {
+    if (!DEPLOYMENT_ID_PATTERN.test(deploymentId)) throw invalidRequest('deploymentId is invalid');
+    if (!Number.isInteger(hours) || hours < 1 || hours > 24 * 365) {
+      throw invalidRequest('hours must be an integer between 1 and 8760');
+    }
+    const deployment = await this.#store.getDeployment(deploymentId);
+    if (!deployment) throw notFound('deployment not found');
+    return this.#store.getDeploymentTelemetrySummary({
+      deploymentId,
+      sinceMs: this.#now() - hours * 60 * 60 * 1000,
+    });
   }
 }

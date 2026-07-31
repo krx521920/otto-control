@@ -74,6 +74,38 @@ const MIGRATIONS: Migration[] = [
        ON control_audit_events(target_type, target_id, created_at DESC)`,
     ],
   },
+  {
+    id: '002_telemetry_health',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_telemetry_nonces (
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id),
+        nonce TEXT NOT NULL,
+        expires_at_ms BIGINT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (deployment_id, nonce)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_telemetry_nonces_expiry
+       ON control_telemetry_nonces(expires_at_ms)`,
+      `CREATE TABLE IF NOT EXISTS control_telemetry_events (
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id),
+        event_id TEXT NOT NULL,
+        license_id TEXT NOT NULL REFERENCES control_licenses(id),
+        organization_id TEXT,
+        event_type TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        integrity TEXT NOT NULL,
+        source_created_at_ms BIGINT NOT NULL,
+        received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (deployment_id, event_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_telemetry_received
+       ON control_telemetry_events(deployment_id, received_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_telemetry_retention
+       ON control_telemetry_events(received_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_telemetry_type
+       ON control_telemetry_events(deployment_id, event_type, source_created_at_ms DESC)`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

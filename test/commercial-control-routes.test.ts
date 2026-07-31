@@ -6,6 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildControlApp } from '../src/app.js';
 import type { ControlConfig } from '../src/config.js';
 import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import {
+  signTelemetryRequest,
+  telemetryIntegrityHash,
+} from '../src/crypto/telemetry-request.js';
 import { CommercialControlService } from '../src/modules/commercial-control/service.js';
 import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
@@ -25,6 +29,7 @@ const config: Readonly<ControlConfig> = {
   tokenSecret: 'test-control-token-secret-that-is-long-enough',
   signerPrivateKeyFile: null,
   leaseDurationMs: 600_000,
+  telemetryRetentionDays: 90,
 };
 
 describe('commercial control HTTP routes', () => {
@@ -64,6 +69,7 @@ describe('commercial control HTTP routes', () => {
       'customer_deployment',
       'license_authority',
       'lease_revocation',
+      'telemetry_health',
     ]);
 
     const signingKey = await app.inject({
@@ -134,6 +140,179 @@ describe('commercial control HTTP routes', () => {
       lease: {
         licenseId: license.id,
         deploymentId: license.deploymentId,
+      },
+    });
+  });
+
+  it('ingests authenticated operational telemetry and exposes deployment health', async () => {
+    const authorization = { authorization: `Bearer ${ADMIN_TOKEN}` };
+    const customerResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/customers',
+      headers: authorization,
+      payload: { name: 'Telemetry customer' },
+    });
+    const customerId = customerResponse.json().customer.id as string;
+    const deploymentId = 'dep_abcdef1234567890';
+    const machineFingerprint = 'c'.repeat(64);
+    await app.inject({
+      method: 'POST',
+      url: '/v1/admin/deployments',
+      headers: authorization,
+      payload: {
+        deploymentId,
+        customerId,
+        organizationId: 'org_telemetry',
+        machineFingerprint,
+        name: 'Telemetry server',
+      },
+    });
+    const licenseResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/licenses',
+      headers: authorization,
+      payload: {
+        deploymentId,
+        plan: 'enterprise',
+        expiresAt: '2030-01-01T00:00:00.000Z',
+        seatLimit: 100,
+        modules: ['enterprise_tree'],
+      },
+    });
+    const license = licenseResponse.json().license as Record<string, unknown>;
+    const createdAtMs = Date.now();
+    const eventPayload = {
+      deploymentId,
+      organizationId: null,
+      eventType: 'runtime_health',
+      createdAtMs,
+      payload: {
+        uptimeSec: 3600,
+        memoryRssMb: 180,
+        successRate: 0.98,
+        licenseStatus: 'active',
+      },
+    };
+    const event = {
+      id: 'tel_1234567890abcdef1234567890abcdef',
+      organizationId: null,
+      eventType: 'runtime_health',
+      createdAtMs,
+      payload: eventPayload,
+      integrity: telemetryIntegrityHash(eventPayload),
+    };
+    const body = {
+      version: 1,
+      deploymentId,
+      machineFingerprint,
+      licenseId: license.id,
+      events: [event],
+    };
+    const timestamp = Date.now();
+    const nonce = 'telemetry_nonce_1234567890';
+    const telemetryHeaders = {
+      authorization: `Bearer ${license.telemetryToken as string}`,
+      'x-otto-timestamp': String(timestamp),
+      'x-otto-nonce': nonce,
+      'x-otto-signature': signTelemetryRequest({
+        token: license.telemetryToken as string,
+        timestamp,
+        nonce,
+        body,
+      }),
+    };
+    const invalidSignature = await app.inject({
+      method: 'POST',
+      url: '/v1/telemetry/ingest',
+      headers: {
+        ...telemetryHeaders,
+        'x-otto-signature': 'hmac-sha256:invalid',
+      },
+      payload: body,
+    });
+    expect(invalidSignature.statusCode).toBe(401);
+
+    const accepted = await app.inject({
+      method: 'POST',
+      url: '/v1/telemetry/ingest',
+      headers: telemetryHeaders,
+      payload: body,
+    });
+    expect(accepted.statusCode).toBe(202);
+    expect(accepted.json()).toEqual({ accepted: 1, duplicates: 0 });
+
+    const replay = await app.inject({
+      method: 'POST',
+      url: '/v1/telemetry/ingest',
+      headers: telemetryHeaders,
+      payload: body,
+    });
+    expect(replay.statusCode).toBe(409);
+    expect(replay.json()).toMatchObject({ error: { code: 'CONFLICT' } });
+
+    const duplicateNonce = 'telemetry_nonce_abcdef123456';
+    const duplicate = await app.inject({
+      method: 'POST',
+      url: '/v1/telemetry/ingest',
+      headers: {
+        ...telemetryHeaders,
+        'x-otto-nonce': duplicateNonce,
+        'x-otto-signature': signTelemetryRequest({
+          token: license.telemetryToken as string,
+          timestamp,
+          nonce: duplicateNonce,
+          body,
+        }),
+      },
+      payload: body,
+    });
+    expect(duplicate.json()).toEqual({ accepted: 0, duplicates: 1 });
+
+    const forbiddenPayload = {
+      ...eventPayload,
+      payload: { prompt: 'must never leave the customer server' },
+    };
+    const forbiddenBody = {
+      ...body,
+      events: [{
+        ...event,
+        id: 'tel_abcdef1234567890abcdef1234567890',
+        payload: forbiddenPayload,
+        integrity: telemetryIntegrityHash(forbiddenPayload),
+      }],
+    };
+    const forbiddenNonce = 'telemetry_nonce_forbidden_01';
+    const forbidden = await app.inject({
+      method: 'POST',
+      url: '/v1/telemetry/ingest',
+      headers: {
+        authorization: telemetryHeaders.authorization,
+        'x-otto-timestamp': String(timestamp),
+        'x-otto-nonce': forbiddenNonce,
+        'x-otto-signature': signTelemetryRequest({
+          token: license.telemetryToken as string,
+          timestamp,
+          nonce: forbiddenNonce,
+          body: forbiddenBody,
+        }),
+      },
+      payload: forbiddenBody,
+    });
+    expect(forbidden.statusCode).toBe(400);
+    expect(forbidden.json()).toMatchObject({ error: { code: 'INVALID_REQUEST' } });
+
+    const health = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/deployments/${deploymentId}/health?hours=24`,
+      headers: authorization,
+    });
+    expect(health.statusCode).toBe(200);
+    expect(health.json().health).toMatchObject({
+      deploymentId,
+      totalEvents: 1,
+      eventCounts: { runtime_health: 1 },
+      latestRuntimeHealth: {
+        payload: eventPayload,
       },
     });
   });

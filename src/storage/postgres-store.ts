@@ -1,6 +1,11 @@
 import pg from 'pg';
 
 import type { OttoLicenseCapability } from '../contracts/license.js';
+import type {
+  DeploymentTelemetrySummary,
+  OttoTelemetryEvent,
+  OttoTelemetryReceipt,
+} from '../contracts/telemetry.js';
 import { conflict } from '../errors.js';
 import type {
   AuditEventInput,
@@ -60,6 +65,17 @@ interface LicenseRow {
   revoked_at_ms: string | null;
   created_at: Date;
   updated_at: Date;
+}
+
+interface TelemetryCountRow {
+  event_type: string;
+  count: number;
+}
+
+interface LatestTelemetryRow {
+  source_created_at_ms: string;
+  received_at: Date;
+  payload: Record<string, unknown>;
 }
 
 function postgresCode(error: unknown): string | null {
@@ -297,6 +313,118 @@ export class PostgresControlStore implements ControlStore {
     } finally {
       client.release();
     }
+  }
+
+  async ingestTelemetryBatch(input: {
+    deploymentId: string;
+    licenseId: string;
+    nonce: string;
+    nonceExpiresAtMs: number;
+    retentionBeforeMs: number;
+    receivedAtMs: number;
+    events: OttoTelemetryEvent[];
+  }): Promise<OttoTelemetryReceipt | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'DELETE FROM control_telemetry_nonces WHERE expires_at_ms < $1',
+        [input.receivedAtMs],
+      );
+      const nonce = await client.query(
+        `INSERT INTO control_telemetry_nonces (deployment_id, nonce, expires_at_ms)
+         VALUES ($1, $2, $3)
+         ON CONFLICT DO NOTHING
+         RETURNING nonce`,
+        [input.deploymentId, input.nonce, input.nonceExpiresAtMs],
+      );
+      if (nonce.rowCount !== 1) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      await client.query(
+        'DELETE FROM control_telemetry_events WHERE received_at < to_timestamp($1 / 1000.0)',
+        [input.retentionBeforeMs],
+      );
+      let accepted = 0;
+      let duplicates = 0;
+      for (const event of input.events) {
+        const result = await client.query(
+          `INSERT INTO control_telemetry_events
+            (deployment_id, event_id, license_id, organization_id, event_type,
+             payload, integrity, source_created_at_ms, received_at)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, to_timestamp($9 / 1000.0))
+           ON CONFLICT (deployment_id, event_id) DO NOTHING
+           RETURNING event_id`,
+          [
+            input.deploymentId,
+            event.id,
+            input.licenseId,
+            event.organizationId,
+            event.eventType,
+            JSON.stringify(event.payload),
+            event.integrity,
+            event.createdAtMs,
+            input.receivedAtMs,
+          ],
+        );
+        if (result.rowCount === 1) accepted += 1;
+        else duplicates += 1;
+      }
+      await client.query('COMMIT');
+      return { accepted, duplicates };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getDeploymentTelemetrySummary(input: {
+    deploymentId: string;
+    sinceMs: number;
+  }): Promise<DeploymentTelemetrySummary> {
+    const counts = await this.#pool.query<TelemetryCountRow>(
+      `SELECT event_type, COUNT(*)::integer AS count
+       FROM control_telemetry_events
+       WHERE deployment_id = $1 AND received_at >= to_timestamp($2 / 1000.0)
+       GROUP BY event_type
+       ORDER BY event_type`,
+      [input.deploymentId, input.sinceMs],
+    );
+    const latest = await this.#pool.query<LatestTelemetryRow>(
+      `SELECT source_created_at_ms, received_at, payload
+       FROM control_telemetry_events
+       WHERE deployment_id = $1 AND event_type = 'runtime_health'
+       ORDER BY source_created_at_ms DESC
+       LIMIT 1`,
+      [input.deploymentId],
+    );
+    const lastSeen = await this.#pool.query<{ received_at: Date | null }>(
+      `SELECT MAX(received_at) AS received_at
+       FROM control_telemetry_events
+       WHERE deployment_id = $1`,
+      [input.deploymentId],
+    );
+    const eventCounts = Object.fromEntries(
+      counts.rows.map((row) => [row.event_type, row.count]),
+    );
+    const latestHealth = latest.rows[0];
+    return {
+      deploymentId: input.deploymentId,
+      since: new Date(input.sinceMs).toISOString(),
+      totalEvents: counts.rows.reduce((total, row) => total + row.count, 0),
+      lastSeenAt: lastSeen.rows[0]?.received_at?.toISOString() ?? null,
+      eventCounts,
+      latestRuntimeHealth: latestHealth
+        ? {
+            createdAt: new Date(Number(latestHealth.source_created_at_ms)).toISOString(),
+            receivedAt: latestHealth.received_at.toISOString(),
+            payload: latestHealth.payload,
+          }
+        : null,
+    };
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

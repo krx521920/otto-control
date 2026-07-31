@@ -16,4 +16,10 @@ code.
 - License: MIT
 - Copyright: Brian Carlson and contributors
 
+## @fastify/rate-limit
+
+- Project: https://github.com/fastify/fastify-rate-limit
+- License: MIT
+- Copyright: Fastify contributors
+
 The complete dependency inventory is recorded in `package-lock.json`.

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyServerOptions } from 'fastify';
 
 import { loadControlConfig, type ControlConfig } from './config.js';
@@ -58,6 +59,14 @@ export async function buildControlApp(
     genReqId: () => randomUUID(),
   });
 
+  await app.register(rateLimit, {
+    global: false,
+    max: 300,
+    timeWindow: '1 minute',
+    hook: 'onRequest',
+    skipOnError: false,
+  });
+
   app.addHook('onRequest', async (request, reply) => {
     reply
       .header('cache-control', 'no-store')
@@ -100,7 +109,12 @@ export async function buildControlApp(
   const commercialControl = options.commercialControl ?? null;
   const capabilities = ['health'];
   if (commercialControl) {
-    capabilities.push('customer_deployment', 'license_authority', 'lease_revocation');
+    capabilities.push(
+      'customer_deployment',
+      'license_authority',
+      'lease_revocation',
+      'telemetry_health',
+    );
     await registerCommercialControlRoutes(app, commercialControl);
     app.addHook('onClose', async () => commercialControl.service.close());
   }

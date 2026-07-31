@@ -17,6 +17,7 @@ const baseConfig: Readonly<ControlConfig> = {
   tokenSecret: null,
   signerPrivateKeyFile: null,
   leaseDurationMs: 600_000,
+  telemetryRetentionDays: 90,
 };
 
 describe('commercial control runtime configuration', () => {

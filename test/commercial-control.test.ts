@@ -1,8 +1,9 @@
-import { generateKeyPairSync, verify, type KeyObject } from 'node:crypto';
+import { createHmac, generateKeyPairSync, verify, type KeyObject } from 'node:crypto';
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { canonicalJson, LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import { signTelemetryRequest } from '../src/crypto/telemetry-request.js';
 import { CommercialControlService } from '../src/modules/commercial-control/service.js';
 import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
@@ -142,5 +143,20 @@ describe('commercial control service', () => {
       machineFingerprint: FINGERPRINT,
       nonce: 'nonce_abcdef1234567890',
     }, license.license.leaseToken!)).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+  });
+
+  it('matches Otto telemetry HMAC bytes independently', () => {
+    const token = 'telemetry-token-that-is-at-least-32-characters';
+    const timestamp = 1_785_463_200_000;
+    const nonce = 'telemetry_nonce_contract_01';
+    const body = {
+      version: 1,
+      deploymentId: DEPLOYMENT_ID,
+      events: [{ eventType: 'runtime_health', payload: { uptimeSec: 30 } }],
+    };
+    const expected = 'hmac-sha256:' + createHmac('sha256', token)
+      .update(`${timestamp}\n${nonce}\n${canonicalJson(body)}`, 'utf8')
+      .digest('base64url');
+    expect(signTelemetryRequest({ token, timestamp, nonce, body })).toBe(expected);
   });
 });

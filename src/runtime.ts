@@ -47,6 +47,7 @@ export async function createCommercialControlRuntime(
         tokenIssuer: new ControlTokenIssuer(config.tokenSecret!),
         publicBaseUrl: config.publicBaseUrl!,
         leaseDurationMs: config.leaseDurationMs,
+        telemetryRetentionDays: config.telemetryRetentionDays,
       }),
     };
   } catch (error) {

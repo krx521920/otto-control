@@ -69,6 +69,16 @@ export async function registerCommercialControlRoutes(
         ),
       }),
     );
+
+    admin.get<{
+      Params: { deploymentId: string };
+      Querystring: { hours?: string };
+    }>('/deployments/:deploymentId/health', async (request) => ({
+      health: await options.service.deploymentHealth(
+        request.params.deploymentId,
+        request.query.hours === undefined ? 24 : Number(request.query.hours),
+      ),
+    }));
   }, { prefix: '/v1/admin' });
 
   app.post<{ Params: { licenseId: string } }>(
@@ -79,4 +89,28 @@ export async function registerCommercialControlRoutes(
       bearerToken(request),
     ),
   );
+
+  app.post('/v1/telemetry/ingest', {
+    config: {
+      rateLimit: {
+        max: 300,
+        timeWindow: '1 minute',
+        ban: 20,
+      },
+    },
+  }, async (request, reply) => {
+    const receipt = await options.service.ingestTelemetry(request.body, {
+      authorization: request.headers.authorization,
+      timestamp: typeof request.headers['x-otto-timestamp'] === 'string'
+        ? request.headers['x-otto-timestamp']
+        : undefined,
+      nonce: typeof request.headers['x-otto-nonce'] === 'string'
+        ? request.headers['x-otto-nonce']
+        : undefined,
+      signature: typeof request.headers['x-otto-signature'] === 'string'
+        ? request.headers['x-otto-signature']
+        : undefined,
+    });
+    return reply.code(202).send(receipt);
+  });
 }

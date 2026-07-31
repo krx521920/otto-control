@@ -23,6 +23,9 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - License binding to deployment ID, organization ID, and machine fingerprint
 - Administrator bearer authentication and fail-closed License revocation
 - Derived lease/telemetry tokens that are never stored as plaintext in PostgreSQL
+- Authenticated operational telemetry ingest with HMAC, nonce replay protection,
+  event integrity checks, idempotent storage, and retention cleanup
+- Per-deployment health summaries without uploading chats, files, prompts, or transcripts
 
 ## Development
 
@@ -59,13 +62,14 @@ npm run check
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.2.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.3.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_SSL` | production: `true` | Require verified TLS to PostgreSQL |
 | `CONTROL_ADMIN_TOKEN` | empty | 32-byte minimum bearer token for `/v1/admin/*` |
 | `CONTROL_TOKEN_SECRET` | empty | 32-byte minimum root secret used to derive scoped tokens |
 | `CONTROL_SIGNER_PRIVATE_KEY_FILE` | empty | Read-only Ed25519 PKCS#8 secret mount |
 | `CONTROL_LEASE_DURATION_MS` | `600000` | Online lease lifetime; Otto refreshes every two minutes |
+| `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
 
 ## Commercial control flow
 
@@ -77,6 +81,8 @@ npm run check
    Otto License verification key.
 5. Import the signed envelope into Otto. Online deployments refresh
    `POST /v1/licenses/:licenseId/lease` every two minutes.
+6. Configure `OTTO_TELEMETRY_ENDPOINT` on the private Otto server as
+   `https://<control-host>/v1/telemetry/ingest`.
 
 The control database stores License metadata, signatures, and a token version.
 It does not store the License private key or plaintext lease/telemetry tokens.
@@ -88,6 +94,14 @@ Revoking an online License prevents the next lease renewal, so normal access is
 removed within the 10-minute lease window. Offline Licenses cannot receive live
 revocation and must use short, explicit expiry periods appropriate to the
 customer contract.
+
+Telemetry accepts only signed operational events. Each request is bound to its
+License, deployment, and machine fingerprint, permits five minutes of clock
+skew, and consumes its nonce transactionally with the event batch. Duplicate
+event IDs are idempotent. Keys associated with messages, files, attachments,
+audio, transcripts, prompts, completions, and documents are rejected before
+storage. The customer-side queue continues to retry independently when this
+control service is unavailable.
 
 ## Implemented APIs
 
@@ -101,7 +115,9 @@ POST /v1/admin/licenses
 GET  /v1/admin/licenses/:licenseId
 POST /v1/admin/licenses/:licenseId/revoke
 GET  /v1/admin/signing-key
+GET  /v1/admin/deployments/:deploymentId/health?hours=24
 POST /v1/licenses/:licenseId/lease
+POST /v1/telemetry/ingest
 ```
 
 ## Planned module boundaries
@@ -113,11 +129,10 @@ Traefik
        -> customer_deployment (implemented foundation)
        -> license_authority (implemented foundation)
        -> lease_revocation (implemented foundation)
-       -> telemetry_health
+       -> telemetry_health (implemented foundation)
        -> update_policy
        -> audit
 ```
 
-The next phase is the authenticated telemetry ingest worker and operational
-health dashboard contract. Update policy and federation remain separate later
-phases.
+The next phase is update policy and signed release-channel management. A richer
+operator dashboard and federation remain separate later phases.
