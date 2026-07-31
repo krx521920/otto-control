@@ -36,7 +36,7 @@ function normalizePrivateKey(value: string): KeyObject {
   });
 }
 
-function publicKeyId(key: KeyObject): string {
+export function ed25519PublicKeyId(key: KeyObject): string {
   const der = key.export({ format: 'der', type: 'spki' });
   return createHash('sha256').update(der).digest('hex').slice(0, 16);
 }
@@ -45,6 +45,13 @@ export interface PayloadSigner {
   readonly keyId: string;
   readonly publicKeyPem: string;
   sign(payload: unknown): Promise<string>;
+  health?(): SignerHealth;
+}
+
+export interface SignerHealth {
+  state: 'unchecked' | 'available' | 'degraded' | 'circuit_open';
+  consecutiveFailures: number;
+  circuitOpenUntil: string | null;
 }
 
 export interface SignedPayload {
@@ -72,7 +79,10 @@ export class LocalEd25519Signer implements PayloadSigner {
   constructor(privateKey: string) {
     this.#privateKey = normalizePrivateKey(privateKey);
     this.publicKey = createPublicKey(this.#privateKey);
-    this.keyId = publicKeyId(this.publicKey);
+    if (this.publicKey.asymmetricKeyType !== 'ed25519') {
+      throw new Error('signing key must be Ed25519');
+    }
+    this.keyId = ed25519PublicKeyId(this.publicKey);
     this.publicKeyPem = this.publicKey.export({ format: 'pem', type: 'spki' }).toString();
   }
 

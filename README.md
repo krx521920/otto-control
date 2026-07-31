@@ -28,7 +28,9 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   release activation, and rollback
 - Persisted Ed25519 keyring with standby, active, retired, and revoked states
 - Audited key activation and emergency revocation with atomic replacement
-- Signed public keyring export and stable signer-provider boundary for KMS/HSM adapters
+- Signed public keyring export plus local, KMS, and HSM signing providers
+- Authenticated HTTPS remote signing with mTLS/bearer credentials, local signature
+  verification, timeout bounds, provider health, and fail-closed circuit breaking
 - Derived lease/telemetry tokens that are never stored as plaintext in PostgreSQL
 - Authenticated operational telemetry ingest with HMAC, nonce replay protection,
   event integrity checks, idempotent storage, and retention cleanup
@@ -164,7 +166,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.6.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.7.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -178,7 +180,7 @@ a misleading success report.
 | `CONTROL_TOKEN_SECRET` | empty | 32-byte minimum root secret used to derive scoped tokens |
 | `CONTROL_TOKEN_SECRET_FILE` | empty | Read-only file containing the token derivation secret |
 | `CONTROL_SIGNER_PRIVATE_KEY_FILE` | empty | Read-only Ed25519 PKCS#8 secret mount |
-| `CONTROL_SIGNER_KEYRING_FILE` | empty | Version 1 local-provider keyring manifest; mutually exclusive with the legacy single-key setting |
+| `CONTROL_SIGNER_KEYRING_FILE` | empty | Version 1 local/KMS/HSM keyring manifest; mutually exclusive with the legacy single-key setting |
 | `CONTROL_LEASE_DURATION_MS` | `600000` | Online lease lifetime; Otto refreshes every two minutes |
 | `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
 | `CONTROL_UPDATE_POLICY_DURATION_MS` | `300000` | Signed update decision lifetime, from one minute to one hour |
@@ -206,9 +208,9 @@ a misleading success report.
 The control database stores License metadata, signatures, public keys, key
 states, and a token version. It does not store private keys or plaintext
 lease/telemetry tokens. Local private key paths must point to read-only secret
-mounts. `PayloadSigner` is the provider boundary: a KMS/HSM adapter supplies the
-same key ID, public key, and asynchronous signing operation without changing
-the License or update-policy services.
+mounts. `PayloadSigner` is the provider boundary, so remote KMS/HSM providers
+use the same key ID, public key, and asynchronous signing operation without
+changing the License or update-policy services.
 
 ### Administrator identity and approvals
 
@@ -272,6 +274,55 @@ Revoking an online License prevents the next lease renewal, so normal access is
 removed within the 10-minute lease window. Offline Licenses cannot receive live
 revocation and must use short, explicit expiry periods appropriate to the
 customer contract.
+
+### Remote KMS/HSM signing
+
+The keyring manifest accepts `provider: "kms"` and `provider: "hsm"` entries.
+Otto Control stores only the Ed25519 public key and a non-secret remote `keyRef`;
+the private key stays inside the managed KMS, HSM, or its isolated signing
+broker. See `deploy/control_signer_keyring.remote.example.json` for the complete
+file layout. Relative credential paths resolve beside the manifest.
+
+Each remote provider requires either a bearer token file or an mTLS client
+certificate and key; both can be enabled together. Bearer tokens are read again
+for every request so a mounted secret can rotate without restarting Otto
+Control. Client certificates and CA bundles are loaded at startup. The endpoint
+must be HTTPS, redirects are not followed, timeouts are bounded to 0.5-30
+seconds, and responses over 32 KiB are rejected.
+
+The signing broker receives this JSON body:
+
+```json
+{
+  "version": 1,
+  "requestId": "uuid",
+  "keyId": "16-character-public-key-id",
+  "keyRef": "production/otto-license/2026-rotation-01",
+  "algorithm": "ed25519",
+  "encoding": "base64",
+  "payload": "canonical-json-bytes-as-base64"
+}
+```
+
+It must return HTTP 200 with `application/json` and an object containing the
+same `version`, `requestId`, `keyId`, `algorithm`, plus a raw 64-byte Ed25519
+signature encoded as unpadded base64url. Otto Control verifies that signature
+locally against the configured public key before accepting it. Three consecutive
+provider failures open a 30-second circuit; there is deliberately no automatic
+fallback to a retired or standby key. Remote provider health starts as
+`unchecked`, becomes `available` only after a verified signature, and is exposed
+by the administrator signing-key API without leaking endpoint credentials.
+
+The backend must support Ed25519 signing of the raw canonical message. A cloud
+KMS that exposes only RSA/ECDSA or pre-hashed signing is not compatible with the
+current Otto License contract; place a narrowly scoped Ed25519 HSM signer behind
+this protocol instead of changing verification semantics during a rotation.
+
+To migrate, keep the current local entry and add the KMS/HSM entry, restart to
+register it as `standby`, distribute the signed public keyring, obtain dual
+approval, and activate the remote key. Only after the overlap window should the
+old local private-key entry be removed. Its public database record remains
+`retired`, so historical License envelopes continue to verify.
 
 Telemetry accepts only signed operational events. Each request is bound to its
 License, deployment, and machine fingerprint, permits five minutes of clock
@@ -365,4 +416,5 @@ Traefik
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
 next phases are an operator-facing administration UI, off-site backup delivery,
-managed KMS/HSM provider adapters, and eventually the separate federation gateway.
+vendor-specific signer-broker deployment recipes, and eventually the separate
+federation gateway.

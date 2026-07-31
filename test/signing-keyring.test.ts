@@ -1,8 +1,9 @@
 import { generateKeyPairSync, verify } from 'node:crypto';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { canonicalJson, LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import { RemoteEd25519Signer } from '../src/crypto/remote-ed25519-signer.js';
 import { ManagedSigningKeyring } from '../src/crypto/signing-keyring.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
@@ -23,6 +24,38 @@ function verifies(payload: unknown, signature: string, publicKeyPem: string): bo
 }
 
 describe('managed signing keyring', () => {
+  it('fails closed instead of falling back when the active remote provider is unavailable', async () => {
+    const store = new MemoryControlStore();
+    const local = localSigner();
+    const localSign = vi.spyOn(local, 'sign');
+    const remotePair = generateKeyPairSync('ed25519');
+    const remote = new RemoteEd25519Signer({
+      provider: 'hsm',
+      keyRef: 'hsm-slot-1/license-key',
+      publicKeyPem: remotePair.publicKey.export({ format: 'pem', type: 'spki' }).toString(),
+      transport: {
+        async sign() {
+          throw new Error('HSM unavailable');
+        },
+      },
+    });
+    const keyring = await ManagedSigningKeyring.create({
+      store,
+      providers: [
+        { signer: local, provider: 'local' },
+        { signer: remote, provider: 'hsm' },
+      ],
+      preferredActiveKeyId: remote.keyId,
+    });
+
+    await expect(keyring.sign({ licenseId: 'lic_fail_closed' })).rejects.toThrow(
+      'HSM unavailable',
+    );
+    expect(localSign).not.toHaveBeenCalled();
+    expect((await keyring.list()).find((key) => key.keyId === remote.keyId)?.providerHealth)
+      .toMatchObject({ state: 'degraded', consecutiveFailures: 1 });
+  });
+
   it('rotates keys while retaining retired public keys for historical License verification', async () => {
     const store = new MemoryControlStore();
     const first = localSigner();
@@ -42,6 +75,11 @@ describe('managed signing keyring', () => {
     const keys = await keyring.list();
     expect(keys.find((key) => key.keyId === first.keyId)?.state).toBe('retired');
     expect(keys.find((key) => key.keyId === second.keyId)?.state).toBe('active');
+    expect(keys.find((key) => key.keyId === second.keyId)?.providerHealth).toEqual({
+      state: 'available',
+      consecutiveFailures: 0,
+      circuitOpenUntil: null,
+    });
     expect(verifies(historicalPayload, historicalSignature, first.publicKeyPem)).toBe(true);
     await expect(keyring.assertLicenseSigningKeyUsable(first.keyId)).resolves.toBeUndefined();
 

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "keys": [
+    {
+      "provider": "local",
+      "privateKeyFile": "control_signer_private_key.pem"
+    },
+    {
+      "provider": "kms",
+      "endpoint": "https://kms-signer.internal.example/v1/sign",
+      "keyRef": "production/otto-license/2026-rotation-01",
+      "publicKeyFile": "kms_signing_public_key.pem",
+      "bearerTokenFile": "kms_signer_token",
+      "clientCertificateFile": "kms_client_certificate.pem",
+      "clientKeyFile": "kms_client_key.pem",
+      "caFile": "kms_ca.pem",
+      "timeoutMs": 5000
+    }
+  ]
+}

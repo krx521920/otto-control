@@ -1,4 +1,4 @@
-import type { PayloadSigner, SignedPayload } from './signed-envelope.js';
+import type { PayloadSigner, SignedPayload, SignerHealth } from './signed-envelope.js';
 import { conflict, notFound, unauthorized } from '../errors.js';
 import type {
   ControlStore,
@@ -14,6 +14,7 @@ export interface SigningProviderHandle {
 
 export interface PublicSigningKey extends SigningKeyRecord {
   canSign: boolean;
+  providerHealth: SignerHealth | null;
 }
 
 export interface SignedKeyringPayload {
@@ -121,6 +122,11 @@ export class ManagedSigningKeyring implements PayloadSigner {
     return (await this.#store.listSigningKeys()).map((key) => ({
       ...key,
       canSign: this.#providers.has(key.keyId),
+      providerHealth: this.#providers.get(key.keyId)?.signer.health?.() ?? (
+        this.#providers.has(key.keyId)
+          ? { state: 'available', consecutiveFailures: 0, circuitOpenUntil: null }
+          : null
+      ),
     }));
   }
 

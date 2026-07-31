@@ -265,6 +265,11 @@ export class CommercialControlService {
       revocationReason: null,
       updatedAt: now,
       canSign: true,
+      providerHealth: this.#signer.health?.() ?? {
+        state: 'available',
+        consecutiveFailures: 0,
+        circuitOpenUntil: null,
+      },
     }];
   }
 
