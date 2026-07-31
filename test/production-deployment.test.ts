@@ -51,4 +51,22 @@ describe('production deployment assets', () => {
     expect(restore).toContain('/health/ready');
     expect(timer).toContain('Persistent=true');
   });
+
+  it('restores the latest backup into an isolated disposable database for weekly drills', () => {
+    const drill = repositoryFile('deploy/drill-restore-postgres.sh');
+    const service = repositoryFile('deploy/systemd/otto-control-restore-drill.service');
+    const timer = repositoryFile('deploy/systemd/otto-control-restore-drill.timer');
+    expect(drill).toContain('otto_drill_');
+    expect(drill).toContain('--template template0');
+    expect(drill).toContain('control_schema_migrations');
+    expect(drill).toContain('control_deployment_update_assignments');
+    expect(drill).toContain('result=passed');
+    expect(drill).toContain('CONTROL_DRILL_MAX_BACKUP_AGE_HOURS');
+    expect(drill).toContain('backup_age_seconds');
+    expect(drill).toContain('dropdb');
+    expect(drill).not.toContain('compose stop control');
+    expect(service).toContain('TimeoutStartSec=2h');
+    expect(timer).toContain('OnCalendar=Sun');
+    expect(timer).toContain('Persistent=true');
+  });
 });

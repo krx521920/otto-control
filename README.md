@@ -102,9 +102,12 @@ To install the daily 02:20 systemd schedule on a deployment checked out at
 ```bash
 sudo install -m 0644 deploy/systemd/otto-control-backup.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/otto-control-backup.timer /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/otto-control-restore-drill.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/otto-control-restore-drill.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now otto-control-backup.timer
-systemctl list-timers otto-control-backup.timer
+sudo systemctl enable --now otto-control-restore-drill.timer
+systemctl list-timers 'otto-control-*'
 ```
 
 Backups are written atomically under `backups/` as `.dump.enc` plus a matching
@@ -125,6 +128,21 @@ and creates a fresh safety backup before stopping the control service. It starts
 the service only after PostgreSQL restoration succeeds, then waits for the
 readiness endpoint. A failed destructive restore deliberately leaves the control
 service stopped so an operator cannot unknowingly write into partial data.
+
+Run a non-destructive restore drill manually against the newest backup:
+
+```bash
+npm run drill:restore:production
+```
+
+An explicit encrypted backup path may be supplied after `--`. The drill restores
+into a uniquely named `otto_drill_*` database while production remains online,
+checks the migration ledger and all critical commercial-control tables, records
+key row counts, drops the temporary database, and writes a pass report under
+`backups/drills/`. The systemd timer performs this exercise every Sunday and
+retries transient failures without touching the production database. A backup
+older than the configured recovery window fails the drill instead of producing
+a misleading success report.
 
 ## Configuration
 
@@ -154,6 +172,8 @@ service stopped so an operator cannot unknowingly write into partial data.
 | `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
 | `CONTROL_UPDATE_POLICY_DURATION_MS` | `300000` | Signed update decision lifetime, from one minute to one hour |
 | `CONTROL_BACKUP_RETENTION_DAYS` | `30` | Number of days encrypted local backups are retained |
+| `CONTROL_DRILL_REPORT_RETENTION_DAYS` | `180` | Number of days successful restore-drill reports are retained |
+| `CONTROL_DRILL_MAX_BACKUP_AGE_HOURS` | `48` | Oldest encrypted backup accepted by a restore drill |
 | `OTTO_CONTROL_BACKUP_KEY_FILE` | empty | File containing the backup encryption key |
 
 ## Commercial control flow
@@ -252,5 +272,5 @@ Traefik
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are scheduled restore drills, signing-key rotation, operator-facing
+next phases are signing-key rotation, off-site backup delivery, operator-facing
 administration, and eventually the separate federation gateway.

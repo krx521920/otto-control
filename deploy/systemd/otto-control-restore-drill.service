@@ -1,0 +1,20 @@
+[Unit]
+Description=Verify the latest Otto Control backup in an isolated database
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/opt/otto-control/.env.production
+StartLimitIntervalSec=2h
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/otto-control
+ExecStart=/bin/sh /opt/otto-control/deploy/drill-restore-postgres.sh
+TimeoutStartSec=2h
+Restart=on-failure
+RestartSec=15m
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+NoNewPrivileges=true

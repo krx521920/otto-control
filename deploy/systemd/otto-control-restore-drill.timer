@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Otto Control isolated restore drill
+
+[Timer]
+OnCalendar=Sun *-*-* 04:10:00
+RandomizedDelaySec=45m
+Persistent=true
+Unit=otto-control-restore-drill.service
+
+[Install]
+WantedBy=timers.target
