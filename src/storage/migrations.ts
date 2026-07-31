@@ -163,6 +163,15 @@ const MIGRATIONS: Migration[] = [
        ON control_update_policy_nonces(expires_at_ms)`,
     ],
   },
+  {
+    id: '004_multi_distribution_assignments',
+    statements: [
+      `ALTER TABLE control_deployment_update_assignments
+       DROP CONSTRAINT IF EXISTS control_deployment_update_assignments_pkey`,
+      `ALTER TABLE control_deployment_update_assignments
+       ADD PRIMARY KEY (deployment_id, distribution_id)`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

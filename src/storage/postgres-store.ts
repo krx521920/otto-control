@@ -533,8 +533,8 @@ export class PostgresControlStore implements ControlStore {
         `INSERT INTO control_deployment_update_assignments
           (deployment_id, distribution_id, updated_at)
          VALUES ($1, $2, $3)
-         ON CONFLICT (deployment_id) DO UPDATE
-         SET distribution_id = EXCLUDED.distribution_id, updated_at = EXCLUDED.updated_at
+         ON CONFLICT (deployment_id, distribution_id) DO UPDATE
+         SET updated_at = EXCLUDED.updated_at
          RETURNING *`,
         [input.deploymentId, input.distributionId, input.updatedAt],
       );
@@ -552,19 +552,16 @@ export class PostgresControlStore implements ControlStore {
     }
   }
 
-  async getDeploymentUpdateAssignment(
+  async hasDeploymentUpdateAssignment(
     deploymentId: string,
-  ): Promise<DeploymentUpdateAssignmentRecord | null> {
-    const result = await this.#pool.query<DeploymentUpdateAssignmentRow>(
-      'SELECT * FROM control_deployment_update_assignments WHERE deployment_id = $1',
-      [deploymentId],
+    distributionId: string,
+  ): Promise<boolean> {
+    const result = await this.#pool.query(
+      `SELECT 1 FROM control_deployment_update_assignments
+       WHERE deployment_id = $1 AND distribution_id = $2`,
+      [deploymentId, distributionId],
     );
-    const row = result.rows[0];
-    return row ? {
-      deploymentId: row.deployment_id,
-      distributionId: row.distribution_id,
-      updatedAt: row.updated_at,
-    } : null;
+    return result.rowCount === 1;
   }
 
   async createUpdateRelease(input: CreateUpdateReleaseRecordInput): Promise<UpdateReleaseRecord> {

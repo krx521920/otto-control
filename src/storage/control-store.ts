@@ -143,9 +143,10 @@ export interface ControlStore {
     distributionId: string;
     updatedAt: Date;
   }): Promise<DeploymentUpdateAssignmentRecord>;
-  getDeploymentUpdateAssignment(
+  hasDeploymentUpdateAssignment(
     deploymentId: string,
-  ): Promise<DeploymentUpdateAssignmentRecord | null>;
+    distributionId: string,
+  ): Promise<boolean>;
   createUpdateRelease(input: CreateUpdateReleaseRecordInput): Promise<UpdateReleaseRecord>;
   getUpdateRelease(id: string): Promise<UpdateReleaseRecord | null>;
   listUpdateReleases(distributionId: string): Promise<UpdateReleaseRecord[]>;

@@ -101,6 +101,26 @@ describe('signed update policy service', () => {
     expect(updateCohortPercent('otto', 'rel_same', DEPLOYMENT_ID)).toBeLessThanOrEqual(100);
   });
 
+  it('allows one private server to serve multiple isolated distributions', async () => {
+    await service.assignDeployment(
+      DEPLOYMENT_ID,
+      { distributionId: 'otto-green' },
+      ADMIN,
+    );
+    await service.assignDeployment(
+      DEPLOYMENT_ID,
+      { distributionId: 'otto-green' },
+      ADMIN,
+    );
+
+    await expect(
+      store.hasDeploymentUpdateAssignment(DEPLOYMENT_ID, 'otto'),
+    ).resolves.toBe(true);
+    await expect(
+      store.hasDeploymentUpdateAssignment(DEPLOYMENT_ID, 'otto-green'),
+    ).resolves.toBe(true);
+  });
+
   it('returns a short-lived signed decision and rejects replay or cross-channel access', async () => {
     const release = await service.createRelease({
       distributionId: 'otto',
@@ -208,4 +228,3 @@ describe('signed update policy service', () => {
     expect(await store.getActiveUpdateReleases('otto')).toHaveLength(1);
   });
 });
-

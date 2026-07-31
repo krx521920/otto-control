@@ -208,14 +208,15 @@ export class MemoryControlStore implements ControlStore {
       throw new Error('distribution does not exist');
     }
     const assignment = { ...input };
-    this.updateAssignments.set(input.deploymentId, assignment);
+    this.updateAssignments.set(`${input.deploymentId}\0${input.distributionId}`, assignment);
     return assignment;
   }
 
-  async getDeploymentUpdateAssignment(
+  async hasDeploymentUpdateAssignment(
     deploymentId: string,
-  ): Promise<DeploymentUpdateAssignmentRecord | null> {
-    return this.updateAssignments.get(deploymentId) ?? null;
+    distributionId: string,
+  ): Promise<boolean> {
+    return this.updateAssignments.has(`${deploymentId}\0${distributionId}`);
   }
 
   async createUpdateRelease(input: CreateUpdateReleaseRecordInput): Promise<UpdateReleaseRecord> {

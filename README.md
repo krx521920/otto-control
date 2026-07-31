@@ -112,7 +112,7 @@ control service is unavailable.
 
 1. Create independent distributions such as `otto` and `otto-green` with
    `POST /v1/admin/update-distributions`.
-2. Bind each registered deployment to exactly one distribution with
+2. Allow each registered deployment to use one or more distributions with
    `PUT /v1/admin/deployments/:deploymentId/update-distribution`.
 3. Register a draft release with HTTPS full and/or incremental manifest URLs.
    Every manifest reference requires its lowercase SHA-256 digest.
@@ -127,9 +127,9 @@ control service is unavailable.
 
 Policy rollback does not claim to downgrade clients that already installed an
 artifact. Client-side component receipts and full-installer rollback remain
-separate execution concerns. Distribution binding prevents an Otto deployment
-from requesting Otto Green artifacts even though both may share one control
-plane and signing authority.
+separate execution concerns. Distribution allowlists prevent a deployment from
+requesting unapproved artifacts while allowing one enterprise server to serve
+both Otto and Otto Green clients from the same accounts and collaboration data.
 
 ## Implemented APIs
 

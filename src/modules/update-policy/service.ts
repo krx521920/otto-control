@@ -377,8 +377,11 @@ export class UpdatePolicyService {
     if (license.expiresAtMs <= now) throw unauthorized('License has expired');
     const deployment = await this.#store.getDeployment(deploymentId);
     if (!deployment || deployment.status !== 'active') throw unauthorized('deployment is not active');
-    const assignment = await this.#store.getDeploymentUpdateAssignment(deploymentId);
-    if (!assignment || assignment.distributionId !== distributionId) {
+    const assigned = await this.#store.hasDeploymentUpdateAssignment(
+      deploymentId,
+      distributionId,
+    );
+    if (!assigned) {
       throw unauthorized('deployment is not assigned to this update distribution');
     }
     const distribution = await this.#store.getUpdateDistribution(distributionId);
