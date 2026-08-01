@@ -58,6 +58,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   overwrite an existing production identity
 - AES-256-GCM encrypted PostgreSQL backups with atomic publication, integrity
   checks, retention, restore-before-write validation, and a systemd schedule
+- S3/MinIO-compatible off-site replication of encrypted backups with SigV4,
+  immutable writes, remote SHA-256 verification, and bounded retries
 
 ## Development
 
@@ -137,9 +139,21 @@ systemctl list-timers 'otto-control-*'
 
 Backups are written atomically under `backups/` as `.dump.enc` plus a matching
 `.sha256` file. Database bytes are encrypted as a stream with AES-256-GCM, so an
-unencrypted dump is never written to disk. Copy encrypted backups and checksum
-files to off-site storage, but protect `secrets/backup_encryption_key` separately;
+unencrypted dump is never written to disk. Keep at least one independently
+controlled off-site copy, but protect `secrets/backup_encryption_key` separately;
 losing that key makes every encrypted backup unrecoverable.
+
+For S3-compatible off-site replication, create separate permission-`0600`
+credential files and set the `CONTROL_BACKUP_S3_*` values in `.env.production`.
+The S3 identity needs only `s3:PutObject` and `s3:GetObject` for its configured
+bucket prefix (`HEAD Object` is authorized by `s3:GetObject`); it does not need
+list, delete, database, or control-plane access. Both the encrypted
+archive and checksum are uploaded with create-only semantics, then verified by
+remote size and SHA-256 metadata. Existing objects are accepted only when those
+values match. Set `CONTROL_BACKUP_OFFSITE_REQUIRED=true` in production when a
+backup job must fail visibly after all retry attempts instead of retaining only
+the valid local copy. AWS S3 generally uses `virtual` addressing; MinIO commonly
+uses `path` addressing.
 
 Restore requires the exact confirmation phrase:
 
@@ -179,7 +193,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.10.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.11.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -198,6 +212,17 @@ a misleading success report.
 | `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
 | `CONTROL_UPDATE_POLICY_DURATION_MS` | `300000` | Signed update decision lifetime, from one minute to one hour |
 | `CONTROL_BACKUP_RETENTION_DAYS` | `30` | Number of days encrypted local backups are retained |
+| `CONTROL_BACKUP_OFFSITE_REQUIRED` | `false` | Fail the scheduled backup when remote replication cannot be verified |
+| `CONTROL_BACKUP_S3_ENDPOINT` | empty | HTTPS origin for AWS S3, MinIO, or another S3-compatible service |
+| `CONTROL_BACKUP_S3_BUCKET` | empty | Bucket receiving encrypted backup objects |
+| `CONTROL_BACKUP_S3_REGION` | `us-east-1` | SigV4 signing region |
+| `CONTROL_BACKUP_S3_PREFIX` | `otto-control` | Isolated object-key prefix for this control plane |
+| `CONTROL_BACKUP_S3_ADDRESSING_STYLE` | `path` | S3 endpoint addressing: `path` or `virtual` |
+| `CONTROL_BACKUP_S3_ACCESS_KEY_ID_FILE` | empty | Permission-restricted file containing the S3 access key ID |
+| `CONTROL_BACKUP_S3_SECRET_ACCESS_KEY_FILE` | empty | Permission-restricted file containing the S3 secret key |
+| `CONTROL_BACKUP_S3_SESSION_TOKEN_FILE` | empty | Optional permission-restricted temporary session token file |
+| `CONTROL_BACKUP_S3_MAX_ATTEMPTS` | `4` | Bounded remote upload and verification attempts |
+| `CONTROL_BACKUP_S3_TIMEOUT_MS` | `120000` | Per-request inactivity timeout for remote backup operations |
 | `CONTROL_DRILL_REPORT_RETENTION_DAYS` | `180` | Number of days successful restore-drill reports are retained |
 | `CONTROL_DRILL_MAX_BACKUP_AGE_HOURS` | `48` | Oldest encrypted backup accepted by a restore drill |
 | `OTTO_CONTROL_BACKUP_KEY_FILE` | empty | File containing the backup encryption key |
@@ -502,6 +527,6 @@ Traefik
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are an operator-facing administration UI, off-site backup delivery,
-vendor-specific signer-broker deployment recipes, and eventually the separate
-federation gateway.
+next phases are an operator-facing administration UI, off-site backup inventory
+and recovery alerts, vendor-specific signer-broker deployment recipes, and
+eventually the separate federation gateway.

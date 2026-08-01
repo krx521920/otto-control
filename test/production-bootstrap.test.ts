@@ -41,6 +41,9 @@ describe('production bootstrap', () => {
       expect(environment).toContain(
         'CONTROL_SIGNER_KEYRING_FILE=/run/otto-secrets/control_signer_keyring.json',
       );
+      expect(environment).toContain('CONTROL_BACKUP_OFFSITE_REQUIRED=false');
+      expect(environment).toContain('CONTROL_BACKUP_S3_ADDRESSING_STYLE=path');
+      expect(environment).not.toMatch(/CONTROL_BACKUP_S3_SECRET_ACCESS_KEY=[^\n]+/u);
       expect(environment).not.toContain(adminToken);
       expect(environment).not.toContain(databasePassword);
       expect(environment).not.toContain(backupKey);

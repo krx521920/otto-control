@@ -157,6 +157,11 @@ TEMP_FILE=''
   sha256sum "$BACKUP_NAME" > "$BACKUP_NAME.sha256"
 )
 
+node "$ROOT/scripts/replicate-backup-s3.mjs" \
+  --env-file "$ENV_FILE" \
+  --file "$FINAL_FILE" \
+  --checksum "$FINAL_FILE.sha256"
+
 find "$BACKUP_DIR" -type f \
   \( -name 'otto-control-*.dump.enc' -o -name 'otto-control-*.dump.enc.sha256' \) \
   -mtime "+$RETENTION_DAYS" -delete
