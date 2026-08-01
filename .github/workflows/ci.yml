@@ -39,6 +39,13 @@ jobs:
       - name: Run repository quality gates
         run: npm run check
 
+      - name: Validate production HA deployment assets
+        run: |
+          trap 'rm -rf .env.production secrets backups' EXIT
+          npm run bootstrap:production -- --public-url https://control.example.test
+          docker compose -f compose.production.yaml --env-file .env.production config --quiet
+          sh -n deploy/*.sh deploy/postgres-ha/*.sh deploy/postgres-ha/otto-pgbackrest
+
       - name: Reject whitespace errors
         run: git diff --check
 
@@ -95,3 +102,66 @@ jobs:
 
       - name: Build production image
         run: docker build --tag otto-control:ci .
+
+      - name: Build Patroni and pgBackRest image
+        run: >-
+          docker build
+          --file deploy/postgres-ha/Dockerfile
+          --build-arg PATRONI_VERSION=4.1.4
+          --tag otto-control-postgres-ha:ci
+          .
+
+  ha-smoke:
+    name: PostgreSQL failover and PITR smoke test
+    needs: [quality, postgres-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Bootstrap disposable HA identity
+        run: npm run bootstrap:production -- --public-url https://control.example.test
+
+      - name: Start database quorum and three Control instances
+        run: |
+          trap 'docker compose -f compose.production.yaml --env-file .env.production logs --no-color' ERR
+          docker compose -f compose.production.yaml --env-file .env.production \
+            up --detach --build --wait --wait-timeout 300 control-a control-b control-c
+
+      - name: Prove all Control instances are ready
+        run: |
+          for instance in control-a control-b control-c; do
+            docker compose -f compose.production.yaml --env-file .env.production \
+              exec -T "$instance" node -e \
+              "fetch('http://127.0.0.1:7788/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+          done
+
+      - name: Exercise encrypted physical backup and automatic failover
+        run: |
+          sh deploy/backup-pitr-postgres.sh full
+          sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL
+
+      - name: Restore an isolated PITR instance
+        run: sh deploy/drill-pitr-postgres.sh
+
+      - name: Validate Caddy load-balancer configuration
+        run: >-
+          docker compose -f compose.production.yaml --env-file .env.production
+          run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile
+
+      - name: Print diagnostics and clean up
+        if: always()
+        run: |
+          docker compose -f compose.production.yaml --env-file .env.production ps || true
+          docker compose -f compose.production.yaml --env-file .env.production logs --no-color --tail=500 || true
+          docker compose -f compose.production.yaml --env-file .env.production down --volumes --remove-orphans || true
+
