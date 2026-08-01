@@ -60,6 +60,8 @@ describe('operator console assets', () => {
     expect(response.body).toContain('/v1/admin/audit/events?');
     expect(response.body).toContain('/v1/admin/audit/verify');
     expect(response.body).toContain('/v1/admin/audit/export.csv?');
+    expect(response.body).toContain('/v1/admin/audit/anchors?');
+    expect(response.body).toContain('/v1/admin/audit/anchors/poll');
     expect(response.body).toContain("'x-otto-approval-id': approval.id");
     expect(response.body).toContain("operation: 'license.revoke'");
     expect(response.body).toContain("hasPermission('approval.decide')");

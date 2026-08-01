@@ -34,6 +34,7 @@ export interface AuditChainState {
 
 export interface AuditIntegrityReceipt {
   version: 1;
+  issuer: string;
   generatedAt: string;
   valid: boolean;
   checkedEvents: number;

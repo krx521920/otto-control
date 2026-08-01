@@ -16,6 +16,7 @@ import { registerBackupStatusRoutes } from './routes/backup-status.js';
 import { registerAlertDeliveryRoutes } from './routes/alert-delivery.js';
 import { registerOperatorConsoleRoutes } from './routes/operator-console.js';
 import { registerAuditRoutes } from './routes/audit.js';
+import { registerAuditAnchorRoutes } from './routes/audit-anchor.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
@@ -161,6 +162,13 @@ export async function buildControlApp(
         identity: commercialControl.identity,
       });
     }
+    if (commercialControl.auditAnchors) {
+      capabilities.push('external_audit_anchoring');
+      await registerAuditAnchorRoutes(app, {
+        service: commercialControl.auditAnchors,
+        identity: commercialControl.identity,
+      });
+    }
     await registerOperatorConsoleRoutes(app);
     if (commercialControl.billing) {
       capabilities.push('credit_billing', 'billing_statement_export');
@@ -173,10 +181,16 @@ export async function buildControlApp(
       commercialControl.alerts.start((error) => {
         app.log.error({ err: error }, 'alert delivery poll failed');
       });
+      commercialControl.auditAnchors?.start((error) => {
+        app.log.error({ err: error }, 'audit anchor poll failed');
+      });
     });
     app.addHook('onClose', async () => {
       try {
-        await commercialControl.alerts.close();
+        await Promise.all([
+          commercialControl.alerts.close(),
+          commercialControl.auditAnchors?.close(),
+        ]);
       } finally {
         await commercialControl.service.close();
       }

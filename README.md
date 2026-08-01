@@ -66,6 +66,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   fingerprint deduplication, leased workers, bounded retries, and delivery audit
 - Tamper-evident audit chain with exact filters, cursor pagination, sensitive-field
   redaction, CSV evidence export, and Ed25519-signed integrity receipts
+- Durable external audit-anchor outbox with stable chain-head deduplication,
+  leased workers, exponential retry, terminal-failure recovery, and destination status
 - Same-origin operator console with MFA login, RBAC-filtered commercial inventory,
   customer/deployment/License onboarding, renewal, seat management, immutable
   lifecycle history, dual-control review and execution, backup readiness, alert
@@ -222,6 +224,17 @@ checkpoints. A database superuser who can rewrite both all events and the chain
 head is outside the protection boundary until a prior signed receipt is compared;
 the feature is tamper-evident, not a substitute for off-site evidence retention.
 
+Set `CONTROL_AUDIT_ANCHOR_URL` and `CONTROL_AUDIT_ANCHOR_TOKEN_FILE` together to
+enable automatic external checkpoints. The worker creates a signed receipt at
+the configured interval, deduplicates the same issuer/sequence/head, stores it in
+the PostgreSQL outbox, and delivers it over HTTPS with bounded timeout, leases,
+exponential retry, and manual terminal-failure recovery. The bearer token
+authenticates delivery but is not the evidence: receivers must verify the nested
+Ed25519 receipt against `/v1/signing-keyring` and retain it outside this database,
+preferably in immutable or append-only storage. A 2xx response acknowledges
+delivery; an optional `X-Otto-Audit-Anchor-Reference` response header is retained
+as the external object or receipt identifier.
+
 Restore requires the exact confirmation phrase:
 
 ```bash
@@ -260,7 +273,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.19.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.20.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -288,6 +301,12 @@ a misleading success report.
 | `CONTROL_ALERT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-delivery timeout, from 500 to 30000 milliseconds |
 | `CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS` | `8` | Maximum delivery attempts before a terminal failure |
 | `CONTROL_ALERT_RETENTION_DAYS` | `365` | Days to retain delivered and terminally failed alert records |
+| `CONTROL_AUDIT_ANCHOR_URL` | empty | HTTPS endpoint receiving signed audit-chain receipts; empty disables anchoring |
+| `CONTROL_AUDIT_ANCHOR_TOKEN_FILE` | empty | Read-only file containing the external anchor bearer token; required with the URL |
+| `CONTROL_AUDIT_ANCHOR_INTERVAL_MS` | `900000` | Minimum interval between newly generated chain-head receipts, from 1 minute to 24 hours |
+| `CONTROL_AUDIT_ANCHOR_POLL_INTERVAL_MS` | `60000` | Background anchor outbox polling interval, from 5 seconds to 1 hour |
+| `CONTROL_AUDIT_ANCHOR_TIMEOUT_MS` | `10000` | Per-delivery timeout, from 500 to 30000 milliseconds |
+| `CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS` | `8` | Maximum delivery attempts before a terminal failure |
 | `CONTROL_BACKUP_OFFSITE_REQUIRED` | `false` | Fail the scheduled backup when remote replication cannot be verified |
 | `CONTROL_BACKUP_S3_ENDPOINT` | empty | HTTPS origin for AWS S3, MinIO, or another S3-compatible service |
 | `CONTROL_BACKUP_S3_BUCKET` | empty | Bucket receiving encrypted backup objects |
@@ -638,6 +657,9 @@ POST /v1/admin/alerts/deliveries/:deliveryId/retry
 GET  /v1/admin/audit/events
 GET  /v1/admin/audit/export.csv
 POST /v1/admin/audit/verify
+GET  /v1/admin/audit/anchors?limit=50
+POST /v1/admin/audit/anchors/poll
+POST /v1/admin/audit/anchors/:anchorId/retry
 POST /v1/admin/update-distributions
 PUT  /v1/admin/deployments/:deploymentId/update-distribution
 POST /v1/admin/update-releases
@@ -670,9 +692,10 @@ Traefik
        -> alert_delivery (implemented foundation)
        -> operator_console (implemented onboarding, License lifecycle, and dual control)
        -> audit (implemented query, export, and signed integrity verification)
+       -> audit_anchor (implemented durable external evidence delivery)
 ```
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are vendor-specific signer-broker deployment recipes, external
-audit-receipt anchoring, and eventually the separate federation gateway.
+next phases are vendor-specific signer-broker deployment recipes, an independently
+deployable audit witness receiver, and eventually the separate federation gateway.

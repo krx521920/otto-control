@@ -10,6 +10,7 @@ import { ReleaseArtifactService } from './modules/release-artifacts/service.js';
 import { BackupStatusService } from './modules/backup-status/service.js';
 import { AlertDeliveryService } from './modules/alert-delivery/service.js';
 import { AuditService } from './modules/audit/service.js';
+import { AuditAnchorService } from './modules/audit-anchor/service.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 
 export interface CommercialControlRuntime {
@@ -22,6 +23,7 @@ export interface CommercialControlRuntime {
   backupStatus: BackupStatusService;
   alerts: AlertDeliveryService;
   audit?: AuditService;
+  auditAnchors?: AuditAnchorService;
 }
 
 function missingConfiguration(config: Readonly<ControlConfig>): string[] {
@@ -79,6 +81,11 @@ export async function createCommercialControlRuntime(
       maxAttempts: config.alertWebhookMaxAttempts,
       retentionDays: config.alertRetentionDays,
     });
+    const audit = new AuditService({
+      store,
+      signer,
+      issuer: config.publicBaseUrl!,
+    });
     return {
       adminToken: config.adminToken!,
       identity,
@@ -86,7 +93,17 @@ export async function createCommercialControlRuntime(
       releaseArtifacts,
       backupStatus,
       alerts,
-      audit: new AuditService({ store, signer }),
+      audit,
+      auditAnchors: new AuditAnchorService({
+        store,
+        audit,
+        url: config.auditAnchorUrl,
+        tokenFile: config.auditAnchorTokenFile,
+        anchorIntervalMs: config.auditAnchorIntervalMs,
+        pollIntervalMs: config.auditAnchorPollIntervalMs,
+        timeoutMs: config.auditAnchorTimeoutMs,
+        maxAttempts: config.auditAnchorMaxAttempts,
+      }),
       service: new CommercialControlService({
         store,
         signer,

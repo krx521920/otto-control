@@ -113,6 +113,13 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
           <div><span>签名密钥</span><strong id="audit-signing-key">-</strong></div>
           <div><span>迁移前记录</span><strong id="audit-legacy-count">-</strong></div>
         </div>
+        <div id="audit-anchor-panel" class="audit-anchor-panel">
+          <div class="audit-anchor-heading">
+            <div><strong>外部证据锚定</strong><span id="audit-anchor-destination">尚未配置</span></div>
+            <button id="poll-audit-anchors" class="secondary" type="button">立即生成并锚定</button>
+          </div>
+          <div id="audit-anchor-list" class="audit-anchor-list"></div>
+        </div>
         <div class="table-panel"><table class="audit-table"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>详情</th><th>链序号</th></tr></thead><tbody id="audit-body"></tbody></table></div>
         <div class="audit-pagination"><button id="audit-load-more" class="secondary hidden" type="button">加载更多</button></div>
       </section>

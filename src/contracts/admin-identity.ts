@@ -31,6 +31,7 @@ export const ADMIN_PERMISSIONS = [
   'audit.read',
   'audit.export',
   'audit.verify',
+  'audit.anchor.manage',
 ] as const;
 
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];

@@ -669,6 +669,39 @@ const MIGRATIONS: Migration[] = [
          ('security_admin', 'audit.read'), ('security_admin', 'audit.export'), ('security_admin', 'audit.verify'),
          ('auditor', 'audit.read'), ('auditor', 'audit.export'), ('auditor', 'audit.verify')
        ) AS assignments(role_id, permission_id)
+      ON CONFLICT DO NOTHING`,
+    ],
+  },
+  {
+    id: '017_external_audit_anchors',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_audit_anchors (
+        id TEXT PRIMARY KEY CHECK (id ~ '^anchor_[a-f0-9]{32}$'),
+        fingerprint TEXT NOT NULL UNIQUE CHECK (fingerprint ~ '^[a-f0-9]{64}$'),
+        payload JSONB NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'delivering', 'retrying', 'delivered', 'failed')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 100),
+        next_attempt_at TIMESTAMPTZ NOT NULL,
+        lease_until TIMESTAMPTZ,
+        last_error TEXT,
+        delivered_at TIMESTAMPTZ,
+        remote_reference TEXT CHECK (remote_reference IS NULL OR length(remote_reference) <= 200),
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        CHECK ((status = 'delivering') = (lease_until IS NOT NULL)),
+        CHECK ((status = 'delivered') = (delivered_at IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_audit_anchors_due
+       ON control_audit_anchors(next_attempt_at, created_at)
+       WHERE status IN ('pending', 'retrying', 'delivering')`,
+      `CREATE INDEX IF NOT EXISTS idx_control_audit_anchors_history
+       ON control_audit_anchors(created_at DESC, id DESC)`,
+      `INSERT INTO control_admin_permissions (id) VALUES ('audit.anchor.manage')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT role_id, 'audit.anchor.manage'
+       FROM (VALUES ('super_admin'), ('security_admin')) AS roles(role_id)
        ON CONFLICT DO NOTHING`,
     ],
   },

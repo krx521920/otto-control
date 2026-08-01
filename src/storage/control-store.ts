@@ -42,6 +42,11 @@ import type {
   AuditEventQuery,
   AuditEventRecord,
 } from '../contracts/audit.js';
+import type {
+  AuditAnchorPayload,
+  AuditAnchorRecord,
+  AuditAnchorStatus,
+} from '../contracts/audit-anchor.js';
 
 export type RecordStatus = 'active' | 'suspended';
 
@@ -575,5 +580,32 @@ export interface ControlStore {
   }): Promise<AuditEventRecord[]>;
   getAuditChainState(): Promise<AuditChainState>;
   countLegacyAuditEvents(): Promise<number>;
+  enqueueAuditAnchor(input: {
+    id: string;
+    fingerprint: string;
+    payload: AuditAnchorPayload;
+    createdAt: Date;
+    audit: AuditEventInput;
+  }): Promise<{ record: AuditAnchorRecord; created: boolean }>;
+  claimAuditAnchor(input: { now: Date; leaseUntil: Date }): Promise<AuditAnchorRecord | null>;
+  finishAuditAnchor(input: {
+    id: string;
+    expectedLeaseUntil: Date;
+    status: Extract<AuditAnchorStatus, 'delivered' | 'retrying' | 'failed'>;
+    nextAttemptAt: Date;
+    lastError: string | null;
+    deliveredAt: Date | null;
+    remoteReference: string | null;
+    updatedAt: Date;
+    audit: AuditEventInput | null;
+  }): Promise<AuditAnchorRecord | null>;
+  getAuditAnchor(id: string): Promise<AuditAnchorRecord | null>;
+  getLatestAuditAnchor(): Promise<AuditAnchorRecord | null>;
+  retryAuditAnchor(input: {
+    id: string;
+    retriedAt: Date;
+    audit: AuditEventInput;
+  }): Promise<AuditAnchorRecord | null>;
+  listAuditAnchors(limit: number): Promise<AuditAnchorRecord[]>;
   appendAuditEvent(input: AuditEventInput): Promise<void>;
 }

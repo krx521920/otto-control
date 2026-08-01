@@ -29,6 +29,12 @@ const baseConfig: Readonly<ControlConfig> = {
   alertWebhookTimeoutMs: 10_000,
   alertWebhookMaxAttempts: 8,
   alertRetentionDays: 365,
+  auditAnchorUrl: null,
+  auditAnchorTokenFile: null,
+  auditAnchorIntervalMs: 900_000,
+  auditAnchorPollIntervalMs: 60_000,
+  auditAnchorTimeoutMs: 10_000,
+  auditAnchorMaxAttempts: 8,
 };
 
 describe('commercial control runtime configuration', () => {

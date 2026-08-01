@@ -10,8 +10,16 @@ export const OPERATOR_CONSOLE_AUDIT_CSS = `.audit-filters { display: grid; grid-
 .audit-table { min-width: 920px; }
 .audit-detail { max-width: 340px; overflow: hidden; color: #65736d; font: 12px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .audit-pagination { display: flex; justify-content: center; margin-top: 14px; }
+.audit-anchor-panel { margin: 16px 0; padding: 14px; border: 1px solid #dbe4e0; border-radius: 6px; background: #f8faf9; }
+.audit-anchor-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.audit-anchor-heading strong, .audit-anchor-heading span { display: block; }
+.audit-anchor-heading span { margin-top: 4px; color: #74817b; font-size: 12px; }
+.audit-anchor-list { display: grid; gap: 8px; margin-top: 12px; }
+.audit-anchor-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 10px 12px; border-top: 1px solid #e5ebe8; }
+.audit-anchor-item code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-anchor-item small { color: #74817b; }
 @media (max-width: 980px) { .audit-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .audit-actions { grid-column: 1 / -1; } }
-@media (max-width: 620px) { .audit-filters, .audit-integrity { grid-template-columns: 1fr; } }`;
+@media (max-width: 620px) { .audit-filters, .audit-integrity { grid-template-columns: 1fr; } .audit-anchor-heading { align-items: stretch; flex-direction: column; } .audit-anchor-item { grid-template-columns: 1fr; } }`;
 
 export const OPERATOR_CONSOLE_AUDIT_JS = `let auditCursor = null;
 function auditParameters(includeCursor) {
@@ -57,7 +65,51 @@ async function refreshAudit(reset = true) {
     appendAuditEvents(data.events, reset);
     auditCursor = data.nextBeforeId;
     byId('audit-load-more').classList.toggle('hidden', !auditCursor);
+    if (reset) await refreshAuditAnchors();
   } catch (error) { toast(error.message); }
+}
+function auditAnchorStatus(status) {
+  return ({ pending: '等待投递', delivering: '正在投递', retrying: '等待重试', delivered: '已外部存证', failed: '最终失败' })[status] || status;
+}
+async function refreshAuditAnchors() {
+  const data = await request('/v1/admin/audit/anchors?limit=10');
+  setText('audit-anchor-destination', data.enabled ? data.destinationOrigin : '未配置外部锚定地址');
+  const action = byId('poll-audit-anchors');
+  action.classList.toggle('hidden', !hasPermission('audit.anchor.manage'));
+  action.disabled = !data.enabled;
+  const list = byId('audit-anchor-list'); list.replaceChildren();
+  data.anchors.forEach((anchor) => {
+    const item = document.createElement('div'); item.className = 'audit-anchor-item';
+    const identity = document.createElement('div');
+    const hash = document.createElement('code'); hash.textContent = anchor.payload.evidence.receipt.headHash;
+    const metadata = document.createElement('small');
+    metadata.textContent = localTime(anchor.createdAt) + ' · 链序号 #' + anchor.payload.evidence.receipt.lastSequence;
+    identity.append(hash, metadata);
+    const status = document.createElement('span'); status.className = 'status-pill ' + (anchor.status === 'delivered' ? 'good' : anchor.status === 'failed' ? 'danger' : 'neutral');
+    status.textContent = auditAnchorStatus(anchor.status);
+    item.append(identity, status);
+    if (anchor.status === 'failed' && hasPermission('audit.anchor.manage')) {
+      const retry = document.createElement('button'); retry.className = 'secondary compact'; retry.type = 'button'; retry.textContent = '重试';
+      retry.addEventListener('click', async () => {
+        retry.disabled = true;
+        try { await request('/v1/admin/audit/anchors/' + encodeURIComponent(anchor.id) + '/retry', { method: 'POST' }); await refreshAuditAnchors(); }
+        catch (error) { toast(error.message); } finally { retry.disabled = false; }
+      });
+      item.append(retry);
+    } else {
+      const reference = document.createElement('small'); reference.textContent = anchor.remoteReference || ('尝试 ' + anchor.attempts + ' 次'); item.append(reference);
+    }
+    list.append(item);
+  });
+  if (!data.anchors.length) { const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = '尚无外部锚定记录。'; list.append(empty); }
+}
+async function pollAuditAnchors() {
+  const button = byId('poll-audit-anchors'); button.disabled = true;
+  try {
+    const result = await request('/v1/admin/audit/anchors/poll', { method: 'POST' });
+    toast(result.chainValid === false ? '审计链异常，已拒绝对外锚定' : result.delivered ? '审计证据已外部锚定' : '锚定任务已检查');
+    await refreshAudit(true);
+  } catch (error) { toast(error.message); } finally { button.disabled = false; }
 }
 async function verifyAuditChain() {
   const button = byId('verify-audit'); button.disabled = true;
@@ -91,4 +143,5 @@ async function exportAuditCsv() {
 byId('audit-filter-form').addEventListener('submit', (event) => { event.preventDefault(); void refreshAudit(true); });
 byId('audit-load-more').addEventListener('click', () => refreshAudit(false));
 byId('verify-audit').addEventListener('click', verifyAuditChain);
-byId('export-audit').addEventListener('click', exportAuditCsv);`;
+byId('export-audit').addEventListener('click', exportAuditCsv);
+byId('poll-audit-anchors').addEventListener('click', pollAuditAnchors);`;

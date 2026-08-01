@@ -26,6 +26,8 @@ describe('production deployment assets', () => {
     expect(compose).toContain('./secrets:/run/otto-secrets:ro');
     expect(compose).toContain('- alert_webhook_secret');
     expect(compose).toContain('file: ./secrets/alert_webhook_secret');
+    expect(compose).toContain('- audit_anchor_token');
+    expect(compose).toContain('file: ./secrets/audit_anchor_token');
     const postgresService = compose.slice(
       compose.indexOf('  postgres:'),
       compose.indexOf('  control:'),
@@ -35,7 +37,9 @@ describe('production deployment assets', () => {
       compose.indexOf('  caddy:'),
     );
     expect(postgresService).not.toContain('alert_webhook_secret');
+    expect(postgresService).not.toContain('audit_anchor_token');
     expect(controlService).toContain('- alert_webhook_secret');
+    expect(controlService).toContain('- audit_anchor_token');
     expect(compose).not.toMatch(/POSTGRES_PASSWORD:\s*[^\n]/u);
   });
 

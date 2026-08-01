@@ -29,6 +29,12 @@ export interface ControlConfig {
   alertWebhookTimeoutMs: number;
   alertWebhookMaxAttempts: number;
   alertRetentionDays: number;
+  auditAnchorUrl: string | null;
+  auditAnchorTokenFile: string | null;
+  auditAnchorIntervalMs: number;
+  auditAnchorPollIntervalMs: number;
+  auditAnchorTimeoutMs: number;
+  auditAnchorMaxAttempts: number;
 }
 
 const LOG_LEVELS = new Set<ControlLogLevel>([
@@ -230,6 +236,21 @@ function parseAlertWebhookUrl(value: string | undefined): string | null {
   return url.toString();
 }
 
+function parseAuditAnchorUrl(value: string | undefined): string | null {
+  const normalized = value?.trim();
+  if (!normalized) return null;
+  let url: URL;
+  try {
+    url = new URL(normalized);
+  } catch {
+    throw new Error('CONTROL_AUDIT_ANCHOR_URL must be an absolute HTTPS URL');
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash) {
+    throw new Error('CONTROL_AUDIT_ANCHOR_URL must use HTTPS without credentials or fragments');
+  }
+  return url.toString();
+}
+
 function parseLogLevel(value: string | undefined): ControlLogLevel {
   const normalized = (value?.trim() || 'info') as ControlLogLevel;
   if (!LOG_LEVELS.has(normalized)) throw new Error('CONTROL_LOG_LEVEL is invalid');
@@ -260,6 +281,8 @@ export function loadControlConfig(
   const alertWebhookUrl = parseAlertWebhookUrl(env.CONTROL_ALERT_WEBHOOK_URL);
   const alertWebhookSecretFile = env.CONTROL_ALERT_WEBHOOK_SECRET_FILE?.trim() || null;
   const alertChannelsFile = env.CONTROL_ALERT_CHANNELS_FILE?.trim() || null;
+  const auditAnchorUrl = parseAuditAnchorUrl(env.CONTROL_AUDIT_ANCHOR_URL);
+  const auditAnchorTokenFile = env.CONTROL_AUDIT_ANCHOR_TOKEN_FILE?.trim() || null;
   if (signerPrivateKeyFile && signerKeyringFile) {
     throw new Error('CONTROL_SIGNER_PRIVATE_KEY_FILE and CONTROL_SIGNER_KEYRING_FILE cannot both be set');
   }
@@ -269,6 +292,9 @@ export function loadControlConfig(
   if (alertChannelsFile && (alertWebhookUrl || alertWebhookSecretFile)) {
     throw new Error('CONTROL_ALERT_CHANNELS_FILE cannot be combined with legacy alert webhook settings');
   }
+  if (auditAnchorUrl && !auditAnchorTokenFile) {
+    throw new Error('CONTROL_AUDIT_ANCHOR_TOKEN_FILE is required with CONTROL_AUDIT_ANCHOR_URL');
+  }
   return Object.freeze({
     environment,
     host: env.CONTROL_HOST?.trim() || '127.0.0.1',
@@ -276,7 +302,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.19.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.20.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -324,6 +350,36 @@ export function loadControlConfig(
       30,
       3_650,
       'CONTROL_ALERT_RETENTION_DAYS',
+    ),
+    auditAnchorUrl,
+    auditAnchorTokenFile,
+    auditAnchorIntervalMs: parseBoundedInteger(
+      env.CONTROL_AUDIT_ANCHOR_INTERVAL_MS,
+      15 * 60_000,
+      60_000,
+      86_400_000,
+      'CONTROL_AUDIT_ANCHOR_INTERVAL_MS',
+    ),
+    auditAnchorPollIntervalMs: parseBoundedInteger(
+      env.CONTROL_AUDIT_ANCHOR_POLL_INTERVAL_MS,
+      60_000,
+      5_000,
+      3_600_000,
+      'CONTROL_AUDIT_ANCHOR_POLL_INTERVAL_MS',
+    ),
+    auditAnchorTimeoutMs: parseBoundedInteger(
+      env.CONTROL_AUDIT_ANCHOR_TIMEOUT_MS,
+      10_000,
+      500,
+      30_000,
+      'CONTROL_AUDIT_ANCHOR_TIMEOUT_MS',
+    ),
+    auditAnchorMaxAttempts: parseBoundedInteger(
+      env.CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS,
+      8,
+      1,
+      20,
+      'CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS',
     ),
   });
 }

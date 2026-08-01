@@ -56,6 +56,11 @@ import type {
   AuditEventQuery,
   AuditEventRecord,
 } from '../../src/contracts/audit.js';
+import type {
+  AuditAnchorPayload,
+  AuditAnchorRecord,
+  AuditAnchorStatus,
+} from '../../src/contracts/audit-anchor.js';
 import { AUDIT_GENESIS_HASH, auditEventHash } from '../../src/audit-chain.js';
 import { conflict } from '../../src/errors.js';
 
@@ -76,7 +81,7 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'update_release.publish', 'identity.read', 'identity.manage', 'approval.request',
   'approval.read', 'approval.decide',
   'billing.read', 'billing.topup', 'billing.manage', 'billing.refund',
-  'audit.read', 'audit.export', 'audit.verify',
+  'audit.read', 'audit.export', 'audit.verify', 'audit.anchor.manage',
 ];
 
 interface StoredTelemetryEvent extends OttoTelemetryEvent {
@@ -114,6 +119,7 @@ export class MemoryControlStore implements ControlStore {
   readonly creditHolds = new Map<string, CreditHoldRecord>();
   readonly creditTransactions = new Map<string, CreditTransactionRecord>();
   readonly alertDeliveries = new Map<string, AlertDeliveryRecord>();
+  readonly auditAnchors = new Map<string, AuditAnchorRecord>();
   #auditHeadHash = AUDIT_GENESIS_HASH;
   readonly adminRoles = new Map<string, AdminRoleRecord>([
     ['super_admin', role('super_admin', 'Super administrator', ALL_PERMISSIONS)],
@@ -121,7 +127,7 @@ export class MemoryControlStore implements ControlStore {
       'signing_key.read', 'signing_key.manage', 'identity.read', 'identity.manage',
       'approval.request', 'approval.read', 'approval.decide', 'backup.read',
       'alert.read', 'alert.manage',
-      'audit.read', 'audit.export', 'audit.verify',
+      'audit.read', 'audit.export', 'audit.verify', 'audit.anchor.manage',
     ])],
     ['license_admin', role('license_admin', 'License administrator', [
       'commercial.read', 'customer.create', 'deployment.create', 'license.issue', 'license.read',
@@ -1758,6 +1764,127 @@ export class MemoryControlStore implements ControlStore {
 
   async countLegacyAuditEvents(): Promise<number> {
     return 0;
+  }
+
+  async enqueueAuditAnchor(input: {
+    id: string;
+    fingerprint: string;
+    payload: AuditAnchorPayload;
+    createdAt: Date;
+    audit: AuditEventInput;
+  }): Promise<{ record: AuditAnchorRecord; created: boolean }> {
+    const existing = [...this.auditAnchors.values()]
+      .find((anchor) => anchor.fingerprint === input.fingerprint);
+    if (existing) return { record: existing, created: false };
+    const record: AuditAnchorRecord = {
+      id: input.id,
+      fingerprint: input.fingerprint,
+      payload: input.payload,
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: input.createdAt,
+      leaseUntil: null,
+      lastError: null,
+      deliveredAt: null,
+      remoteReference: null,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt,
+    };
+    this.auditAnchors.set(record.id, record);
+    this.#recordAudit(input.audit);
+    return { record, created: true };
+  }
+
+  async claimAuditAnchor(input: {
+    now: Date;
+    leaseUntil: Date;
+  }): Promise<AuditAnchorRecord | null> {
+    const record = [...this.auditAnchors.values()]
+      .filter((anchor) => (
+        (['pending', 'retrying'].includes(anchor.status) && anchor.nextAttemptAt <= input.now)
+        || (anchor.status === 'delivering'
+          && anchor.leaseUntil !== null && anchor.leaseUntil <= input.now)
+      ))
+      .sort((left, right) => (
+        left.nextAttemptAt.getTime() - right.nextAttemptAt.getTime()
+        || left.createdAt.getTime() - right.createdAt.getTime()
+        || left.id.localeCompare(right.id)
+      ))[0];
+    if (!record) return null;
+    const claimed: AuditAnchorRecord = {
+      ...record,
+      status: 'delivering',
+      attempts: record.attempts + 1,
+      leaseUntil: input.leaseUntil,
+      updatedAt: input.now,
+    };
+    this.auditAnchors.set(claimed.id, claimed);
+    return claimed;
+  }
+
+  async finishAuditAnchor(input: {
+    id: string;
+    expectedLeaseUntil: Date;
+    status: Extract<AuditAnchorStatus, 'delivered' | 'retrying' | 'failed'>;
+    nextAttemptAt: Date;
+    lastError: string | null;
+    deliveredAt: Date | null;
+    remoteReference: string | null;
+    updatedAt: Date;
+    audit: AuditEventInput | null;
+  }): Promise<AuditAnchorRecord | null> {
+    const record = this.auditAnchors.get(input.id);
+    if (!record || record.status !== 'delivering'
+      || record.leaseUntil?.getTime() !== input.expectedLeaseUntil.getTime()) return null;
+    const { audit, expectedLeaseUntil: _expectedLeaseUntil, ...anchorInput } = input;
+    void _expectedLeaseUntil;
+    const finished: AuditAnchorRecord = { ...record, ...anchorInput, leaseUntil: null };
+    this.auditAnchors.set(finished.id, finished);
+    if (audit) this.#recordAudit(audit);
+    return finished;
+  }
+
+  async getAuditAnchor(id: string): Promise<AuditAnchorRecord | null> {
+    return this.auditAnchors.get(id) ?? null;
+  }
+
+  async getLatestAuditAnchor(): Promise<AuditAnchorRecord | null> {
+    return [...this.auditAnchors.values()].sort((left, right) => (
+      right.createdAt.getTime() - left.createdAt.getTime()
+      || right.id.localeCompare(left.id)
+    ))[0] ?? null;
+  }
+
+  async retryAuditAnchor(input: {
+    id: string;
+    retriedAt: Date;
+    audit: AuditEventInput;
+  }): Promise<AuditAnchorRecord | null> {
+    const record = this.auditAnchors.get(input.id);
+    if (!record || record.status !== 'failed') return null;
+    const retried: AuditAnchorRecord = {
+      ...record,
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: input.retriedAt,
+      leaseUntil: null,
+      lastError: null,
+      deliveredAt: null,
+      remoteReference: null,
+      updatedAt: input.retriedAt,
+    };
+    this.auditAnchors.set(retried.id, retried);
+    this.#recordAudit(input.audit);
+    return retried;
+  }
+
+  async listAuditAnchors(limit: number): Promise<AuditAnchorRecord[]> {
+    return [...this.auditAnchors.values()]
+      .sort((left, right) => (
+        right.createdAt.getTime() - left.createdAt.getTime()
+        || right.id.localeCompare(left.id)
+      ))
+      .slice(0, limit);
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

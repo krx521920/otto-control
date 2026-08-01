@@ -22,6 +22,12 @@ describe('control configuration', () => {
       alertWebhookTimeoutMs: 10_000,
       alertWebhookMaxAttempts: 8,
       alertRetentionDays: 365,
+      auditAnchorUrl: null,
+      auditAnchorTokenFile: null,
+      auditAnchorIntervalMs: 900_000,
+      auditAnchorPollIntervalMs: 60_000,
+      auditAnchorTimeoutMs: 10_000,
+      auditAnchorMaxAttempts: 8,
     });
   });
 
@@ -63,6 +69,15 @@ describe('control configuration', () => {
     );
     expect(() => loadControlConfig({ CONTROL_ALERT_RETENTION_DAYS: '29' })).toThrow(
       'CONTROL_ALERT_RETENTION_DAYS must be between 30 and 3650',
+    );
+    expect(() => loadControlConfig({ CONTROL_AUDIT_ANCHOR_URL: 'http://audit.test' })).toThrow(
+      'CONTROL_AUDIT_ANCHOR_URL must use HTTPS',
+    );
+    expect(() => loadControlConfig({
+      CONTROL_AUDIT_ANCHOR_URL: 'https://audit.example.test/anchors',
+    })).toThrow('CONTROL_AUDIT_ANCHOR_TOKEN_FILE is required');
+    expect(() => loadControlConfig({ CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS: '21' })).toThrow(
+      'CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS must be between 1 and 20',
     );
   });
 

@@ -21,6 +21,7 @@ import { ReleaseArtifactService } from '../src/modules/release-artifacts/service
 import { BackupStatusService } from '../src/modules/backup-status/service.js';
 import { AlertDeliveryService } from '../src/modules/alert-delivery/service.js';
 import { AuditService } from '../src/modules/audit/service.js';
+import { AuditAnchorService } from '../src/modules/audit-anchor/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
 const ADMIN_TOKEN = 'test-admin-token-that-is-at-least-32-bytes';
@@ -50,6 +51,12 @@ const config: Readonly<ControlConfig> = {
   alertWebhookTimeoutMs: 10_000,
   alertWebhookMaxAttempts: 8,
   alertRetentionDays: 365,
+  auditAnchorUrl: null,
+  auditAnchorTokenFile: null,
+  auditAnchorIntervalMs: 900_000,
+  auditAnchorPollIntervalMs: 60_000,
+  auditAnchorTimeoutMs: 10_000,
+  auditAnchorMaxAttempts: 8,
 };
 
 describe('commercial control HTTP routes', () => {
@@ -132,6 +139,11 @@ describe('commercial control HTTP routes', () => {
       webhookUrl: null,
       webhookSecretFile: null,
     });
+    const audit = new AuditService({
+      store,
+      signer: keyring,
+      issuer: config.publicBaseUrl!,
+    });
     app = await buildControlApp({
       config,
       logger: false,
@@ -141,7 +153,8 @@ describe('commercial control HTTP routes', () => {
         releaseArtifacts,
         backupStatus,
         alerts,
-        audit: new AuditService({ store, signer: keyring }),
+        audit,
+        auditAnchors: new AuditAnchorService({ store, audit }),
         service,
         billing: new BillingService({ store, tokenIssuer }),
         updatePolicy: new UpdatePolicyService({
@@ -248,6 +261,7 @@ describe('commercial control HTTP routes', () => {
       'admin_mfa',
       'dual_control_approval',
       'tamper_evident_audit',
+      'external_audit_anchoring',
       'credit_billing',
       'billing_statement_export',
     ]);
@@ -299,6 +313,31 @@ describe('commercial control HTTP routes', () => {
     });
     expect(auditExport.statusCode).toBe(200);
     expect(auditExport.headers['content-type']).toContain('text/csv');
+
+    const auditAnchors = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/audit/anchors',
+      headers: { authorization: `Bearer ${auditorSessionToken}` },
+    });
+    expect(auditAnchors.statusCode).toBe(200);
+    expect(auditAnchors.json()).toEqual({
+      enabled: false,
+      destinationOrigin: null,
+      anchors: [],
+    });
+    const rejectedAnchorPoll = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/audit/anchors/poll',
+      headers: { authorization: `Bearer ${auditorSessionToken}` },
+    });
+    expect(rejectedAnchorPoll.statusCode).toBe(403);
+    const anchorPoll = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/audit/anchors/poll',
+      headers: { authorization: `Bearer ${securitySessionToken}` },
+    });
+    expect(anchorPoll.statusCode).toBe(200);
+    expect(anchorPoll.json()).toMatchObject({ enabled: false, processed: 0 });
 
     const operatorPage = await app.inject({ method: 'GET', url: '/admin' });
     expect(operatorPage.statusCode).toBe(200);

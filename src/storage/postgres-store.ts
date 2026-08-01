@@ -75,6 +75,11 @@ import type {
   AuditEventQuery,
   AuditEventRecord,
 } from '../contracts/audit.js';
+import type {
+  AuditAnchorPayload,
+  AuditAnchorRecord,
+  AuditAnchorStatus,
+} from '../contracts/audit-anchor.js';
 import { runMigrations } from './migrations.js';
 
 const { Pool } = pg;
@@ -368,6 +373,21 @@ interface AuditChainStateRow {
   updated_at: Date;
 }
 
+interface AuditAnchorRow {
+  id: string;
+  fingerprint: string;
+  payload: AuditAnchorPayload;
+  status: AuditAnchorStatus;
+  attempts: number;
+  next_attempt_at: Date;
+  lease_until: Date | null;
+  last_error: string | null;
+  delivered_at: Date | null;
+  remote_reference: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 interface CommercialInventoryCountRow {
   customer_total: string;
   customer_active: string;
@@ -626,6 +646,23 @@ function auditEventFromRow(row: AuditEventRow): AuditEventRecord {
     previousHash: row.previous_hash,
     eventHash: row.event_hash,
     createdAt: row.created_at,
+  };
+}
+
+function auditAnchorFromRow(row: AuditAnchorRow): AuditAnchorRecord {
+  return {
+    id: row.id,
+    fingerprint: row.fingerprint,
+    payload: row.payload,
+    status: row.status,
+    attempts: row.attempts,
+    nextAttemptAt: row.next_attempt_at,
+    leaseUntil: row.lease_until,
+    lastError: row.last_error,
+    deliveredAt: row.delivered_at,
+    remoteReference: row.remote_reference,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -3477,6 +3514,159 @@ export class PostgresControlStore implements ControlStore {
       'SELECT COUNT(*) AS count FROM control_audit_events WHERE chain_sequence IS NULL',
     );
     return Number(result.rows[0]?.count ?? 0);
+  }
+
+  async enqueueAuditAnchor(input: {
+    id: string;
+    fingerprint: string;
+    payload: AuditAnchorPayload;
+    createdAt: Date;
+    audit: AuditEventInput;
+  }): Promise<{ record: AuditAnchorRecord; created: boolean }> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const inserted = await client.query<AuditAnchorRow>(
+        `INSERT INTO control_audit_anchors
+          (id, fingerprint, payload, status, attempts, next_attempt_at, created_at, updated_at)
+         VALUES ($1, $2, $3::jsonb, 'pending', 0, $4, $4, $4)
+         ON CONFLICT (fingerprint) DO NOTHING
+         RETURNING *`,
+        [input.id, input.fingerprint, JSON.stringify(input.payload), input.createdAt],
+      );
+      if (inserted.rows[0]) {
+        await appendChainedAuditEvent(client, input.audit);
+        await client.query('COMMIT');
+        return { record: auditAnchorFromRow(inserted.rows[0]), created: true };
+      }
+      const existing = await client.query<AuditAnchorRow>(
+        'SELECT * FROM control_audit_anchors WHERE fingerprint = $1',
+        [input.fingerprint],
+      );
+      if (!existing.rows[0]) throw new Error('audit anchor conflict could not be resolved');
+      await client.query('COMMIT');
+      return { record: auditAnchorFromRow(existing.rows[0]), created: false };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async claimAuditAnchor(input: { now: Date; leaseUntil: Date }): Promise<AuditAnchorRecord | null> {
+    const result = await this.#pool.query<AuditAnchorRow>(
+      `WITH candidate AS (
+         SELECT id FROM control_audit_anchors
+         WHERE ((status IN ('pending', 'retrying') AND next_attempt_at <= $1)
+           OR (status = 'delivering' AND lease_until <= $1))
+         ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+         FOR UPDATE SKIP LOCKED
+         LIMIT 1
+       )
+       UPDATE control_audit_anchors AS anchor
+       SET status = 'delivering', attempts = anchor.attempts + 1,
+           lease_until = $2, updated_at = $1
+       FROM candidate
+       WHERE anchor.id = candidate.id
+       RETURNING anchor.*`,
+      [input.now, input.leaseUntil],
+    );
+    return result.rows[0] ? auditAnchorFromRow(result.rows[0]) : null;
+  }
+
+  async finishAuditAnchor(input: {
+    id: string;
+    expectedLeaseUntil: Date;
+    status: Extract<AuditAnchorStatus, 'delivered' | 'retrying' | 'failed'>;
+    nextAttemptAt: Date;
+    lastError: string | null;
+    deliveredAt: Date | null;
+    remoteReference: string | null;
+    updatedAt: Date;
+    audit: AuditEventInput | null;
+  }): Promise<AuditAnchorRecord | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<AuditAnchorRow>(
+        `UPDATE control_audit_anchors
+         SET status = $2, next_attempt_at = $3, lease_until = NULL, last_error = $4,
+             delivered_at = $5, remote_reference = $6, updated_at = $7
+         WHERE id = $1 AND status = 'delivering' AND lease_until = $8
+         RETURNING *`,
+        [
+          input.id,
+          input.status,
+          input.nextAttemptAt,
+          input.lastError,
+          input.deliveredAt,
+          input.remoteReference,
+          input.updatedAt,
+          input.expectedLeaseUntil,
+        ],
+      );
+      if (result.rows[0] && input.audit) await appendChainedAuditEvent(client, input.audit);
+      await client.query('COMMIT');
+      return result.rows[0] ? auditAnchorFromRow(result.rows[0]) : null;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getAuditAnchor(id: string): Promise<AuditAnchorRecord | null> {
+    const result = await this.#pool.query<AuditAnchorRow>(
+      'SELECT * FROM control_audit_anchors WHERE id = $1',
+      [id],
+    );
+    return result.rows[0] ? auditAnchorFromRow(result.rows[0]) : null;
+  }
+
+  async getLatestAuditAnchor(): Promise<AuditAnchorRecord | null> {
+    const result = await this.#pool.query<AuditAnchorRow>(
+      'SELECT * FROM control_audit_anchors ORDER BY created_at DESC, id DESC LIMIT 1',
+    );
+    return result.rows[0] ? auditAnchorFromRow(result.rows[0]) : null;
+  }
+
+  async retryAuditAnchor(input: {
+    id: string;
+    retriedAt: Date;
+    audit: AuditEventInput;
+  }): Promise<AuditAnchorRecord | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<AuditAnchorRow>(
+        `UPDATE control_audit_anchors
+         SET status = 'pending', attempts = 0, next_attempt_at = $2,
+             lease_until = NULL, last_error = NULL, delivered_at = NULL,
+             remote_reference = NULL, updated_at = $2
+         WHERE id = $1 AND status = 'failed'
+         RETURNING *`,
+        [input.id, input.retriedAt],
+      );
+      if (result.rows[0]) await appendChainedAuditEvent(client, input.audit);
+      await client.query('COMMIT');
+      return result.rows[0] ? auditAnchorFromRow(result.rows[0]) : null;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listAuditAnchors(limit: number): Promise<AuditAnchorRecord[]> {
+    const result = await this.#pool.query<AuditAnchorRow>(
+      `SELECT * FROM control_audit_anchors
+       ORDER BY created_at DESC, id DESC LIMIT $1`,
+      [limit],
+    );
+    return result.rows.map(auditAnchorFromRow);
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

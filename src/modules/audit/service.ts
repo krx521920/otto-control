@@ -89,11 +89,18 @@ function csvCell(value: unknown): string {
 export class AuditService {
   readonly #store: ControlStore;
   readonly #signer: PayloadSigner;
+  readonly #issuer: string;
   readonly #now: () => number;
 
-  constructor(options: { store: ControlStore; signer: PayloadSigner; now?: () => number }) {
+  constructor(options: {
+    store: ControlStore;
+    signer: PayloadSigner;
+    issuer?: string;
+    now?: () => number;
+  }) {
     this.#store = options.store;
     this.#signer = options.signer;
+    this.#issuer = options.issuer ?? 'otto-control';
     this.#now = options.now ?? Date.now;
   }
 
@@ -172,6 +179,7 @@ export class AuditService {
     }
     const receipt: AuditIntegrityReceipt = {
       version: 1,
+      issuer: this.#issuer,
       generatedAt: new Date(this.#now()).toISOString(),
       valid: brokenAtSequence === null,
       checkedEvents,

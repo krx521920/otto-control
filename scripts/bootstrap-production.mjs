@@ -34,6 +34,7 @@ function main() {
     resolve(secretDirectory, 'postgres_password'),
     resolve(secretDirectory, 'backup_encryption_key'),
     resolve(secretDirectory, 'alert_webhook_secret'),
+    resolve(secretDirectory, 'audit_anchor_token'),
   ];
   const existing = targets.find(existsSync);
   if (existing) throw new Error(`refusing to overwrite existing production identity file: ${existing}`);
@@ -63,6 +64,7 @@ function main() {
   writeSecret(resolve(secretDirectory, 'postgres_password'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'backup_encryption_key'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'alert_webhook_secret'), randomBytes(48).toString('base64url'));
+  writeSecret(resolve(secretDirectory, 'audit_anchor_token'), randomBytes(48).toString('base64url'));
 
   const environment = [
     'NODE_ENV=production',
@@ -93,6 +95,12 @@ function main() {
     'CONTROL_ALERT_WEBHOOK_TIMEOUT_MS=10000',
     'CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS=8',
     'CONTROL_ALERT_RETENTION_DAYS=365',
+    'CONTROL_AUDIT_ANCHOR_URL=',
+    'CONTROL_AUDIT_ANCHOR_TOKEN_FILE=/run/secrets/audit_anchor_token',
+    'CONTROL_AUDIT_ANCHOR_INTERVAL_MS=900000',
+    'CONTROL_AUDIT_ANCHOR_POLL_INTERVAL_MS=60000',
+    'CONTROL_AUDIT_ANCHOR_TIMEOUT_MS=10000',
+    'CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS=8',
     'CONTROL_BACKUP_OFFSITE_REQUIRED=false',
     'CONTROL_BACKUP_S3_ENDPOINT=',
     'CONTROL_BACKUP_S3_BUCKET=',

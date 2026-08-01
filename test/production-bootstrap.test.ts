@@ -32,6 +32,10 @@ describe('production bootstrap', () => {
         join(output, 'secrets', 'alert_webhook_secret'),
         'utf8',
       ).trim();
+      const auditAnchorToken = readFileSync(
+        join(output, 'secrets', 'audit_anchor_token'),
+        'utf8',
+      ).trim();
       const signer = readFileSync(
         join(output, 'secrets', 'control_signer_private_key.pem'),
         'utf8',
@@ -54,12 +58,17 @@ describe('production bootstrap', () => {
       expect(environment).toContain(
         'CONTROL_ALERT_WEBHOOK_SECRET_FILE=/run/secrets/alert_webhook_secret',
       );
+      expect(environment).toContain('CONTROL_AUDIT_ANCHOR_URL=');
+      expect(environment).toContain(
+        'CONTROL_AUDIT_ANCHOR_TOKEN_FILE=/run/secrets/audit_anchor_token',
+      );
       expect(environment).toContain('CONTROL_BACKUP_S3_ADDRESSING_STYLE=path');
       expect(environment).not.toMatch(/CONTROL_BACKUP_S3_SECRET_ACCESS_KEY=[^\n]+/u);
       expect(environment).not.toContain(adminToken);
       expect(environment).not.toContain(databasePassword);
       expect(environment).not.toContain(backupKey);
       expect(environment).not.toContain(alertWebhookSecret);
+      expect(environment).not.toContain(auditAnchorToken);
       expect(signer).toContain('BEGIN PRIVATE KEY');
       expect(keyring).toEqual({
         version: 1,
