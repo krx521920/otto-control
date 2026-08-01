@@ -205,6 +205,24 @@ headers, SQL parameter values, or metrics requests. Common secret-bearing query
 parameters are redacted, and PostgreSQL trace-context injection is disabled to
 avoid doubling query round trips.
 
+Existing production deployments must create the new metrics credential before
+starting this version. Do not rerun the bootstrap command because it correctly
+refuses to overwrite the deployment's signing identity. From the deployment
+root, create only the missing secret and add its file reference:
+
+```bash
+test ! -e secrets/control_metrics_token
+umask 077
+openssl rand -base64 48 > secrets/control_metrics_token
+printf '%s\n' 'CONTROL_METRICS_TOKEN_FILE=/run/secrets/control_metrics_token' \
+  >> .env.production
+docker compose -f compose.production.yaml --env-file .env.production config --quiet
+```
+
+Back up the new credential with the rest of `secrets/`. The application fails
+closed in production when it is missing or shorter than 32 bytes; this prevents
+an upgrade from silently exposing operational metrics without authentication.
+
 ### Backup and restore
 
 Patroni enables continuous WAL archiving through pgBackRest. The repository is
