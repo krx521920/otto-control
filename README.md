@@ -12,7 +12,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - TypeScript and Node.js 22
 - Fastify 5 with a 1 MB default body limit
 - GitHub CI for locked dependency installation, lint, type checking, tests,
-  production compilation, whitespace validation, and production container builds
+  production compilation, whitespace validation, real PostgreSQL 17 integration,
+  and production container builds
 - Versioned `/v1` API surface
 - Liveness and readiness endpoints
 - Generated request IDs and a stable JSON error envelope
@@ -104,9 +105,23 @@ npm run check
 
 The same gates run automatically for every pull request targeting `main` and
 every push to `main`. The container job starts only after source quality gates
-pass, so a green workflow proves both the TypeScript application and the
-production Dockerfile build from the committed lockfile. GitHub Actions use
-read-only repository permissions and are pinned to immutable commits.
+and PostgreSQL integration pass, so a green workflow proves the TypeScript
+application, real migrations and transactions, and the production Dockerfile
+build from the committed lockfile. GitHub Actions use read-only repository
+permissions and are pinned to immutable commits.
+
+Run the destructive PostgreSQL integration suite only against a disposable
+database whose name ends in `_test`:
+
+```bash
+CONTROL_TEST_DATABASE_URL=postgresql://user:password@localhost/otto_control_test \
+  CONTROL_REQUIRE_POSTGRES_TEST=true npm run test:postgres
+```
+
+The suite resets the public schema. It validates concurrent migration startup,
+License and audit persistence across process reconnects, and billing idempotency
+under concurrent requests. Normal `npm test` skips this suite when no explicit
+test database URL is present.
 
 ## Production Compose deployment
 

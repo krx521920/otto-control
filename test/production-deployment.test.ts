@@ -15,8 +15,12 @@ describe('production deployment assets', () => {
     expect(workflow).toContain('cancel-in-progress: true');
     expect(workflow).toContain('npm ci');
     expect(workflow).toContain('npm run check');
+    expect(workflow).toContain('image: postgres:17-alpine');
+    expect(workflow).toContain('POSTGRES_DB: otto_control_test');
+    expect(workflow).toContain('CONTROL_REQUIRE_POSTGRES_TEST: "true"');
+    expect(workflow).toContain('npm run test:postgres');
     expect(workflow).toContain('git diff --check');
-    expect(workflow).toContain('needs: quality');
+    expect(workflow).toContain('needs: [quality, postgres-integration]');
     expect(workflow).toContain('docker build --tag otto-control:ci .');
     expect(workflow).toContain(
       'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8',

@@ -42,9 +42,49 @@ jobs:
       - name: Reject whitespace errors
         run: git diff --check
 
+  postgres-integration:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: otto_control
+          POSTGRES_PASSWORD: otto-control-ci-password
+          POSTGRES_DB: otto_control_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U otto_control -d otto_control_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CI: "true"
+      CONTROL_REQUIRE_POSTGRES_TEST: "true"
+      CONTROL_TEST_DATABASE_URL: postgresql://otto_control:otto-control-ci-password@127.0.0.1:5432/otto_control_test
+    steps:
+      - name: Check out source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Exercise migrations and commercial transactions on PostgreSQL
+        run: npm run test:postgres
+
   container:
     name: Build production container
-    needs: quality
+    needs: [quality, postgres-integration]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

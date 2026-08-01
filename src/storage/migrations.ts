@@ -731,13 +731,13 @@ const MIGRATIONS: Migration[] = [
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {
-  await client.query(`CREATE TABLE IF NOT EXISTS control_schema_migrations (
-    id TEXT PRIMARY KEY,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-  )`);
-
   await client.query("SELECT pg_advisory_lock(hashtext('otto_control_migrations'))");
   try {
+    await client.query(`CREATE TABLE IF NOT EXISTS control_schema_migrations (
+      id TEXT PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+
     for (const migration of MIGRATIONS) {
       const existing = await client.query<{ id: string }>(
         'SELECT id FROM control_schema_migrations WHERE id = $1',

@@ -18,6 +18,7 @@
     "start": "node dist/server.js",
     "restore:production": "sh deploy/restore-postgres.sh",
     "test": "vitest run",
+    "test:postgres": "vitest run test/postgres-integration.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },

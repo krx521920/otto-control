@@ -23,10 +23,15 @@ describe('PostgreSQL migrations', () => {
     await runMigrations({ query } as unknown as PoolClient);
 
     const lock = statements.findIndex((statement) => statement.includes('pg_advisory_lock'));
+    const ledger = statements.findIndex((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_schema_migrations')
+    ));
     const begin = statements.indexOf('BEGIN');
     const commit = statements.indexOf('COMMIT');
     const unlock = statements.findIndex((statement) => statement.includes('pg_advisory_unlock'));
     expect(lock).toBeGreaterThanOrEqual(0);
+    expect(ledger).toBeGreaterThan(lock);
+    expect(begin).toBeGreaterThan(ledger);
     expect(begin).toBeGreaterThan(lock);
     expect(commit).toBeGreaterThan(begin);
     expect(unlock).toBeGreaterThan(commit);
