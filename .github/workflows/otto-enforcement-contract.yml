@@ -38,55 +38,25 @@ concurrency:
 
 jobs:
   conformance:
-    name: Control and Otto fail-closed conformance
+    name: Control commercial contract conformance
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
+    env:
+      OTTO_ENFORCEMENT_V1_SHA256: af4217872dae276edae3101f211a8b7e685cc58356263ff025a938ced53d6ec5
     steps:
       - name: Check out Control
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          path: control
-
-      - name: Check out Otto internal
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          repository: Felix201209/otto
-          ref: internal
-          path: otto
 
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22.23.1
 
-      - name: Verify the machine-readable protocol is identical
-        run: cmp control/docs/otto-commercial-enforcement-v1.json otto/docs/otto-commercial-enforcement-v1.json
+      - name: Verify the versioned protocol fingerprint
+        run: echo "${OTTO_ENFORCEMENT_V1_SHA256}  docs/otto-commercial-enforcement-v1.json" | sha256sum --check --strict
 
       - name: Install Control dependencies
-        working-directory: control
         run: npm ci
 
       - name: Verify Control signing, billing, and idempotency
-        working-directory: control
         run: npm exec -- vitest run test/commercial-control.test.ts test/billing.test.ts
-
-      - name: Install Otto dependencies
-        working-directory: otto
-        run: npm ci
-
-      - name: Verify Otto execution enforcement and durable settlement
-        working-directory: otto
-        run: >-
-          npm exec -- vitest run
-          packages/server/src/modules/authorization/commercialRoutePolicy.test.ts
-          packages/server/src/modules/commercial_control/commercialBillingRoutePolicy.test.ts
-          packages/server/src/modules/commercial_control/billingAdmissionRepository.test.ts
-          packages/server/src/modules/commercial_control/deploymentRepository.test.ts
-          packages/server/src/modules/commercial_control/privateDeploymentSchema.test.ts
-          packages/server/src/modules/integration_adapters/integrationAdaptersComposition.test.ts
-
-      - name: Exercise the Otto HTTP admission boundary
-        working-directory: otto
-        run: >-
-          npm exec -- vitest run packages/server/src/enterprise/server.test.ts
-          -t "private deployment license enforcement|signed private deployment license|enforces Control credit admission"

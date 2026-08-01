@@ -38,3 +38,8 @@ attestation, or reconciliation against provider-side model and payment records.
 
 The machine-readable contract is
 [`otto-commercial-enforcement-v1.json`](./otto-commercial-enforcement-v1.json).
+Its v1 SHA-256 fingerprint is
+`af4217872dae276edae3101f211a8b7e685cc58356263ff025a938ced53d6ec5`.
+Control and Otto validate this same immutable fingerprint in their own private
+repository CI. This detects protocol drift without granting either repository's
+workflow token access to the other private repository.
