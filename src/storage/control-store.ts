@@ -397,6 +397,7 @@ export interface ControlStore {
   consumeLeaseNonce(input: {
     deploymentId: string;
     nonce: string;
+    nowMs: number;
     expiresAtMs: number;
   }): Promise<boolean>;
   ingestTelemetryBatch(input: {

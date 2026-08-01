@@ -2024,12 +2024,16 @@ export class PostgresControlStore implements ControlStore {
   async consumeLeaseNonce(input: {
     deploymentId: string;
     nonce: string;
+    nowMs: number;
     expiresAtMs: number;
   }): Promise<boolean> {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('DELETE FROM control_lease_nonces WHERE expires_at_ms < $1', [Date.now()]);
+      await client.query(
+        'DELETE FROM control_lease_nonces WHERE expires_at_ms < $1',
+        [input.nowMs],
+      );
       const result = await client.query(
         `INSERT INTO control_lease_nonces (deployment_id, nonce, expires_at_ms)
          VALUES ($1, $2, $3)

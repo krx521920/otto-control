@@ -947,6 +947,7 @@ export class CommercialControlService {
     const nonceAccepted = await this.#store.consumeLeaseNonce({
       deploymentId: license.deploymentId,
       nonce: body.nonce,
+      nowMs: issuedAtMs,
       expiresAtMs: issuedAtMs + 20 * 60 * 1000,
     });
     if (!nonceAccepted) throw conflict('lease request replay detected');

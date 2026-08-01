@@ -98,7 +98,7 @@ export class MemoryControlStore implements ControlStore {
   readonly licenseLifecycleEvents: LicenseLifecycleEventRecord[] = [];
   readonly licenseSeatUsage = new Map<string, LicenseSeatUsageRecord>();
   readonly signingKeys = new Map<string, SigningKeyRecord>();
-  readonly nonces = new Set<string>();
+  readonly nonces = new Map<string, number>();
   readonly audits: AuditEventInput[] = [];
   readonly auditRecords: AuditEventRecord[] = [];
   readonly telemetryEvents = new Map<string, StoredTelemetryEvent>();
@@ -789,11 +789,15 @@ export class MemoryControlStore implements ControlStore {
   async consumeLeaseNonce(input: {
     deploymentId: string;
     nonce: string;
+    nowMs: number;
     expiresAtMs: number;
   }): Promise<boolean> {
+    for (const [nonce, expiresAtMs] of this.nonces) {
+      if (expiresAtMs < input.nowMs) this.nonces.delete(nonce);
+    }
     const key = `${input.deploymentId}\0${input.nonce}`;
     if (this.nonces.has(key)) return false;
-    this.nonces.add(key);
+    this.nonces.set(key, input.expiresAtMs);
     return true;
   }
 
