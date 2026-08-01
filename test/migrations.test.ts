@@ -45,6 +45,7 @@ describe('PostgreSQL migrations', () => {
     expect(statements.some((statement) => (
       statement.includes('CREATE TABLE IF NOT EXISTS control_release_artifacts')
     ))).toBe(true);
+    expect(statements.some((statement) => statement.includes("VALUES ('backup.read')"))).toBe(true);
   });
 
   it('rolls back a failed migration and always releases the lock', async () => {

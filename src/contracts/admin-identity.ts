@@ -10,6 +10,7 @@ export const ADMIN_PERMISSIONS = [
   'signing_key.read',
   'signing_key.manage',
   'telemetry.read',
+  'backup.read',
   'update_distribution.manage',
   'update_release.create',
   'update_release.read',

@@ -528,6 +528,17 @@ const MIGRATIONS: Migration[] = [
        ON control_release_artifacts(signing_key_id, state)`,
     ],
   },
+  {
+    id: '010_backup_status_permission',
+    statements: [
+      `INSERT INTO control_admin_permissions (id) VALUES ('backup.read')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT role_id, 'backup.read'
+       FROM (VALUES ('super_admin'), ('security_admin'), ('auditor')) AS roles(role_id)
+       ON CONFLICT DO NOTHING`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

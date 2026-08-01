@@ -20,6 +20,8 @@ const baseConfig: Readonly<ControlConfig> = {
   leaseDurationMs: 600_000,
   telemetryRetentionDays: 90,
   updatePolicyDurationMs: 300_000,
+  backupReportDirectory: null,
+  backupStatusMaximumAgeHours: 48,
 };
 
 describe('commercial control runtime configuration', () => {

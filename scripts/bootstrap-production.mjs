@@ -1,5 +1,5 @@
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 function option(name) {
@@ -38,6 +38,9 @@ function main() {
   if (existing) throw new Error(`refusing to overwrite existing production identity file: ${existing}`);
   mkdirSync(secretDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(resolve(root, 'backups'), { recursive: true, mode: 0o700 });
+  const backupReportDirectory = resolve(root, 'backups', 'reports');
+  mkdirSync(backupReportDirectory, { recursive: true, mode: 0o755 });
+  chmodSync(backupReportDirectory, 0o755);
 
   const { privateKey } = generateKeyPairSync('ed25519');
   writeSecret(
@@ -80,6 +83,8 @@ function main() {
     'CONTROL_TELEMETRY_RETENTION_DAYS=90',
     'CONTROL_UPDATE_POLICY_DURATION_MS=300000',
     'CONTROL_BACKUP_RETENTION_DAYS=30',
+    'CONTROL_BACKUP_REPORT_DIR=/var/lib/otto-control/backup-reports',
+    'CONTROL_BACKUP_STATUS_MAX_AGE_HOURS=48',
     'CONTROL_BACKUP_OFFSITE_REQUIRED=false',
     'CONTROL_BACKUP_S3_ENDPOINT=',
     'CONTROL_BACKUP_S3_BUCKET=',

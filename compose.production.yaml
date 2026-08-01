@@ -43,6 +43,7 @@ services:
       - postgres_password
     volumes:
       - ./secrets:/run/otto-secrets:ro
+      - ./backups/reports:/var/lib/otto-control/backup-reports:ro
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m

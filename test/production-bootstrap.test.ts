@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -42,6 +42,10 @@ describe('production bootstrap', () => {
         'CONTROL_SIGNER_KEYRING_FILE=/run/otto-secrets/control_signer_keyring.json',
       );
       expect(environment).toContain('CONTROL_BACKUP_OFFSITE_REQUIRED=false');
+      expect(environment).toContain(
+        'CONTROL_BACKUP_REPORT_DIR=/var/lib/otto-control/backup-reports',
+      );
+      expect(environment).toContain('CONTROL_BACKUP_STATUS_MAX_AGE_HOURS=48');
       expect(environment).toContain('CONTROL_BACKUP_S3_ADDRESSING_STYLE=path');
       expect(environment).not.toMatch(/CONTROL_BACKUP_S3_SECRET_ACCESS_KEY=[^\n]+/u);
       expect(environment).not.toContain(adminToken);
@@ -52,6 +56,7 @@ describe('production bootstrap', () => {
         version: 1,
         keys: [{ provider: 'local', privateKeyFile: 'control_signer_private_key.pem' }],
       });
+      expect(existsSync(join(output, 'backups', 'reports'))).toBe(true);
 
       const repeated = spawnSync(process.execPath, [
         'scripts/bootstrap-production.mjs',

@@ -60,6 +60,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   checks, retention, restore-before-write validation, and a systemd schedule
 - S3/MinIO-compatible off-site replication of encrypted backups with SigV4,
   immutable writes, remote SHA-256 verification, and bounded retries
+- RBAC-protected backup inventory with fresh, stale, missing, optional-failure,
+  and required-failure states plus recovery alerts and bounded history parsing
 
 ## Development
 
@@ -155,6 +157,15 @@ backup job must fail visibly after all retry attempts instead of retaining only
 the valid local copy. AWS S3 generally uses `virtual` addressing; MinIO commonly
 uses `path` addressing.
 
+Every completed local verification writes an immutable history report and
+atomically refreshes `backups/reports/latest.json`. These status reports contain
+no credentials, local paths, database rows, or backup contents, and are mounted
+read-only into the non-root control container. Administrators with `backup.read`
+can inspect the latest result, bounded history, age, and recovery alerts through
+`GET /v1/admin/backups/status`. A missing, malformed, future-dated, or stale
+latest report fails visibly; optional off-site failures are degraded, while
+required off-site failures are failed.
+
 Restore requires the exact confirmation phrase:
 
 ```bash
@@ -193,7 +204,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.11.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.12.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -212,6 +223,8 @@ a misleading success report.
 | `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
 | `CONTROL_UPDATE_POLICY_DURATION_MS` | `300000` | Signed update decision lifetime, from one minute to one hour |
 | `CONTROL_BACKUP_RETENTION_DAYS` | `30` | Number of days encrypted local backups are retained |
+| `CONTROL_BACKUP_REPORT_DIR` | empty | Read-only directory containing backup inventory reports |
+| `CONTROL_BACKUP_STATUS_MAX_AGE_HOURS` | `48` | Maximum acceptable age of the latest completed backup report |
 | `CONTROL_BACKUP_OFFSITE_REQUIRED` | `false` | Fail the scheduled backup when remote replication cannot be verified |
 | `CONTROL_BACKUP_S3_ENDPOINT` | empty | HTTPS origin for AWS S3, MinIO, or another S3-compatible service |
 | `CONTROL_BACKUP_S3_BUCKET` | empty | Bucket receiving encrypted backup objects |
@@ -494,6 +507,7 @@ POST /v1/admin/signing-keys/:keyId/retire
 POST /v1/admin/signing-keys/:keyId/revoke
 GET  /v1/signing-keyring
 GET  /v1/admin/deployments/:deploymentId/health?hours=24
+GET  /v1/admin/backups/status?limit=20
 POST /v1/admin/update-distributions
 PUT  /v1/admin/deployments/:deploymentId/update-distribution
 POST /v1/admin/update-releases
@@ -522,11 +536,12 @@ Traefik
        -> telemetry_health (implemented foundation)
        -> update_policy (implemented foundation)
        -> release_artifacts (implemented foundation)
+       -> backup_status (implemented foundation)
        -> audit
 ```
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are an operator-facing administration UI, off-site backup inventory
-and recovery alerts, vendor-specific signer-broker deployment recipes, and
-eventually the separate federation gateway.
+next phases are an operator-facing administration UI, outbound alert delivery,
+vendor-specific signer-broker deployment recipes, and eventually the separate
+federation gateway.

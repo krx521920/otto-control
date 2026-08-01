@@ -20,6 +20,8 @@ export interface ControlConfig {
   leaseDurationMs: number;
   telemetryRetentionDays: number;
   updatePolicyDurationMs: number;
+  backupReportDirectory: string | null;
+  backupStatusMaximumAgeHours: number;
 }
 
 const LOG_LEVELS = new Set<ControlLogLevel>([
@@ -178,6 +180,18 @@ function parseUpdatePolicyDuration(value: string | undefined): number {
   return duration;
 }
 
+function parseBackupStatusMaximumAgeHours(value: string | undefined): number {
+  const normalized = value?.trim() || '48';
+  if (!/^\d+$/u.test(normalized)) {
+    throw new Error('CONTROL_BACKUP_STATUS_MAX_AGE_HOURS must be an integer');
+  }
+  const hours = Number(normalized);
+  if (hours < 1 || hours > 720) {
+    throw new Error('CONTROL_BACKUP_STATUS_MAX_AGE_HOURS must be between 1 and 720');
+  }
+  return hours;
+}
+
 function parseLogLevel(value: string | undefined): ControlLogLevel {
   const normalized = (value?.trim() || 'info') as ControlLogLevel;
   if (!LOG_LEVELS.has(normalized)) throw new Error('CONTROL_LOG_LEVEL is invalid');
@@ -215,7 +229,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.11.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.12.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -229,5 +243,9 @@ export function loadControlConfig(
     leaseDurationMs: parseLeaseDuration(env.CONTROL_LEASE_DURATION_MS),
     telemetryRetentionDays: parseRetentionDays(env.CONTROL_TELEMETRY_RETENTION_DAYS),
     updatePolicyDurationMs: parseUpdatePolicyDuration(env.CONTROL_UPDATE_POLICY_DURATION_MS),
+    backupReportDirectory: env.CONTROL_BACKUP_REPORT_DIR?.trim() || null,
+    backupStatusMaximumAgeHours: parseBackupStatusMaximumAgeHours(
+      env.CONTROL_BACKUP_STATUS_MAX_AGE_HOURS,
+    ),
   });
 }

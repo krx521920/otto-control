@@ -160,10 +160,13 @@ TEMP_FILE=''
 node "$ROOT/scripts/replicate-backup-s3.mjs" \
   --env-file "$ENV_FILE" \
   --file "$FINAL_FILE" \
-  --checksum "$FINAL_FILE.sha256"
+  --checksum "$FINAL_FILE.sha256" \
+  --report-directory "$BACKUP_DIR/reports"
 
 find "$BACKUP_DIR" -type f \
   \( -name 'otto-control-*.dump.enc' -o -name 'otto-control-*.dump.enc.sha256' \) \
+  -mtime "+$RETENTION_DAYS" -delete
+find "$BACKUP_DIR/reports" -type f -name 'otto-control-*.dump.enc.*.json' \
   -mtime "+$RETENTION_DAYS" -delete
 
 printf 'Backup created: %s\n' "$FINAL_FILE"

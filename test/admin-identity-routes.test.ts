@@ -12,6 +12,7 @@ import { CommercialControlService } from '../src/modules/commercial-control/serv
 import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
 import { UpdatePolicyService } from '../src/modules/update-policy/service.js';
 import { ReleaseArtifactService } from '../src/modules/release-artifacts/service.js';
+import { BackupStatusService } from '../src/modules/backup-status/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
 const ADMIN_TOKEN = 'bootstrap-admin-token-that-is-at-least-32-bytes';
@@ -34,6 +35,8 @@ const config: Readonly<ControlConfig> = {
   leaseDurationMs: 600_000,
   telemetryRetentionDays: 90,
   updatePolicyDurationMs: 300_000,
+  backupReportDirectory: null,
+  backupStatusMaximumAgeHours: 48,
 };
 
 describe('administrator identity HTTP routes', () => {
@@ -63,6 +66,7 @@ describe('administrator identity HTTP routes', () => {
         adminToken: ADMIN_TOKEN,
         identity,
         releaseArtifacts,
+        backupStatus: new BackupStatusService({ reportDirectory: null }),
         service: new CommercialControlService({
           store,
           signer,

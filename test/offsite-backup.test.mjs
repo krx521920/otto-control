@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -7,9 +7,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   loadBackupConfig,
+  createBackupReport,
+  inspectBackup,
   objectUrl,
   replicateBackup,
   signS3Request,
+  writeBackupReport,
 } from '../scripts/replicate-backup-s3.mjs';
 
 function secret(path, value) {
@@ -158,6 +161,64 @@ describe('off-site encrypted backup replication', () => {
         transfer: async () => { throw new Error('must not upload'); },
         wait: async () => {},
       })).rejects.toThrow('checksum does not match');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('writes an atomic credential-free backup inventory report', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'otto-control-backup-report-'));
+    try {
+      const filePath = join(directory, 'otto-control-20260801T120000Z.dump.enc');
+      const checksumPath = `${filePath}.sha256`;
+      const reportDirectory = join(directory, 'reports');
+      writeFileSync(filePath, 'encrypted backup bytes');
+      const digest = createHash('sha256').update(readFileSync(filePath)).digest('hex');
+      writeFileSync(checksumPath, `${digest}  otto-control-20260801T120000Z.dump.enc\n`);
+      const backup = await inspectBackup(filePath, checksumPath);
+      const config = { enabled: false, required: false };
+      const result = await replicateBackup({ config, filePath, checksumPath, backup });
+      const report = createBackupReport(
+        config,
+        backup,
+        result,
+        null,
+        '2026-08-01T12:05:00.000Z',
+      );
+
+      writeBackupReport(reportDirectory, report);
+      const latest = readFileSync(join(reportDirectory, 'latest.json'), 'utf8');
+      expect(JSON.parse(latest)).toMatchObject({
+        backup: { name: 'otto-control-20260801T120000Z.dump.enc', sha256: digest },
+        offsite: { status: 'disabled', required: false, target: null },
+      });
+      expect(readdirSync(reportDirectory).sort()).toEqual([
+        'latest.json',
+        'otto-control-20260801T120000Z.dump.enc.20260801T120500Z.json',
+      ]);
+      expect(latest).not.toContain(directory);
+      expect(latest).not.toMatch(/access.?key|secret.?key|credential/iu);
+
+      const failedReport = createBackupReport({
+        enabled: true,
+        required: true,
+        endpoint: new URL('https://objects.example.test'),
+        bucket: 'otto-backups',
+        prefix: 'control/primary',
+        addressingStyle: 'path',
+        maxAttempts: 4,
+      }, backup, null, new Error(
+        `credential=very-sensitive-value C:\\private\\backup <Code>Denied</Code>`,
+      ), '2026-08-01T12:10:00.000Z');
+      writeBackupReport(reportDirectory, failedReport);
+      const updated = readFileSync(join(reportDirectory, 'latest.json'), 'utf8');
+      expect(JSON.parse(updated)).toMatchObject({
+        offsite: { status: 'failed', required: true, attempts: 4 },
+      });
+      expect(updated).not.toContain('very-sensitive-value');
+      expect(updated).not.toContain('C:\\private');
+      expect(updated).not.toContain('<Code>');
+      expect(readdirSync(reportDirectory)).toHaveLength(3);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

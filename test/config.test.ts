@@ -13,6 +13,8 @@ describe('control configuration', () => {
       host: '127.0.0.1',
       port: 7788,
       trustProxy: false,
+      backupReportDirectory: null,
+      backupStatusMaximumAgeHours: 48,
     });
   });
 
@@ -31,6 +33,12 @@ describe('control configuration', () => {
     );
     expect(() => loadControlConfig({ CONTROL_UPDATE_POLICY_DURATION_MS: '1000' })).toThrow(
       'CONTROL_UPDATE_POLICY_DURATION_MS must be between 60000 and 3600000',
+    );
+    expect(() => loadControlConfig({ CONTROL_BACKUP_STATUS_MAX_AGE_HOURS: '0' })).toThrow(
+      'CONTROL_BACKUP_STATUS_MAX_AGE_HOURS must be between 1 and 720',
+    );
+    expect(() => loadControlConfig({ CONTROL_BACKUP_STATUS_MAX_AGE_HOURS: '721' })).toThrow(
+      'CONTROL_BACKUP_STATUS_MAX_AGE_HOURS must be between 1 and 720',
     );
   });
 

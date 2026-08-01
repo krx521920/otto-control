@@ -18,6 +18,7 @@ import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issu
 import { BillingService } from '../src/modules/billing/service.js';
 import { UpdatePolicyService } from '../src/modules/update-policy/service.js';
 import { ReleaseArtifactService } from '../src/modules/release-artifacts/service.js';
+import { BackupStatusService } from '../src/modules/backup-status/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
 const ADMIN_TOKEN = 'test-admin-token-that-is-at-least-32-bytes';
@@ -38,6 +39,8 @@ const config: Readonly<ControlConfig> = {
   leaseDurationMs: 600_000,
   telemetryRetentionDays: 90,
   updatePolicyDurationMs: 300_000,
+  backupReportDirectory: null,
+  backupStatusMaximumAgeHours: 48,
 };
 
 describe('commercial control HTTP routes', () => {
@@ -108,6 +111,7 @@ describe('commercial control HTTP routes', () => {
         adminToken: ADMIN_TOKEN,
         identity,
         releaseArtifacts,
+        backupStatus: new BackupStatusService({ reportDirectory: null }),
         service,
         billing: new BillingService({ store, tokenIssuer }),
         updatePolicy: new UpdatePolicyService({
@@ -206,6 +210,7 @@ describe('commercial control HTTP routes', () => {
       'telemetry_health',
       'update_policy',
       'signed_release_artifacts',
+      'backup_inventory',
       'admin_identity',
       'admin_rbac',
       'admin_mfa',
@@ -213,6 +218,14 @@ describe('commercial control HTTP routes', () => {
       'credit_billing',
       'billing_statement_export',
     ]);
+
+    const backupStatus = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/backups/status',
+      headers: { authorization: `Bearer ${securitySessionToken}` },
+    });
+    expect(backupStatus.statusCode).toBe(200);
+    expect(backupStatus.json()).toMatchObject({ status: 'not_configured' });
 
     const signingKey = await app.inject({
       method: 'GET',

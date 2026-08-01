@@ -1,5 +1,15 @@
 import { createHash, createHmac } from 'node:crypto';
-import { createReadStream, readFileSync, statSync } from 'node:fs';
+import {
+  chmodSync,
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { request as httpsRequest } from 'node:https';
 import { basename, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -265,6 +275,26 @@ async function sha256File(path) {
   return hash.digest('hex');
 }
 
+export async function inspectBackup(filePath, checksumPath) {
+  const expectedLine = readFileSync(checksumPath, 'utf8').trim();
+  const match = /^([a-f0-9]{64})\s+\*?(.+)$/u.exec(expectedLine);
+  if (!match || basename(match[2]) !== basename(filePath)) {
+    throw new Error('local backup checksum file is invalid');
+  }
+  const metadata = statSync(filePath);
+  if (!metadata.isFile() || metadata.size < 1) throw new Error('local encrypted backup is invalid');
+  const backupSha256 = await sha256File(filePath);
+  if (backupSha256 !== match[1]) throw new Error('local encrypted backup checksum does not match');
+  return {
+    name: basename(filePath),
+    sha256: backupSha256,
+    sizeBytes: metadata.size,
+    createdAt: metadata.mtime.toISOString(),
+    checksumSha256: await sha256File(checksumPath),
+    checksumSizeBytes: statSync(checksumPath).size,
+  };
+}
+
 async function transferObject(config, object) {
   const url = objectUrl(config, object.key);
   const uploadHeaders = {
@@ -308,38 +338,37 @@ export async function replicateBackup({
   config,
   filePath,
   checksumPath,
+  backup,
   transfer = transferObject,
   wait = sleep,
 }) {
-  if (!config.enabled) return { status: 'disabled', objects: [] };
-  const expectedLine = readFileSync(checksumPath, 'utf8').trim();
-  const match = /^([a-f0-9]{64})\s+\*?(.+)$/u.exec(expectedLine);
-  if (!match || basename(match[2]) !== basename(filePath)) {
-    throw new Error('local backup checksum file is invalid');
-  }
-  const backupSha256 = await sha256File(filePath);
-  if (backupSha256 !== match[1]) throw new Error('local encrypted backup checksum does not match');
-  const checksumSha256 = await sha256File(checksumPath);
+  const inspected = backup ?? await inspectBackup(filePath, checksumPath);
+  if (!config.enabled) return { status: 'disabled', objects: [], backup: inspected };
   const files = [
     {
       path: filePath,
       key: `${config.prefix}/${basename(filePath)}`,
-      sha256: backupSha256,
-      sizeBytes: statSync(filePath).size,
+      sha256: inspected.sha256,
+      sizeBytes: inspected.sizeBytes,
       contentType: 'application/octet-stream',
     },
     {
       path: checksumPath,
       key: `${config.prefix}/${basename(checksumPath)}`,
-      sha256: checksumSha256,
-      sizeBytes: statSync(checksumPath).size,
+      sha256: inspected.checksumSha256,
+      sizeBytes: inspected.checksumSizeBytes,
       contentType: 'text/plain; charset=utf-8',
     },
   ];
   for (let attempt = 1; attempt <= config.maxAttempts; attempt += 1) {
     try {
       for (const file of files) await transfer(config, file);
-      return { status: 'replicated', objects: files.map((file) => file.key), attempt };
+      return {
+        status: 'replicated',
+        objects: files.map((file) => file.key),
+        attempt,
+        backup: inspected,
+      };
     } catch (error) {
       const retryable = !(error && typeof error === 'object' && error.retryable === false);
       if (!retryable || attempt === config.maxAttempts) throw error;
@@ -349,22 +378,109 @@ export async function replicateBackup({
   throw new Error('off-site backup replication exhausted its retry budget');
 }
 
+function safeError(error) {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/(authorization|secret|session[_ -]?token|credential)\s*[:=]\s*[^\s<]+/giu, '$1=[REDACTED]')
+    .replace(/<[^>]+>/gu, ' ')
+    .replace(/\b[A-Za-z0-9+/_=-]{32,}\b/gu, '[REDACTED]')
+    .replace(/[A-Za-z]:\\[^\s]+|\/(?:[^\s/]+\/){2,}[^\s]*/gu, '[LOCAL_PATH]')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 1000);
+}
+
+function reportTarget(config) {
+  if (!config.enabled) return null;
+  return {
+    provider: 's3',
+    endpoint: config.endpoint.origin,
+    bucket: config.bucket,
+    prefix: config.prefix,
+    addressingStyle: config.addressingStyle,
+  };
+}
+
+export function createBackupReport(config, backup, result, error, recordedAt) {
+  const status = error ? 'failed' : result.status === 'replicated' ? 'verified' : 'disabled';
+  return {
+    version: 1,
+    backup: {
+      name: backup.name,
+      sha256: backup.sha256,
+      sizeBytes: backup.sizeBytes,
+      createdAt: backup.createdAt,
+      localVerifiedAt: recordedAt,
+    },
+    offsite: {
+      status,
+      required: config.required,
+      target: reportTarget(config),
+      objects: result?.objects ?? [],
+      attempts: result?.attempt ?? (error ? config.maxAttempts : 0),
+      verifiedAt: status === 'verified' ? recordedAt : null,
+      error: error ? safeError(error) : null,
+    },
+    recordedAt,
+  };
+}
+
+function writeAtomic(path, content) {
+  const temporaryPath = `${path}.${process.pid}.part`;
+  writeFileSync(temporaryPath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  try {
+    renameSync(temporaryPath, path);
+    chmodSync(path, 0o644);
+  } catch (error) {
+    if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+    throw error;
+  }
+}
+
+export function writeBackupReport(directory, report) {
+  if (!directory) return;
+  mkdirSync(directory, { recursive: true, mode: 0o755 });
+  chmodSync(directory, 0o755);
+  const content = `${JSON.stringify(report, null, 2)}\n`;
+  const historyTimestamp = new Date(report.recordedAt).toISOString()
+    .replace(/[-:]/gu, '')
+    .replace(/\.\d{3}Z$/u, 'Z');
+  const historyPath = resolve(directory, `${report.backup.name}.${historyTimestamp}.json`);
+  writeFileSync(historyPath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  chmodSync(historyPath, 0o644);
+  const latestPath = resolve(directory, 'latest.json');
+  const latestTemporary = `${latestPath}.${process.pid}.part`;
+  if (existsSync(latestTemporary)) unlinkSync(latestTemporary);
+  writeAtomic(latestPath, content);
+}
+
 async function main() {
   const envFile = resolve(option('--env-file') || '.env.production');
   const filePath = resolve(option('--file') || '');
   const checksumPath = resolve(option('--checksum') || '');
+  const reportDirectory = option('--report-directory')
+    ? resolve(option('--report-directory'))
+    : null;
   if (!option('--file') || !option('--checksum')) {
     throw new Error('usage: replicate-backup-s3.mjs --env-file FILE --file BACKUP --checksum SHA256');
   }
   const config = loadBackupConfig({ envFile });
+  const backup = await inspectBackup(filePath, checksumPath);
   try {
-    const result = await replicateBackup({ config, filePath, checksumPath });
+    const result = await replicateBackup({ config, filePath, checksumPath, backup });
+    writeBackupReport(
+      reportDirectory,
+      createBackupReport(config, backup, result, null, new Date().toISOString()),
+    );
     if (result.status === 'disabled') {
       process.stdout.write('Off-site backup replication is disabled.\n');
     } else {
       process.stdout.write(`Off-site backup verified: s3://${config.bucket}/${result.objects[0]}\n`);
     }
   } catch (error) {
+    writeBackupReport(
+      reportDirectory,
+      createBackupReport(config, backup, null, error, new Date().toISOString()),
+    );
     if (config.required) throw error;
     process.stderr.write(`Optional off-site backup failed: ${error instanceof Error ? error.message : String(error)}\n`);
   }

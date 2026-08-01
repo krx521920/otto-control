@@ -56,6 +56,7 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'customer.create', 'deployment.create', 'license.issue', 'license.read',
   'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
   'signing_key.read', 'signing_key.manage', 'telemetry.read',
+  'backup.read',
   'update_distribution.manage', 'update_release.create', 'update_release.read',
   'update_release.publish', 'identity.read', 'identity.manage', 'approval.request',
   'approval.read', 'approval.decide',
@@ -99,7 +100,7 @@ export class MemoryControlStore implements ControlStore {
     ['super_admin', role('super_admin', 'Super administrator', ALL_PERMISSIONS)],
     ['security_admin', role('security_admin', 'Security administrator', [
       'signing_key.read', 'signing_key.manage', 'identity.read', 'identity.manage',
-      'approval.request', 'approval.read', 'approval.decide',
+      'approval.request', 'approval.read', 'approval.decide', 'backup.read',
     ])],
     ['license_admin', role('license_admin', 'License administrator', [
       'customer.create', 'deployment.create', 'license.issue', 'license.read',
@@ -113,7 +114,7 @@ export class MemoryControlStore implements ControlStore {
     ])],
     ['auditor', role('auditor', 'Auditor', [
       'license.read', 'license.usage.read', 'signing_key.read', 'telemetry.read', 'update_release.read',
-      'identity.read', 'approval.read',
+      'identity.read', 'approval.read', 'backup.read',
       'billing.read',
     ])],
   ]);

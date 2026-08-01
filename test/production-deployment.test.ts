@@ -46,6 +46,7 @@ describe('production deployment assets', () => {
     expect(backup).toContain('mkfifo');
     expect(backup).toContain('sha256sum');
     expect(backup).toContain('replicate-backup-s3.mjs');
+    expect(backup).toContain('--report-directory');
     expect(backup).toContain('CONTROL_BACKUP_RETENTION_DAYS');
     expect(restore).toContain('--confirm=RESTORE_OTTO_CONTROL');
     expect(restore.indexOf('backup-postgres.sh')).toBeLessThan(restore.indexOf('compose stop control'));
@@ -55,6 +56,9 @@ describe('production deployment assets', () => {
     expect(timer).toContain('Persistent=true');
     const backupService = repositoryFile('deploy/systemd/otto-control-backup.service');
     expect(backupService).toContain('network-online.target');
+    expect(repositoryFile('compose.production.yaml')).toContain(
+      './backups/reports:/var/lib/otto-control/backup-reports:ro',
+    );
   });
 
   it('restores the latest backup into an isolated disposable database for weekly drills', () => {

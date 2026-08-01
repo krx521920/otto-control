@@ -12,6 +12,7 @@ import { registerPlatformRoutes } from './routes/platform.js';
 import { registerUpdatePolicyRoutes } from './routes/update-policy.js';
 import { registerBillingRoutes } from './routes/billing.js';
 import { registerReleaseArtifactRoutes } from './routes/release-artifacts.js';
+import { registerBackupStatusRoutes } from './routes/backup-status.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
@@ -124,6 +125,7 @@ export async function buildControlApp(
       'telemetry_health',
       'update_policy',
       'signed_release_artifacts',
+      'backup_inventory',
     );
     capabilities.push('admin_identity', 'admin_rbac', 'admin_mfa', 'dual_control_approval');
     await registerAdminIdentityRoutes(app, {
@@ -137,6 +139,10 @@ export async function buildControlApp(
     });
     await registerReleaseArtifactRoutes(app, {
       service: commercialControl.releaseArtifacts,
+      identity: commercialControl.identity,
+    });
+    await registerBackupStatusRoutes(app, {
+      service: commercialControl.backupStatus,
       identity: commercialControl.identity,
     });
     if (commercialControl.billing) {
