@@ -77,9 +77,11 @@ if [ -z "$NEW_PRIMARY" ] || [ "$NEW_PRIMARY" = "$OLD_PRIMARY" ]; then
   exit 1
 fi
 
-# A rolled-back write proves HAProxy selected a writable primary without
-# leaving drill data in the production schema.
-compose exec -T postgres-tools psql --set=ON_ERROR_STOP=1 <<'SQL'
+probe_write() {
+  # A rolled-back write proves HAProxy selected a writable primary without
+  # leaving drill data in the production schema. Retrying is safe because the
+  # temporary table and transaction never persist.
+  compose exec -T postgres-tools psql --set=ON_ERROR_STOP=1 <<'SQL'
 BEGIN;
 CREATE TEMP TABLE otto_control_failover_probe (value integer NOT NULL);
 INSERT INTO otto_control_failover_probe (value) VALUES (1);
@@ -92,6 +94,19 @@ END
 $$;
 ROLLBACK;
 SQL
+}
+
+# Patroni can expose the new primary just before HAProxy completes its next
+# active health check. Count that routing convergence in the measured RTO.
+ATTEMPT=0
+until probe_write; do
+  ATTEMPT=$((ATTEMPT + 1))
+  if [ "$ATTEMPT" -ge 30 ]; then
+    printf '%s\n' 'HAProxy did not route a successful write within 30 seconds of promotion' >&2
+    exit 1
+  fi
+  sleep 1
+done
 
 RTO_SECONDS=$(($(date '+%s') - STARTED_SECONDS))
 compose start "$OLD_PRIMARY"

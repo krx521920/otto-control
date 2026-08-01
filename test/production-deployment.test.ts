@@ -210,6 +210,10 @@ describe('production deployment assets', () => {
     expect(failover).toContain('--confirm=FAILOVER_OTTO_CONTROL');
     expect(failover).toContain('compose kill -s SIGKILL "$OLD_PRIMARY"');
     expect(failover).toContain('CREATE TEMP TABLE otto_control_failover_probe');
+    expect(failover).toContain('until probe_write; do');
+    expect(failover).toContain(
+      'HAProxy did not route a successful write within 30 seconds of promotion',
+    );
     expect(failover).toContain('former_primary_rejoined=true');
     expect(postgresStore).toContain("pool.on('error'");
     expect(repositoryFile('deploy/systemd/otto-control-pitr-full.timer')).toContain(
