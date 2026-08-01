@@ -108,6 +108,27 @@ export interface LicenseRecord {
   updatedAt: Date;
 }
 
+export interface CommercialInventoryCounts {
+  customers: { total: number; active: number; suspended: number };
+  deployments: { total: number; active: number; suspended: number };
+  licenses: {
+    total: number;
+    active: number;
+    expiringSoon: number;
+    grace: number;
+    expired: number;
+    revoked: number;
+  };
+}
+
+export interface CommercialInventorySnapshot {
+  generatedAt: Date;
+  counts: CommercialInventoryCounts;
+  recentCustomers: CustomerRecord[];
+  recentDeployments: DeploymentRecord[];
+  recentLicenses: LicenseRecord[];
+}
+
 export type CreateLicenseRecordInput = Omit<LicenseRecord, 'createdAt' | 'updatedAt'>;
 
 export type LicenseLifecycleChangeType =
@@ -238,6 +259,11 @@ export interface ControlStore {
   ping(): Promise<void>;
   close(): Promise<void>;
   createCustomer(input: { id: string; name: string }): Promise<CustomerRecord>;
+  getCommercialInventory(input: {
+    nowMs: number;
+    expiringWithinMs: number;
+    recentLimit: number;
+  }): Promise<CommercialInventorySnapshot>;
   createDeployment(input: {
     id: string;
     customerId: string;

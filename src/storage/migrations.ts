@@ -578,6 +578,17 @@ const MIGRATIONS: Migration[] = [
          ('security_admin', 'alert.read'), ('security_admin', 'alert.manage'),
          ('auditor', 'alert.read')
        ) AS assignments(role_id, permission_id)
+      ON CONFLICT DO NOTHING`,
+    ],
+  },
+  {
+    id: '012_operator_console_permission',
+    statements: [
+      `INSERT INTO control_admin_permissions (id) VALUES ('commercial.read')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT role_id, 'commercial.read'
+       FROM (VALUES ('super_admin'), ('license_admin'), ('auditor')) AS roles(role_id)
        ON CONFLICT DO NOTHING`,
     ],
   },

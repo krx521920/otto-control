@@ -14,6 +14,13 @@ export async function registerCommercialControlRoutes(
   options: CommercialControlRouteOptions,
 ): Promise<void> {
   app.register(async (admin) => {
+    admin.get<{ Querystring: { limit?: string } }>('/overview', async (request) => {
+      await authenticateAdmin(request, options, 'commercial.read');
+      return options.service.operatorOverview(
+        request.query.limit === undefined ? 12 : Number(request.query.limit),
+      );
+    });
+
     admin.post('/customers', async (request, reply) => {
       const auth = await authenticateAdmin(request, options, 'customer.create');
       const customer = await options.service.createCustomer(request.body, auth.actorId);

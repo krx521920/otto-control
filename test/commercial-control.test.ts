@@ -86,6 +86,49 @@ describe('commercial control service', () => {
     expect(JSON.stringify(stored)).not.toContain(envelope.license.telemetryToken!);
   });
 
+  it('builds a safe operator overview and classifies License lifecycle risk', async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const issue = (expiresInDays: number, gracePeriodDays = 7) => service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'enterprise',
+      expiresAt: new Date(now + expiresInDays * day).toISOString(),
+      seatLimit: 20,
+      gracePeriodDays,
+      modules: ['enterprise_tree', 'direct_messages'],
+    }, ADMIN);
+    await issue(90);
+    await issue(10);
+    await issue(1);
+    await issue(1, 0);
+    const revoked = await issue(90);
+    await service.revokeLicense(revoked.license.id, ADMIN);
+    now += 2 * day;
+
+    const overview = await service.operatorOverview(10);
+    expect(overview.counts).toEqual({
+      customers: { total: 1, active: 1, suspended: 0 },
+      deployments: { total: 1, active: 1, suspended: 0 },
+      licenses: {
+        total: 5,
+        active: 2,
+        expiringSoon: 1,
+        grace: 1,
+        expired: 1,
+        revoked: 1,
+      },
+    });
+    expect(new Set(overview.recent.licenses.map((license) => license.state))).toEqual(
+      new Set(['active', 'expiring', 'grace', 'expired', 'revoked']),
+    );
+    const serialized = JSON.stringify(overview);
+    expect(serialized).not.toContain(FINGERPRINT);
+    expect(serialized).not.toContain('signature');
+    expect(serialized).not.toContain('leaseToken');
+    await expect(service.operatorOverview(51)).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+    });
+  });
+
   it('issues a ten-minute signed lease and rejects replayed nonces', async () => {
     const license = await service.issueLicense({
       deploymentId: DEPLOYMENT_ID,

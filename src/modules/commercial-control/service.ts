@@ -17,6 +17,10 @@ import type {
   OttoTelemetryReceipt,
   TelemetryRequestAuthentication,
 } from '../../contracts/telemetry.js';
+import type {
+  OperatorLicenseState,
+  OperatorOverview,
+} from '../../contracts/operator-console.js';
 import {
   secureTextMatches,
   signTelemetryRequest,
@@ -49,6 +53,7 @@ const MAX_LICENSE_DURATION_MS = 5 * 366 * 24 * 60 * 60 * 1000;
 const DEFAULT_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
 const TELEMETRY_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const TELEMETRY_MAX_EVENT_BYTES = 64 * 1024;
+const OPERATOR_EXPIRY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const FORBIDDEN_TELEMETRY_KEYS = new Set([
   'message',
   'messages',
@@ -86,6 +91,14 @@ function requiredString(
 
 function prefixedId(prefix: string): string {
   return `${prefix}_${randomUUID().replace(/-/gu, '')}`;
+}
+
+function operatorLicenseState(record: LicenseRecord, nowMs: number): OperatorLicenseState {
+  if (record.revokedAtMs !== null) return 'revoked';
+  if (record.expiresAtMs + record.gracePeriodMs <= nowMs) return 'expired';
+  if (record.expiresAtMs <= nowMs) return 'grace';
+  if (record.expiresAtMs <= nowMs + OPERATOR_EXPIRY_WINDOW_MS) return 'expiring';
+  return 'active';
 }
 
 function bearerToken(authorization: string | undefined): string {
@@ -236,6 +249,52 @@ export class CommercialControlService {
 
   async close(): Promise<void> {
     await this.#store.close();
+  }
+
+  async operatorOverview(limit = 12): Promise<OperatorOverview> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+      throw invalidRequest('operator overview limit must be between 1 and 50');
+    }
+    const nowMs = this.#now();
+    const snapshot = await this.#store.getCommercialInventory({
+      nowMs,
+      expiringWithinMs: OPERATOR_EXPIRY_WINDOW_MS,
+      recentLimit: limit,
+    });
+    return {
+      generatedAt: snapshot.generatedAt.toISOString(),
+      counts: snapshot.counts,
+      recent: {
+        customers: snapshot.recentCustomers.map((record) => ({
+          id: record.id,
+          name: record.name,
+          status: record.status,
+          updatedAt: record.updatedAt.toISOString(),
+        })),
+        deployments: snapshot.recentDeployments.map((record) => ({
+          id: record.id,
+          name: record.name,
+          customerId: record.customerId,
+          customerName: record.customerName,
+          organizationId: record.organizationId,
+          status: record.status,
+          updatedAt: record.updatedAt.toISOString(),
+        })),
+        licenses: snapshot.recentLicenses.map((record) => ({
+          id: record.id,
+          deploymentId: record.deploymentId,
+          customerName: record.customerName,
+          organizationId: record.organizationId,
+          plan: record.plan,
+          seatLimit: record.seatLimit,
+          moduleCount: record.modules.length,
+          offline: record.offline,
+          state: operatorLicenseState(record, nowMs),
+          expiresAt: new Date(record.expiresAtMs).toISOString(),
+          updatedAt: record.updatedAt.toISOString(),
+        })),
+      },
+    };
   }
 
   async signingKey(): Promise<{

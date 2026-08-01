@@ -14,6 +14,7 @@ import { registerBillingRoutes } from './routes/billing.js';
 import { registerReleaseArtifactRoutes } from './routes/release-artifacts.js';
 import { registerBackupStatusRoutes } from './routes/backup-status.js';
 import { registerAlertDeliveryRoutes } from './routes/alert-delivery.js';
+import { registerOperatorConsoleRoutes } from './routes/operator-console.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
@@ -128,6 +129,7 @@ export async function buildControlApp(
       'signed_release_artifacts',
       'backup_inventory',
       'outbound_alert_delivery',
+      'operator_console',
     );
     capabilities.push('admin_identity', 'admin_rbac', 'admin_mfa', 'dual_control_approval');
     await registerAdminIdentityRoutes(app, {
@@ -151,6 +153,7 @@ export async function buildControlApp(
       service: commercialControl.alerts,
       identity: commercialControl.identity,
     });
+    await registerOperatorConsoleRoutes(app);
     if (commercialControl.billing) {
       capabilities.push('credit_billing', 'billing_statement_export');
       await registerBillingRoutes(app, {

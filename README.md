@@ -64,6 +64,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   and required-failure states plus recovery alerts and bounded history parsing
 - PostgreSQL-backed outbound alert outbox with HMAC-signed HTTPS webhooks,
   fingerprint deduplication, leased workers, bounded retries, and delivery audit
+- Same-origin operator console with MFA login, RBAC-filtered commercial inventory,
+  backup readiness, alert history, manual retry, strict CSP, and tab-scoped sessions
 
 ## Development
 
@@ -233,7 +235,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.13.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.14.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -393,6 +395,23 @@ update_release.activate
 update_release.rollback
 ```
 
+### Operator console
+
+Open `https://control.example.com/admin` after the first administrator has been
+enrolled. The console uses the same password plus TOTP or one-time recovery-code
+login as the API. Its bearer session is kept in browser `sessionStorage`, never
+in persistent local storage, and is removed on logout, expiry, or tab closure.
+
+The first release is deliberately operational and read-focused: it summarizes
+customers, deployments, License lifecycle risk, backup readiness, and outbound
+alert delivery. Failed alerts can be returned to the durable retry queue. The
+overview excludes machine fingerprints, License signatures, bearer tokens,
+telemetry secrets, and customer content. `commercial.read` is granted to
+`super_admin`, `license_admin`, and `auditor`; backup and alert panels degrade
+independently when the signed-in role lacks their permissions. Every API call is
+still authorized server-side. The page ships no third-party scripts and uses a
+same-origin CSP with no inline script allowance.
+
 ### Signing key rotation
 
 1. Generate a new Ed25519 key outside the application and add its read-only path
@@ -516,6 +535,7 @@ POST /v1/admin-auth/enroll/confirm
 POST /v1/admin-auth/login
 POST /v1/admin-auth/logout
 GET  /v1/admin-auth/me
+GET  /v1/admin/overview?limit=12
 GET  /v1/admin/accounts
 POST /v1/admin/accounts
 PUT  /v1/admin/accounts/:accountId/roles
@@ -576,11 +596,12 @@ Traefik
        -> release_artifacts (implemented foundation)
        -> backup_status (implemented foundation)
        -> alert_delivery (implemented foundation)
+       -> operator_console (implemented read-only operations foundation)
        -> audit
 ```
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are an operator-facing administration UI, multi-channel alert
-routing, vendor-specific signer-broker deployment recipes, and eventually the
-separate federation gateway.
+next phases are controlled write workflows in the operator console,
+multi-channel alert routing, vendor-specific signer-broker deployment recipes,
+and eventually the separate federation gateway.

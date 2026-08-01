@@ -1,4 +1,5 @@
 export const ADMIN_PERMISSIONS = [
+  'commercial.read',
   'customer.create',
   'deployment.create',
   'license.issue',

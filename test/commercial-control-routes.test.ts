@@ -227,6 +227,7 @@ describe('commercial control HTTP routes', () => {
       'signed_release_artifacts',
       'backup_inventory',
       'outbound_alert_delivery',
+      'operator_console',
       'admin_identity',
       'admin_rbac',
       'admin_mfa',
@@ -258,6 +259,32 @@ describe('commercial control HTTP routes', () => {
     });
     expect(alertPoll.statusCode).toBe(200);
     expect(alertPoll.json()).toMatchObject({ enabled: false, processed: 0 });
+
+    const operatorPage = await app.inject({ method: 'GET', url: '/admin' });
+    expect(operatorPage.statusCode).toBe(200);
+    expect(operatorPage.headers['content-security-policy']).toContain("script-src 'self'");
+
+    const rejectedOverview = await app.inject({ method: 'GET', url: '/v1/admin/overview' });
+    expect(rejectedOverview.statusCode).toBe(401);
+    const securityOverview = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/overview',
+      headers: { authorization: `Bearer ${securitySessionToken}` },
+    });
+    expect(securityOverview.statusCode).toBe(403);
+    const overview = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/overview',
+      headers: { authorization: `Bearer ${adminSessionToken}` },
+    });
+    expect(overview.statusCode).toBe(200);
+    expect(overview.json()).toMatchObject({
+      counts: {
+        customers: { total: 0 },
+        deployments: { total: 0 },
+        licenses: { total: 0 },
+      },
+    });
 
     const alertRetry = await app.inject({
       method: 'POST',

@@ -1,5 +1,6 @@
 import type {
   AuditEventInput,
+  CommercialInventorySnapshot,
   ControlStore,
   CreateLicenseRecordInput,
   CreateReleaseArtifactRecordInput,
@@ -59,7 +60,7 @@ const role = (
 ): AdminRoleRecord => ({ id, name, permissions, system: true });
 
 const ALL_PERMISSIONS: AdminPermission[] = [
-  'customer.create', 'deployment.create', 'license.issue', 'license.read',
+  'commercial.read', 'customer.create', 'deployment.create', 'license.issue', 'license.read',
   'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
   'signing_key.read', 'signing_key.manage', 'telemetry.read',
   'backup.read',
@@ -112,7 +113,7 @@ export class MemoryControlStore implements ControlStore {
       'alert.read', 'alert.manage',
     ])],
     ['license_admin', role('license_admin', 'License administrator', [
-      'customer.create', 'deployment.create', 'license.issue', 'license.read',
+      'commercial.read', 'customer.create', 'deployment.create', 'license.issue', 'license.read',
       'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
       'telemetry.read', 'approval.request', 'approval.read',
       'billing.read', 'billing.topup', 'billing.manage', 'billing.refund',
@@ -122,7 +123,8 @@ export class MemoryControlStore implements ControlStore {
       'update_release.publish', 'approval.request', 'approval.read',
     ])],
     ['auditor', role('auditor', 'Auditor', [
-      'license.read', 'license.usage.read', 'signing_key.read', 'telemetry.read', 'update_release.read',
+      'commercial.read', 'license.read', 'license.usage.read', 'signing_key.read', 'telemetry.read',
+      'update_release.read',
       'identity.read', 'approval.read', 'backup.read',
       'alert.read',
       'billing.read',
@@ -143,6 +145,61 @@ export class MemoryControlStore implements ControlStore {
     };
     this.customers.set(customer.id, customer);
     return customer;
+  }
+
+  async getCommercialInventory(input: {
+    nowMs: number;
+    expiringWithinMs: number;
+    recentLimit: number;
+  }): Promise<CommercialInventorySnapshot> {
+    const customers = [...this.customers.values()];
+    const deployments = [...this.deployments.values()];
+    const licenses = [...this.licenses.values()];
+    const recent = <T extends { id: string; updatedAt: Date }>(records: T[]): T[] => records
+      .sort((left, right) => (
+        right.updatedAt.getTime() - left.updatedAt.getTime()
+        || right.id.localeCompare(left.id)
+      ))
+      .slice(0, input.recentLimit);
+    return {
+      generatedAt: new Date(input.nowMs),
+      counts: {
+        customers: {
+          total: customers.length,
+          active: customers.filter((record) => record.status === 'active').length,
+          suspended: customers.filter((record) => record.status === 'suspended').length,
+        },
+        deployments: {
+          total: deployments.length,
+          active: deployments.filter((record) => record.status === 'active').length,
+          suspended: deployments.filter((record) => record.status === 'suspended').length,
+        },
+        licenses: {
+          total: licenses.length,
+          active: licenses.filter((record) => (
+            record.revokedAtMs === null && record.expiresAtMs > input.nowMs
+          )).length,
+          expiringSoon: licenses.filter((record) => (
+            record.revokedAtMs === null
+            && record.expiresAtMs > input.nowMs
+            && record.expiresAtMs <= input.nowMs + input.expiringWithinMs
+          )).length,
+          grace: licenses.filter((record) => (
+            record.revokedAtMs === null
+            && record.expiresAtMs <= input.nowMs
+            && record.expiresAtMs + record.gracePeriodMs > input.nowMs
+          )).length,
+          expired: licenses.filter((record) => (
+            record.revokedAtMs === null
+            && record.expiresAtMs + record.gracePeriodMs <= input.nowMs
+          )).length,
+          revoked: licenses.filter((record) => record.revokedAtMs !== null).length,
+        },
+      },
+      recentCustomers: recent(customers),
+      recentDeployments: recent(deployments),
+      recentLicenses: recent(licenses),
+    };
   }
 
   async createDeployment(input: {

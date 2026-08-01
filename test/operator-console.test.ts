@@ -1,0 +1,40 @@
+import Fastify from 'fastify';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { registerOperatorConsoleRoutes } from '../src/routes/operator-console.js';
+
+describe('operator console assets', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeEach(async () => {
+    app = Fastify();
+    await registerOperatorConsoleRoutes(app);
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('serves a no-store console with a restrictive same-origin policy', async () => {
+    const response = await app.inject({ method: 'GET', url: '/admin' });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.headers['content-security-policy']).toContain("script-src 'self'");
+    expect(response.headers['content-security-policy']).toContain("connect-src 'self'");
+    expect(response.headers['content-security-policy']).not.toContain("'unsafe-inline'");
+    expect(response.body).toContain('商业运营控制台');
+    expect(response.body).toContain('/admin/assets/app.js');
+    expect(response.body).not.toContain('CONTROL_ADMIN_TOKEN');
+  });
+
+  it('keeps administrator sessions tab-scoped and renders data without innerHTML', async () => {
+    const response = await app.inject({ method: 'GET', url: '/admin/assets/app.js' });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toContain('text/javascript');
+    expect(response.body).toContain('sessionStorage');
+    expect(response.body).not.toContain('localStorage');
+    expect(response.body).not.toContain('innerHTML');
+    expect(response.body).toContain('/v1/admin-auth/login');
+    expect(response.body).toContain('/v1/admin/overview?limit=12');
+  });
+});

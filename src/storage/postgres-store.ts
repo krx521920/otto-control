@@ -22,6 +22,7 @@ import type {
 import { conflict } from '../errors.js';
 import type {
   AuditEventInput,
+  CommercialInventorySnapshot,
   ControlStore,
   CreateLicenseRecordInput,
   CreateReleaseArtifactRecordInput,
@@ -337,6 +338,21 @@ interface AlertDeliveryRow {
   delivered_at: Date | null;
   created_at: Date;
   updated_at: Date;
+}
+
+interface CommercialInventoryCountRow {
+  customer_total: string;
+  customer_active: string;
+  customer_suspended: string;
+  deployment_total: string;
+  deployment_active: string;
+  deployment_suspended: string;
+  license_total: string;
+  license_active: string;
+  license_expiring_soon: string;
+  license_grace: string;
+  license_expired: string;
+  license_revoked: string;
 }
 
 function postgresCode(error: unknown): string | null {
@@ -684,6 +700,95 @@ export class PostgresControlStore implements ControlStore {
     } catch (error) {
       if (postgresCode(error) === '23505') throw conflict('customer already exists');
       throw error;
+    }
+  }
+
+  async getCommercialInventory(input: {
+    nowMs: number;
+    expiringWithinMs: number;
+    recentLimit: number;
+  }): Promise<CommercialInventorySnapshot> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const countResult = await client.query<CommercialInventoryCountRow>(
+        `SELECT
+          (SELECT COUNT(*)::text FROM control_customers) AS customer_total,
+          (SELECT COUNT(*)::text FROM control_customers WHERE status = 'active')
+            AS customer_active,
+          (SELECT COUNT(*)::text FROM control_customers WHERE status = 'suspended')
+            AS customer_suspended,
+          (SELECT COUNT(*)::text FROM control_deployments) AS deployment_total,
+          (SELECT COUNT(*)::text FROM control_deployments WHERE status = 'active')
+            AS deployment_active,
+          (SELECT COUNT(*)::text FROM control_deployments WHERE status = 'suspended')
+            AS deployment_suspended,
+          (SELECT COUNT(*)::text FROM control_licenses) AS license_total,
+          (SELECT COUNT(*)::text FROM control_licenses
+           WHERE revoked_at_ms IS NULL AND expires_at_ms > $1::bigint) AS license_active,
+          (SELECT COUNT(*)::text FROM control_licenses
+           WHERE revoked_at_ms IS NULL AND expires_at_ms > $1::bigint
+             AND expires_at_ms <= ($1::bigint + $2::bigint)) AS license_expiring_soon,
+          (SELECT COUNT(*)::text FROM control_licenses
+           WHERE revoked_at_ms IS NULL AND expires_at_ms <= $1::bigint
+             AND expires_at_ms + grace_period_ms > $1::bigint) AS license_grace,
+          (SELECT COUNT(*)::text FROM control_licenses
+           WHERE revoked_at_ms IS NULL
+             AND expires_at_ms + grace_period_ms <= $1::bigint) AS license_expired,
+          (SELECT COUNT(*)::text FROM control_licenses WHERE revoked_at_ms IS NOT NULL)
+            AS license_revoked`,
+        [input.nowMs, input.expiringWithinMs],
+      );
+      const customers = await client.query<CustomerRow>(
+        `SELECT * FROM control_customers
+         ORDER BY updated_at DESC, id DESC LIMIT $1`,
+        [input.recentLimit],
+      );
+      const deployments = await client.query<DeploymentRow>(
+        `SELECT deployments.*, customers.name AS customer_name
+         FROM control_deployments deployments
+         JOIN control_customers customers ON customers.id = deployments.customer_id
+         ORDER BY deployments.updated_at DESC, deployments.id DESC LIMIT $1`,
+        [input.recentLimit],
+      );
+      const licenses = await client.query<LicenseRow>(
+        `SELECT * FROM control_licenses
+         ORDER BY updated_at DESC, id DESC LIMIT $1`,
+        [input.recentLimit],
+      );
+      await client.query('COMMIT');
+      const counts = countResult.rows[0]!;
+      return {
+        generatedAt: new Date(input.nowMs),
+        counts: {
+          customers: {
+            total: Number(counts.customer_total),
+            active: Number(counts.customer_active),
+            suspended: Number(counts.customer_suspended),
+          },
+          deployments: {
+            total: Number(counts.deployment_total),
+            active: Number(counts.deployment_active),
+            suspended: Number(counts.deployment_suspended),
+          },
+          licenses: {
+            total: Number(counts.license_total),
+            active: Number(counts.license_active),
+            expiringSoon: Number(counts.license_expiring_soon),
+            grace: Number(counts.license_grace),
+            expired: Number(counts.license_expired),
+            revoked: Number(counts.license_revoked),
+          },
+        },
+        recentCustomers: customers.rows.map(customerFromRow),
+        recentDeployments: deployments.rows.map(deploymentFromRow),
+        recentLicenses: licenses.rows.map(licenseFromRow),
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
   }
 
