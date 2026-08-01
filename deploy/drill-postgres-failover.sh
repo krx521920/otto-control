@@ -42,9 +42,63 @@ find_primary() {
   return 1
 }
 
+find_synchronous_standby() {
+  primary=$1
+  for candidate in postgres-1 postgres-2 postgres-3; do
+    if [ "$candidate" = "$primary" ]; then
+      continue
+    fi
+    if compose exec -T "$candidate" curl --fail --silent \
+      http://127.0.0.1:8008/synchronous >/dev/null 2>&1
+    then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+wait_for_stable_failover_candidate() {
+  primary=$1
+  attempt=0
+  stable_rounds=0
+  stable_candidate=''
+
+  while [ "$attempt" -lt 30 ]; do
+    candidate=$(find_synchronous_standby "$primary" || true)
+    if [ -n "$candidate" ] && [ "$candidate" = "$stable_candidate" ]; then
+      stable_rounds=$((stable_rounds + 1))
+    elif [ -n "$candidate" ]; then
+      stable_candidate=$candidate
+      stable_rounds=1
+    else
+      stable_candidate=''
+      stable_rounds=0
+    fi
+
+    # Multiple successful checks give Patroni time to persist the synchronous
+    # candidate in the DCS before the leader disappears. Without this gate a
+    # newly bootstrapped cluster can fail closed with no promotable standby.
+    if [ "$stable_rounds" -ge 3 ]; then
+      printf '%s\n' "$stable_candidate"
+      return 0
+    fi
+
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+
+  return 1
+}
+
 mkdir -p "$REPORT_DIR"
 OLD_PRIMARY=$(find_primary) || {
   printf '%s\n' 'cannot run failover drill without a healthy primary' >&2
+  exit 1
+}
+FAILOVER_CANDIDATE=$(wait_for_stable_failover_candidate "$OLD_PRIMARY") || {
+  printf '%s\n' \
+    'cannot run failover drill without a stable synchronous standby' >&2
   exit 1
 }
 OLD_PRIMARY_RESTARTED=false
@@ -129,6 +183,7 @@ REPORT_FILE="$REPORT_DIR/failover-drill-$(date -u '+%Y%m%dT%H%M%SZ').txt"
   printf 'result=passed\n'
   printf 'started_at=%s\n' "$STARTED_AT"
   printf 'old_primary=%s\n' "$OLD_PRIMARY"
+  printf 'prepared_candidate=%s\n' "$FAILOVER_CANDIDATE"
   printf 'new_primary=%s\n' "$NEW_PRIMARY"
   printf 'write_rto_seconds=%s\n' "$RTO_SECONDS"
   printf 'former_primary_rejoined=true\n'

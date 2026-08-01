@@ -213,6 +213,11 @@ describe('production deployment assets', () => {
     expect(pitr).toContain('backup_age_seconds');
     expect(pitr).toContain('control_schema_migrations');
     expect(failover).toContain('--confirm=FAILOVER_OTTO_CONTROL');
+    expect(failover).toContain('http://127.0.0.1:8008/synchronous');
+    expect(failover).toContain('stable_rounds');
+    expect(failover).toContain(
+      'cannot run failover drill without a stable synchronous standby',
+    );
     expect(failover).toContain('compose kill -s SIGKILL "$OLD_PRIMARY"');
     expect(failover).toContain('CREATE TEMP TABLE otto_control_failover_probe');
     expect(failover).toContain('until probe_write; do');
@@ -220,6 +225,7 @@ describe('production deployment assets', () => {
       'HAProxy did not route a successful write within 30 seconds of promotion',
     );
     expect(failover).toContain('former_primary_rejoined=true');
+    expect(failover).toContain('prepared_candidate=%s');
     expect(postgresStore).toContain("pool.on('error'");
     expect(repositoryFile('deploy/systemd/otto-control-pitr-full.timer')).toContain(
       'Persistent=true',
