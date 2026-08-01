@@ -19,10 +19,10 @@ describe('production deployment assets', () => {
     expect(workflow).toContain('needs: quality');
     expect(workflow).toContain('docker build --tag otto-control:ci .');
     expect(workflow).toContain(
-      'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683',
+      'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8',
     );
     expect(workflow).toContain(
-      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+      'actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444',
     );
     expect(workflow).not.toMatch(/permissions:\s*write-all/u);
   });
