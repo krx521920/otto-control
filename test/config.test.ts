@@ -59,7 +59,10 @@ describe('control configuration', () => {
     );
     expect(() => loadControlConfig({
       CONTROL_ALERT_WEBHOOK_URL: 'https://alerts.example.test/hooks/otto',
-    })).toThrow('CONTROL_ALERT_WEBHOOK_SECRET_FILE is required');
+    })).toThrow('CONTROL_ALERT_WEBHOOK_URL and CONTROL_ALERT_WEBHOOK_SECRET_FILE');
+    expect(() => loadControlConfig({
+      CONTROL_ALERT_WEBHOOK_SECRET_FILE: 'secret',
+    })).toThrow('CONTROL_ALERT_WEBHOOK_URL and CONTROL_ALERT_WEBHOOK_SECRET_FILE');
     expect(() => loadControlConfig({
       CONTROL_ALERT_CHANNELS_FILE: 'channels.json',
       CONTROL_ALERT_WEBHOOK_URL: 'https://alerts.example.test/hooks/otto',
@@ -76,7 +79,10 @@ describe('control configuration', () => {
     );
     expect(() => loadControlConfig({
       CONTROL_AUDIT_ANCHOR_URL: 'https://audit.example.test/anchors',
-    })).toThrow('CONTROL_AUDIT_ANCHOR_TOKEN_FILE is required');
+    })).toThrow('CONTROL_AUDIT_ANCHOR_URL and CONTROL_AUDIT_ANCHOR_TOKEN_FILE');
+    expect(() => loadControlConfig({
+      CONTROL_AUDIT_ANCHOR_TOKEN_FILE: 'token',
+    })).toThrow('CONTROL_AUDIT_ANCHOR_URL and CONTROL_AUDIT_ANCHOR_TOKEN_FILE');
     expect(() => loadControlConfig({ CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS: '21' })).toThrow(
       'CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS must be between 1 and 20',
     );

@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 077
 
 read_secret() {
   if [ ! -s "$1" ]; then
@@ -41,6 +42,7 @@ mkdir -p \
   /var/log/pgbackrest \
   /var/run/postgresql \
   /run/patroni
+chmod 0700 /var/lib/postgresql/data/pgdata
 chown -R postgres:postgres \
   /var/lib/postgresql/data \
   /var/lib/pgbackrest \

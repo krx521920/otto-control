@@ -97,6 +97,8 @@ describe('production deployment assets', () => {
     expect(entrypoint).toContain('failsafe_mode: true');
     expect(entrypoint).toContain('host replication replicator 0.0.0.0/0 scram-sha-256');
     expect(entrypoint).toContain('password_encryption: scram-sha-256');
+    expect(entrypoint).toContain('umask 077');
+    expect(entrypoint).toContain('chmod 0700 /var/lib/postgresql/data/pgdata');
     expect(entrypoint).toContain('archive_mode:');
     expect(entrypoint).toContain('archive-push %p');
     expect(entrypoint).toContain('archive-get %f %p');

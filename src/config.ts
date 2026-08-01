@@ -287,14 +287,18 @@ export function loadControlConfig(
   if (signerPrivateKeyFile && signerKeyringFile) {
     throw new Error('CONTROL_SIGNER_PRIVATE_KEY_FILE and CONTROL_SIGNER_KEYRING_FILE cannot both be set');
   }
-  if (alertWebhookUrl && !alertWebhookSecretFile) {
-    throw new Error('CONTROL_ALERT_WEBHOOK_SECRET_FILE is required with CONTROL_ALERT_WEBHOOK_URL');
+  if (Boolean(alertWebhookUrl) !== Boolean(alertWebhookSecretFile)) {
+    throw new Error(
+      'CONTROL_ALERT_WEBHOOK_URL and CONTROL_ALERT_WEBHOOK_SECRET_FILE must be configured together',
+    );
   }
   if (alertChannelsFile && (alertWebhookUrl || alertWebhookSecretFile)) {
     throw new Error('CONTROL_ALERT_CHANNELS_FILE cannot be combined with legacy alert webhook settings');
   }
-  if (auditAnchorUrl && !auditAnchorTokenFile) {
-    throw new Error('CONTROL_AUDIT_ANCHOR_TOKEN_FILE is required with CONTROL_AUDIT_ANCHOR_URL');
+  if (Boolean(auditAnchorUrl) !== Boolean(auditAnchorTokenFile)) {
+    throw new Error(
+      'CONTROL_AUDIT_ANCHOR_URL and CONTROL_AUDIT_ANCHOR_TOKEN_FILE must be configured together',
+    );
   }
   return Object.freeze({
     environment,

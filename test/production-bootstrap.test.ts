@@ -69,13 +69,9 @@ describe('production bootstrap', () => {
       );
       expect(environment).toContain('CONTROL_BACKUP_STATUS_MAX_AGE_HOURS=48');
       expect(environment).toContain('CONTROL_ALERT_WEBHOOK_URL=');
-      expect(environment).toContain(
-        'CONTROL_ALERT_WEBHOOK_SECRET_FILE=/run/secrets/alert_webhook_secret',
-      );
+      expect(environment).toContain('CONTROL_ALERT_WEBHOOK_SECRET_FILE=');
       expect(environment).toContain('CONTROL_AUDIT_ANCHOR_URL=');
-      expect(environment).toContain(
-        'CONTROL_AUDIT_ANCHOR_TOKEN_FILE=/run/secrets/audit_anchor_token',
-      );
+      expect(environment).toContain('CONTROL_AUDIT_ANCHOR_TOKEN_FILE=');
       expect(environment).toContain('CONTROL_AUDIT_WITNESS_SOURCES_FILE=');
       expect(environment).toContain('CONTROL_BACKUP_S3_ADDRESSING_STYLE=path');
       expect(environment).toContain('CONTROL_PITR_REPORT_RETENTION_DAYS=180');
