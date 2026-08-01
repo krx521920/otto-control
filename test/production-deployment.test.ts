@@ -87,6 +87,24 @@ describe('production deployment assets', () => {
     expect(caddy).toContain('health_uri /health/ready');
     expect(caddy).toContain('lb_policy least_conn');
     expect(caddy).toContain('fail_duration 30s');
+    expect(caddy).toContain('respond @internal_metrics 404');
+  });
+
+  it('ships an authenticated internal Prometheus profile with SLO and capacity rules', () => {
+    const compose = repositoryFile('compose.production.yaml');
+    const prometheus = repositoryFile('deploy/prometheus/prometheus.yml');
+    const rules = repositoryFile('deploy/prometheus/rules/otto-control-slo.yml');
+    expect(compose).toContain('prom/prometheus:v3.13.0-distroless');
+    expect(compose).toContain('profiles: [observability]');
+    expect(compose).toContain('"127.0.0.1:9090:9090"');
+    expect(compose).toContain('control_metrics_token');
+    expect(compose).toMatch(/monitoring:\n\s+internal: true/u);
+    expect(prometheus).toContain('credentials_file: /run/secrets/control_metrics_token');
+    expect(prometheus.match(/control-[abc]:7788/gu)).toHaveLength(3);
+    expect(rules).toContain('otto_control:slo_availability:ratio_5m');
+    expect(rules).toContain('OttoControlAvailabilityErrorBudgetBurnHigh');
+    expect(rules).toContain('OttoControlPostgresPoolSaturated');
+    expect(rules).toContain('otto_control:database_growth:bytes_24h');
   });
 
   it('enables synchronous Patroni failover and encrypted continuous WAL archiving', () => {

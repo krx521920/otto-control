@@ -14,6 +14,7 @@ import { AuditAnchorService } from './modules/audit-anchor/service.js';
 import { AuditWitnessService } from './modules/audit-witness/service.js';
 import { loadAuditWitnessSources } from './modules/audit-witness/source-config.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
+import type { DatabaseObservabilitySource } from './observability/contracts.js';
 
 export interface CommercialControlRuntime {
   adminToken: string;
@@ -27,6 +28,7 @@ export interface CommercialControlRuntime {
   audit?: AuditService;
   auditAnchors?: AuditAnchorService;
   auditWitness?: AuditWitnessService;
+  observability?: DatabaseObservabilitySource;
 }
 
 function missingConfiguration(config: Readonly<ControlConfig>): string[] {
@@ -120,6 +122,7 @@ export async function createCommercialControlRuntime(
         store,
         sources: loadAuditWitnessSources(config.auditWitnessSourcesFile),
       }),
+      observability: store,
       service: new CommercialControlService({
         store,
         signer,

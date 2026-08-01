@@ -29,6 +29,11 @@ describe('control configuration', () => {
       auditAnchorTimeoutMs: 10_000,
       auditAnchorMaxAttempts: 8,
       auditWitnessSourcesFile: null,
+      metricsToken: null,
+      slowRequestThresholdMs: 1_000,
+      capacitySampleIntervalMs: 60_000,
+      sloAvailabilityTarget: 0.999,
+      sloLatencyTargetMs: 500,
     });
   });
 
@@ -86,18 +91,32 @@ describe('control configuration', () => {
     expect(() => loadControlConfig({ CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS: '21' })).toThrow(
       'CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS must be between 1 and 20',
     );
+    expect(() => loadControlConfig({ CONTROL_SLOW_REQUEST_THRESHOLD_MS: '99' })).toThrow(
+      'CONTROL_SLOW_REQUEST_THRESHOLD_MS must be between 100 and 30000',
+    );
+    expect(() => loadControlConfig({ CONTROL_SLO_AVAILABILITY_TARGET: '0.5' })).toThrow(
+      'CONTROL_SLO_AVAILABILITY_TARGET must be between 0.9 and 0.99999',
+    );
   });
 
   it('requires an HTTPS public URL in production', () => {
     expect(() => loadControlConfig({
       NODE_ENV: 'production',
       CONTROL_PUBLIC_BASE_URL: 'http://control.example.test',
+      CONTROL_METRICS_TOKEN: 'm'.repeat(48),
     })).toThrow('CONTROL_PUBLIC_BASE_URL must use HTTPS in production');
 
     expect(loadControlConfig({
       NODE_ENV: 'production',
       CONTROL_PUBLIC_BASE_URL: 'https://control.example.test/',
+      CONTROL_METRICS_TOKEN: 'm'.repeat(48),
     }).publicBaseUrl).toBe('https://control.example.test');
+  });
+
+  it('fails closed without a metrics credential in production', () => {
+    expect(() => loadControlConfig({ NODE_ENV: 'production' })).toThrow(
+      'CONTROL_METRICS_TOKEN or CONTROL_METRICS_TOKEN_FILE is required in production',
+    );
   });
 
   it('loads production secrets and database credentials from mounted files', () => {
@@ -106,9 +125,11 @@ describe('control configuration', () => {
       const adminTokenFile = join(directory, 'admin-token');
       const tokenSecretFile = join(directory, 'token-secret');
       const databasePasswordFile = join(directory, 'database-password');
+      const metricsTokenFile = join(directory, 'metrics-token');
       writeFileSync(adminTokenFile, 'a'.repeat(48));
       writeFileSync(tokenSecretFile, 'b'.repeat(48));
       writeFileSync(databasePasswordFile, 'p'.repeat(48));
+      writeFileSync(metricsTokenFile, 'm'.repeat(48));
 
       const config = loadControlConfig({
         CONTROL_ADMIN_TOKEN_FILE: adminTokenFile,
@@ -118,10 +139,12 @@ describe('control configuration', () => {
         CONTROL_DATABASE_NAME: 'otto_control',
         CONTROL_DATABASE_USER: 'otto_control',
         CONTROL_DATABASE_PASSWORD_FILE: databasePasswordFile,
+        CONTROL_METRICS_TOKEN_FILE: metricsTokenFile,
       });
 
       expect(config.adminToken).toBe('a'.repeat(48));
       expect(config.tokenSecret).toBe('b'.repeat(48));
+      expect(config.metricsToken).toBe('m'.repeat(48));
       expect(config.databaseUrl).toBe(
         `postgresql://otto_control:${'p'.repeat(48)}@postgres:5433/otto_control`,
       );

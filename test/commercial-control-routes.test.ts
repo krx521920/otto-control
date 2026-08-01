@@ -60,6 +60,11 @@ const config: Readonly<ControlConfig> = {
   auditAnchorTimeoutMs: 10_000,
   auditAnchorMaxAttempts: 8,
   auditWitnessSourcesFile: null,
+  metricsToken: 'test-metrics-token-that-is-at-least-32-bytes',
+  slowRequestThresholdMs: 1_000,
+  capacitySampleIntervalMs: 60_000,
+  sloAvailabilityTarget: 0.999,
+  sloLatencyTargetMs: 500,
 };
 
 describe('commercial control HTTP routes', () => {
@@ -260,6 +265,8 @@ describe('commercial control HTTP routes', () => {
     const platform = await app.inject({ method: 'GET', url: '/v1' });
     expect(platform.json().capabilities).toEqual([
       'health',
+      'prometheus_metrics',
+      'service_level_objectives',
       'customer_deployment',
       'license_authority',
       'signing_key_rotation',

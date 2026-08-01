@@ -37,6 +37,11 @@ const testConfig: Readonly<ControlConfig> = {
   auditAnchorTimeoutMs: 10_000,
   auditAnchorMaxAttempts: 8,
   auditWitnessSourcesFile: null,
+  metricsToken: 'test-metrics-token-that-is-at-least-32-bytes',
+  slowRequestThresholdMs: 1_000,
+  capacitySampleIntervalMs: 60_000,
+  sloAvailabilityTarget: 0.999,
+  sloLatencyTargetMs: 500,
 };
 
 let app: FastifyInstance | undefined;
@@ -71,8 +76,28 @@ describe('otto-control Fastify foundation', () => {
       service: 'otto-control',
       version: '0.1.0-test',
       apiVersion: 'v1',
-      capabilities: ['health'],
+      capabilities: ['health', 'prometheus_metrics', 'service_level_objectives'],
     });
+  });
+
+  it('protects Prometheus metrics with a constant-time bearer token check', async () => {
+    app = await buildControlApp({ config: testConfig, logger: false });
+    const unauthorized = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(unauthorized.statusCode).toBe(401);
+    expect(unauthorized.headers['www-authenticate']).toContain('Bearer');
+
+    await app.inject({ method: 'GET', url: '/health/live' });
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+      headers: { authorization: `Bearer ${testConfig.metricsToken}` },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toContain('text/plain');
+    expect(response.body).toContain('otto_control_http_requests_total');
+    expect(response.body).toContain('otto_control_http_slo_events_total');
+    expect(response.body).toContain('workload="platform_health"');
+    expect(response.body).not.toContain(testConfig.metricsToken);
   });
 
   it('returns a stable error envelope without reflecting unknown routes', async () => {

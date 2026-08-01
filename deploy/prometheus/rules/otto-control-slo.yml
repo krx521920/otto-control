@@ -1,0 +1,75 @@
+groups:
+  - name: otto-control-recording
+    interval: 30s
+    rules:
+      - record: otto_control:slo_availability:ratio_5m
+        expr: |
+          1 - (
+            sum by (workload) (rate(otto_control_http_slo_events_total{objective="availability",result="bad"}[5m]))
+            /
+            clamp_min(sum by (workload) (rate(otto_control_http_slo_events_total{objective="availability"}[5m])), 0.000000001)
+          )
+      - record: otto_control:slo_latency_good:ratio_5m
+        expr: |
+          sum by (workload) (rate(otto_control_http_slo_events_total{objective="latency",result="good"}[5m]))
+          /
+          clamp_min(sum by (workload) (rate(otto_control_http_slo_events_total{objective="latency"}[5m])), 0.000000001)
+      - record: otto_control:http_latency:p95_seconds_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(otto_control_http_request_duration_seconds_bucket[5m]))
+          )
+      - record: otto_control:database_growth:bytes_24h
+        expr: delta(otto_control_database_size_bytes[24h])
+
+  - name: otto-control-alerts
+    rules:
+      - alert: OttoControlTargetMissing
+        expr: up{job="otto-control"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Otto Control instance is unavailable
+          description: "{{ $labels.instance }} has not exposed metrics for two minutes."
+      - alert: OttoControlAvailabilityErrorBudgetBurnHigh
+        expr: |
+          (
+            sum by (workload) (rate(otto_control_http_slo_events_total{objective="availability",result="bad"}[5m]))
+            /
+            clamp_min(sum by (workload) (rate(otto_control_http_slo_events_total{objective="availability"}[5m])), 0.000000001)
+          ) > 14.4 * (1 - scalar(max(otto_control_slo_availability_target_ratio)))
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Otto Control availability error budget is burning rapidly
+      - alert: OttoControlLatencySloAtRisk
+        expr: otto_control:slo_latency_good:ratio_5m < 0.95
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Fewer than 95 percent of requests meet the latency objective
+      - alert: OttoControlPostgresPoolSaturated
+        expr: otto_control_postgres_pool_utilization_ratio > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Otto Control PostgreSQL pool is above 80 percent utilization
+      - alert: OttoControlPostgresPoolQueueing
+        expr: otto_control_postgres_pool_waiting_requests > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Otto Control requests are waiting for PostgreSQL connections
+      - alert: OttoControlCapacitySampleStale
+        expr: time() - otto_control_capacity_sample_timestamp_seconds > 180
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Otto Control database capacity sampling is stale

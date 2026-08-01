@@ -36,6 +36,11 @@ export interface ControlConfig {
   auditAnchorTimeoutMs: number;
   auditAnchorMaxAttempts: number;
   auditWitnessSourcesFile: string | null;
+  metricsToken: string | null;
+  slowRequestThresholdMs: number;
+  capacitySampleIntervalMs: number;
+  sloAvailabilityTarget: number;
+  sloLatencyTargetMs: number;
 }
 
 const LOG_LEVELS = new Set<ControlLogLevel>([
@@ -258,6 +263,24 @@ function parseLogLevel(value: string | undefined): ControlLogLevel {
   return normalized;
 }
 
+function parseRatio(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  const normalized = value?.trim() || String(fallback);
+  if (!/^0(?:\.\d+)?$|^1(?:\.0+)?$/u.test(normalized)) {
+    throw new Error(`${name} must be a decimal ratio`);
+  }
+  const ratio = Number(normalized);
+  if (ratio < minimum || ratio > maximum) {
+    throw new Error(`${name} must be between ${minimum} and ${maximum}`);
+  }
+  return ratio;
+}
+
 function parsePublicBaseUrl(value: string | undefined, environment: ControlEnvironment): string | null {
   const normalized = value?.trim();
   if (!normalized) return null;
@@ -284,6 +307,11 @@ export function loadControlConfig(
   const alertChannelsFile = env.CONTROL_ALERT_CHANNELS_FILE?.trim() || null;
   const auditAnchorUrl = parseAuditAnchorUrl(env.CONTROL_AUDIT_ANCHOR_URL);
   const auditAnchorTokenFile = env.CONTROL_AUDIT_ANCHOR_TOKEN_FILE?.trim() || null;
+  const metricsToken = secretFromEnvironment(
+    env,
+    'CONTROL_METRICS_TOKEN',
+    'CONTROL_METRICS_TOKEN_FILE',
+  );
   if (signerPrivateKeyFile && signerKeyringFile) {
     throw new Error('CONTROL_SIGNER_PRIVATE_KEY_FILE and CONTROL_SIGNER_KEYRING_FILE cannot both be set');
   }
@@ -299,6 +327,9 @@ export function loadControlConfig(
     throw new Error(
       'CONTROL_AUDIT_ANCHOR_URL and CONTROL_AUDIT_ANCHOR_TOKEN_FILE must be configured together',
     );
+  }
+  if (environment === 'production' && !metricsToken) {
+    throw new Error('CONTROL_METRICS_TOKEN or CONTROL_METRICS_TOKEN_FILE is required in production');
   }
   return Object.freeze({
     environment,
@@ -387,5 +418,34 @@ export function loadControlConfig(
       'CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS',
     ),
     auditWitnessSourcesFile: env.CONTROL_AUDIT_WITNESS_SOURCES_FILE?.trim() || null,
+    metricsToken,
+    slowRequestThresholdMs: parseBoundedInteger(
+      env.CONTROL_SLOW_REQUEST_THRESHOLD_MS,
+      1_000,
+      100,
+      30_000,
+      'CONTROL_SLOW_REQUEST_THRESHOLD_MS',
+    ),
+    capacitySampleIntervalMs: parseBoundedInteger(
+      env.CONTROL_CAPACITY_SAMPLE_INTERVAL_MS,
+      60_000,
+      10_000,
+      3_600_000,
+      'CONTROL_CAPACITY_SAMPLE_INTERVAL_MS',
+    ),
+    sloAvailabilityTarget: parseRatio(
+      env.CONTROL_SLO_AVAILABILITY_TARGET,
+      0.999,
+      0.9,
+      0.99999,
+      'CONTROL_SLO_AVAILABILITY_TARGET',
+    ),
+    sloLatencyTargetMs: parseBoundedInteger(
+      env.CONTROL_SLO_LATENCY_TARGET_MS,
+      500,
+      50,
+      30_000,
+      'CONTROL_SLO_LATENCY_TARGET_MS',
+    ),
   });
 }

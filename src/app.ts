@@ -18,6 +18,8 @@ import { registerOperatorConsoleRoutes } from './routes/operator-console.js';
 import { registerAuditRoutes } from './routes/audit.js';
 import { registerAuditAnchorRoutes } from './routes/audit-anchor.js';
 import { registerAuditWitnessRoutes } from './routes/audit-witness.js';
+import { ControlMetrics } from './observability/metrics.js';
+import { traceLogContext } from './observability/tracing.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
@@ -41,8 +43,10 @@ export async function buildControlApp(
   options: BuildControlAppOptions = {},
 ): Promise<FastifyInstance> {
   const config = options.config ?? loadControlConfig();
+  const commercialControl = options.commercialControl ?? null;
   const logger = options.logger ?? {
     level: config.logLevel,
+    mixin: traceLogContext,
     redact: {
       paths: [
         'req.headers.authorization',
@@ -79,6 +83,9 @@ export async function buildControlApp(
     hook: 'onRequest',
     skipOnError: false,
   });
+
+  const metrics = new ControlMetrics(config, commercialControl?.observability);
+  await metrics.register(app);
 
   app.addHook('onRequest', async (request, reply) => {
     reply
@@ -119,8 +126,7 @@ export async function buildControlApp(
     });
   });
 
-  const commercialControl = options.commercialControl ?? null;
-  const capabilities = ['health'];
+  const capabilities = ['health', 'prometheus_metrics', 'service_level_objectives'];
   if (commercialControl) {
     capabilities.push(
       'customer_deployment',

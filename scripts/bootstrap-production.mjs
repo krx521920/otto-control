@@ -31,6 +31,7 @@ function main() {
     resolve(secretDirectory, 'control_signer_keyring.json'),
     resolve(secretDirectory, 'control_admin_token'),
     resolve(secretDirectory, 'control_token_secret'),
+    resolve(secretDirectory, 'control_metrics_token'),
     resolve(secretDirectory, 'postgres_password'),
     resolve(secretDirectory, 'postgres_superuser_password'),
     resolve(secretDirectory, 'postgres_replication_password'),
@@ -64,6 +65,7 @@ function main() {
   );
   writeSecret(resolve(secretDirectory, 'control_admin_token'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'control_token_secret'), randomBytes(48).toString('base64url'));
+  writeSecret(resolve(secretDirectory, 'control_metrics_token'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'postgres_password'), randomBytes(48).toString('base64url'));
   writeSecret(
     resolve(secretDirectory, 'postgres_superuser_password'),
@@ -97,6 +99,7 @@ function main() {
     'CONTROL_DATABASE_SSL=false',
     'CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token',
     'CONTROL_TOKEN_SECRET_FILE=/run/secrets/control_token_secret',
+    'CONTROL_METRICS_TOKEN_FILE=/run/secrets/control_metrics_token',
     'CONTROL_SIGNER_KEYRING_FILE=/run/otto-secrets/control_signer_keyring.json',
     'CONTROL_LEASE_DURATION_MS=600000',
     'CONTROL_TELEMETRY_RETENTION_DAYS=90',
@@ -117,6 +120,13 @@ function main() {
     'CONTROL_AUDIT_ANCHOR_TIMEOUT_MS=10000',
     'CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS=8',
     'CONTROL_AUDIT_WITNESS_SOURCES_FILE=',
+    'CONTROL_SLOW_REQUEST_THRESHOLD_MS=1000',
+    'CONTROL_CAPACITY_SAMPLE_INTERVAL_MS=60000',
+    'CONTROL_SLO_AVAILABILITY_TARGET=0.999',
+    'CONTROL_SLO_LATENCY_TARGET_MS=500',
+    'CONTROL_OTLP_TRACE_ENDPOINT=',
+    'CONTROL_OTLP_HEADERS_FILE=',
+    'CONTROL_TRACE_SAMPLE_RATIO=0.1',
     'CONTROL_BACKUP_OFFSITE_REQUIRED=false',
     'CONTROL_BACKUP_S3_ENDPOINT=',
     'CONTROL_BACKUP_S3_BUCKET=',
@@ -136,6 +146,8 @@ function main() {
     'POSTGRES_DB=otto_control',
     'POSTGRES_USER=otto_control',
     'ETCD_IMAGE=quay.io/coreos/etcd:v3.5.21',
+    'PROMETHEUS_IMAGE=prom/prometheus:v3.13.0-distroless',
+    'PROMETHEUS_RETENTION=30d',
     '',
   ].join('\n');
   writeFileSync(targets[0], environment, {

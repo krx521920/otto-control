@@ -82,6 +82,24 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
     await resetDatabase(DATABASE_URL!);
   });
 
+  it('reports bounded PostgreSQL pool state and database capacity', async () => {
+    await resetDatabase(DATABASE_URL!);
+    const store = await openStore();
+    await store.ping();
+
+    expect(store.poolSnapshot()).toMatchObject({
+      totalConnections: 1,
+      idleConnections: 1,
+      waitingRequests: 0,
+      errorsTotal: 0,
+      maximumConnections: 10,
+    });
+    const capacity = await store.sampleCapacity();
+    expect(capacity.sampledAtMs).toBeGreaterThan(0);
+    expect(capacity.databaseBytes).toBeGreaterThan(0);
+    expect(capacity.relations.control_deployments?.bytes).toBeGreaterThan(0);
+  });
+
   it('serializes concurrent startup and records every migration once', async () => {
     await resetDatabase(DATABASE_URL!);
     const [first, second] = await Promise.all([openStore(), openStore()]);

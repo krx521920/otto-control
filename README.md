@@ -19,6 +19,14 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Generated request IDs and a stable JSON error envelope
 - Security and no-cache response headers
 - Logger redaction for credentials and License/telemetry tokens
+- Bearer-protected Prometheus metrics for HTTP traffic, process health,
+  PostgreSQL pool pressure, slow requests, and bounded capacity trends
+- Availability and latency SLO event counters, recording rules, and actionable
+  Prometheus alerts for error-budget burn, queueing, saturation, and stale samples;
+  SLOs are separated into lease, telemetry, billing, update, administration,
+  platform-health, and general control API workloads
+- Optional W3C trace propagation and OTLP/HTTP export across Fastify, outbound
+  HTTP, and PostgreSQL with trace IDs correlated into structured logs
 - Strict configuration validation
 - Container build running as a non-root user
 - PostgreSQL customer, deployment, License, replay-nonce, and audit tables
@@ -165,6 +173,37 @@ continues to verify historical License envelopes. Use `revoked` only for a
 compromise; online License leases signed by that key then fail closed. The
 bootstrap command uses exclusive file creation and refuses to overwrite an
 existing identity.
+
+### Metrics, SLOs, and tracing
+
+Production bootstrap creates a separate `control_metrics_token`. The `/metrics`
+route requires that token and Caddy deliberately returns 404 for the public
+route. Start the internal Prometheus profile when the host is ready to retain
+metrics locally:
+
+```bash
+docker compose -f compose.production.yaml --env-file .env.production \
+  --profile observability up -d prometheus
+curl http://127.0.0.1:9090/-/healthy
+curl http://127.0.0.1:9090/api/v1/targets
+```
+
+The production Compose stack exposes no Control port. Prometheus is bound to
+`127.0.0.1:9090`, uses the same Docker secret, and scrapes all three Control
+instances over an isolated monitoring network. Recording and alert rules live
+under `deploy/prometheus/rules/`.
+Retain or remotely write Prometheus data according to the customer's operations
+policy; the default local retention is 30 days.
+
+Distributed tracing is off by default. To enable it, set
+`CONTROL_OTLP_TRACE_ENDPOINT` to a trusted HTTPS OTLP/HTTP endpoint ending in
+`/v1/traces`. Put collector headers in a permission-`0600` JSON file and set
+`CONTROL_OTLP_HEADERS_FILE`; never place collector credentials in the endpoint
+or environment. `CONTROL_TRACE_SAMPLE_RATIO` defaults to `0.1` in production.
+The instrumentation does not export request or response bodies, authentication
+headers, SQL parameter values, or metrics requests. Common secret-bearing query
+parameters are redacted, and PostgreSQL trace-context injection is disabled to
+avoid doubling query round trips.
 
 ### Backup and restore
 

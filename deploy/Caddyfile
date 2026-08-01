@@ -1,5 +1,9 @@
 {$CONTROL_DOMAIN} {
   encode zstd gzip
+
+  @internal_metrics path /metrics
+  respond @internal_metrics 404
+
   reverse_proxy control-a:7788 control-b:7788 control-c:7788 {
     lb_policy least_conn
     health_uri /health/ready

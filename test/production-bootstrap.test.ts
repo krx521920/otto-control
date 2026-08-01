@@ -48,6 +48,10 @@ describe('production bootstrap', () => {
         join(output, 'secrets', 'audit_anchor_token'),
         'utf8',
       ).trim();
+      const metricsToken = readFileSync(
+        join(output, 'secrets', 'control_metrics_token'),
+        'utf8',
+      ).trim();
       const signer = readFileSync(
         join(output, 'secrets', 'control_signer_private_key.pem'),
         'utf8',
@@ -73,6 +77,13 @@ describe('production bootstrap', () => {
       expect(environment).toContain('CONTROL_AUDIT_ANCHOR_URL=');
       expect(environment).toContain('CONTROL_AUDIT_ANCHOR_TOKEN_FILE=');
       expect(environment).toContain('CONTROL_AUDIT_WITNESS_SOURCES_FILE=');
+      expect(environment).toContain(
+        'CONTROL_METRICS_TOKEN_FILE=/run/secrets/control_metrics_token',
+      );
+      expect(environment).toContain('CONTROL_SLO_AVAILABILITY_TARGET=0.999');
+      expect(environment).toContain('CONTROL_OTLP_TRACE_ENDPOINT=');
+      expect(environment).toContain('CONTROL_TRACE_SAMPLE_RATIO=0.1');
+      expect(environment).toContain('PROMETHEUS_IMAGE=prom/prometheus:v3.13.0-distroless');
       expect(environment).toContain('CONTROL_BACKUP_S3_ADDRESSING_STYLE=path');
       expect(environment).toContain('CONTROL_PITR_REPORT_RETENTION_DAYS=180');
       expect(environment).toContain('CONTROL_PITR_MAX_BACKUP_AGE_HOURS=24');
@@ -85,6 +96,7 @@ describe('production bootstrap', () => {
       expect(environment).not.toContain(backupKey);
       expect(environment).not.toContain(alertWebhookSecret);
       expect(environment).not.toContain(auditAnchorToken);
+      expect(environment).not.toContain(metricsToken);
       expect(signer).toContain('BEGIN PRIVATE KEY');
       expect(keyring).toEqual({
         version: 1,

@@ -81,9 +81,15 @@ import type {
   AuditAnchorStatus,
 } from '../contracts/audit-anchor.js';
 import type { AuditWitnessReceiptRecord } from '../contracts/audit-witness.js';
+import type {
+  DatabaseCapacitySnapshot,
+  DatabaseObservabilitySource,
+  DatabasePoolSnapshot,
+} from '../observability/contracts.js';
 import { runMigrations } from './migrations.js';
 
 const { Pool } = pg;
+const POSTGRES_POOL_MAX_CONNECTIONS = 10;
 
 interface PostgresStoreOptions {
   connectionString: string;
@@ -812,17 +818,23 @@ function creditTransactionFromRow(row: CreditTransactionRow): CreditTransactionR
   };
 }
 
-export class PostgresControlStore implements ControlStore {
+export class PostgresControlStore implements ControlStore, DatabaseObservabilitySource {
   readonly #pool: InstanceType<typeof Pool>;
+  readonly #poolState: { errorsTotal: number };
 
-  private constructor(pool: InstanceType<typeof Pool>) {
+  private constructor(
+    pool: InstanceType<typeof Pool>,
+    poolState: { errorsTotal: number },
+  ) {
     this.#pool = pool;
+    this.#poolState = poolState;
   }
 
   static async connect(options: PostgresStoreOptions): Promise<PostgresControlStore> {
+    const poolState = { errorsTotal: 0 };
     const pool = new Pool({
       connectionString: options.connectionString,
-      max: 10,
+      max: POSTGRES_POOL_MAX_CONNECTIONS,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
       ssl: options.ssl ? { rejectUnauthorized: true } : false,
@@ -830,7 +842,10 @@ export class PostgresControlStore implements ControlStore {
     // node-postgres emits idle-client failures on the Pool. Without a listener,
     // a primary failover becomes an uncaught EventEmitter error and terminates
     // the whole Control process instead of allowing the pool to reconnect.
-    pool.on('error', (error) => options.onPoolError?.(error));
+    pool.on('error', (error) => {
+      poolState.errorsTotal += 1;
+      options.onPoolError?.(error);
+    });
     const client = await pool.connect();
     let migrationError: unknown;
     try {
@@ -844,7 +859,7 @@ export class PostgresControlStore implements ControlStore {
       await pool.end();
       throw migrationError;
     }
-    return new PostgresControlStore(pool);
+    return new PostgresControlStore(pool, poolState);
   }
 
   async ping(): Promise<void> {
@@ -853,6 +868,51 @@ export class PostgresControlStore implements ControlStore {
 
   async close(): Promise<void> {
     await this.#pool.end();
+  }
+
+  poolSnapshot(): DatabasePoolSnapshot {
+    return {
+      totalConnections: this.#pool.totalCount,
+      idleConnections: this.#pool.idleCount,
+      waitingRequests: this.#pool.waitingCount,
+      errorsTotal: this.#poolState.errorsTotal,
+      maximumConnections: POSTGRES_POOL_MAX_CONNECTIONS,
+    };
+  }
+
+  async sampleCapacity(): Promise<DatabaseCapacitySnapshot> {
+    const result = await this.#pool.query<{
+      database_bytes: string;
+      relation: string | null;
+      relation_bytes: string | null;
+      estimated_rows: string | null;
+    }>(
+      `SELECT pg_database_size(current_database())::text AS database_bytes,
+              stats.relname AS relation,
+              pg_total_relation_size(classes.oid)::text AS relation_bytes,
+              stats.n_live_tup::text AS estimated_rows
+       FROM pg_stat_user_tables AS stats
+       JOIN pg_class AS classes ON classes.relname = stats.relname
+       JOIN pg_namespace AS namespaces
+         ON namespaces.oid = classes.relnamespace
+        AND namespaces.nspname = stats.schemaname
+       WHERE stats.schemaname = 'public'
+         AND stats.relname ~ '^control_[a-z0-9_]+$'
+       ORDER BY stats.relname`,
+    );
+    const relations: DatabaseCapacitySnapshot['relations'] = {};
+    for (const row of result.rows) {
+      if (!row.relation) continue;
+      relations[row.relation] = {
+        bytes: Number(row.relation_bytes ?? 0),
+        estimatedRows: Number(row.estimated_rows ?? 0),
+      };
+    }
+    return {
+      sampledAtMs: Date.now(),
+      databaseBytes: Number(result.rows[0]?.database_bytes ?? 0),
+      relations,
+    };
   }
 
   async createCustomer(input: { id: string; name: string }): Promise<CustomerRecord> {

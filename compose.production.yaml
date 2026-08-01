@@ -54,6 +54,7 @@ x-control-common: &control-common
   secrets:
     - control_admin_token
     - control_token_secret
+    - control_metrics_token
     - source: control_signer_private_key
       target: control_signer_private_key.pem
     - postgres_password
@@ -69,6 +70,7 @@ x-control-common: &control-common
   networks:
     - backend
     - edge
+    - monitoring
   security_opt:
     - no-new-privileges:true
   cap_drop:
@@ -257,6 +259,28 @@ services:
     networks: [edge]
     security_opt: [no-new-privileges:true]
 
+  prometheus:
+    profiles: [observability]
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.13.0-distroless}
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+    ports:
+      - "127.0.0.1:9090:9090"
+    secrets: [control_metrics_token]
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    networks: [monitoring]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
   postgres-pitr-drill:
     profiles: [ops]
     build:
@@ -291,6 +315,8 @@ secrets:
     file: ./secrets/control_admin_token
   control_token_secret:
     file: ./secrets/control_token_secret
+  control_metrics_token:
+    file: ./secrets/control_metrics_token
   control_signer_private_key:
     file: ./secrets/control_signer_private_key.pem
   postgres_password:
@@ -317,6 +343,7 @@ volumes:
   pgbackrest_repository:
   caddy_data:
   caddy_config:
+  prometheus_data:
 
 networks:
   database:
@@ -324,3 +351,5 @@ networks:
   backend:
     internal: true
   edge:
+  monitoring:
+    internal: true
