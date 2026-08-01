@@ -169,6 +169,7 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
         <label>授权席位<input id="license-seats" type="number" min="1" max="100000" value="50" required></label>
         <label>宽限期（天）<input id="license-grace" type="number" min="0" max="30" value="7" required></label>
         <label>席位策略<select id="license-seat-enforcement"><option value="monitor">仅监测</option><option value="enforce">超额限制</option></select></label>
+        <label>积分策略<select id="license-billing-enforcement"><option value="disabled">仅统计，不拦截</option><option value="enforce">余额不足时拒绝执行</option></select></label>
       </div>
       <fieldset><legend>授权模块</legend><div class="module-grid">
         <label><input type="checkbox" name="license-module" value="enterprise_tree" checked>企业组织</label>

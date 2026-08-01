@@ -37,6 +37,7 @@ export interface OperatorLicenseDetail extends OperatorLicenseView {
   issuedAt: string;
   gracePeriodDays: number;
   seatEnforcement: 'monitor' | 'enforce';
+  billingEnforcement: 'disabled' | 'enforce';
   modules: string[];
   telemetryAllowed: boolean;
 }

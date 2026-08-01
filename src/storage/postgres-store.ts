@@ -130,6 +130,7 @@ interface LicenseRow {
   seat_limit: number;
   grace_period_ms: string;
   seat_enforcement: OttoSeatEnforcement;
+  billing_enforcement: 'disabled' | 'enforce';
   modules: OttoLicenseCapability[];
   offline: boolean;
   telemetry_allowed: boolean;
@@ -468,6 +469,7 @@ function licenseFromRow(row: LicenseRow): LicenseRecord {
     seatLimit: row.seat_limit,
     gracePeriodMs: Number(row.grace_period_ms),
     seatEnforcement: row.seat_enforcement,
+    billingEnforcement: row.billing_enforcement,
     modules: row.modules,
     offline: row.offline,
     telemetryAllowed: row.telemetry_allowed,
@@ -1070,12 +1072,12 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         `INSERT INTO control_licenses
           (id, revision, deployment_id, customer_name, organization_id, machine_fingerprint,
            plan, issued_at_ms, expires_at_ms, seat_limit, grace_period_ms, seat_enforcement,
-           modules, offline,
+           billing_enforcement, modules, offline,
            telemetry_allowed, lease_endpoint, token_version, signature, signing_key_id,
            revoked_at_ms)
          VALUES
-          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-           $13::jsonb, $14, $15, $16, $17, $18, $19, $20)
+          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+           $14::jsonb, $15, $16, $17, $18, $19, $20, $21)
          RETURNING *`,
         [
           input.id,
@@ -1090,6 +1092,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
           input.seatLimit,
           input.gracePeriodMs,
           input.seatEnforcement,
+          input.billingEnforcement ?? 'disabled',
           JSON.stringify(input.modules),
           input.offline,
           input.telemetryAllowed,
@@ -1163,10 +1166,10 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
          SET revision = $2, deployment_id = $3, customer_name = $4,
              organization_id = $5, machine_fingerprint = $6, plan = $7,
              issued_at_ms = $8, expires_at_ms = $9, seat_limit = $10,
-             grace_period_ms = $11, seat_enforcement = $12, modules = $13::jsonb,
-             offline = $14, telemetry_allowed = $15, lease_endpoint = $16,
-             token_version = $17, signature = $18, signing_key_id = $19,
-             revoked_at_ms = $20, updated_at = now()
+             grace_period_ms = $11, seat_enforcement = $12, billing_enforcement = $13,
+             modules = $14::jsonb, offline = $15, telemetry_allowed = $16,
+             lease_endpoint = $17, token_version = $18, signature = $19,
+             signing_key_id = $20, revoked_at_ms = $21, updated_at = now()
          WHERE id = $1
          RETURNING *`,
         [
@@ -1182,6 +1185,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
           input.seatLimit,
           input.gracePeriodMs,
           input.seatEnforcement,
+          input.billingEnforcement ?? 'disabled',
           JSON.stringify(input.modules),
           input.offline,
           input.telemetryAllowed,
@@ -2214,6 +2218,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     const latestHealth = latest.rows[0];
     return {
       deploymentId: input.deploymentId,
+      evidenceTrust: 'customer_server_reported',
       since: new Date(input.sinceMs).toISOString(),
       totalEvents: counts.rows.reduce((total, row) => total + row.count, 0),
       lastSeenAt: lastSeen.rows[0]?.received_at?.toISOString() ?? null,

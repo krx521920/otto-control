@@ -10,6 +10,7 @@ export const OTTO_LICENSE_CAPABILITIES = [
 
 export type OttoLicenseCapability = (typeof OTTO_LICENSE_CAPABILITIES)[number];
 export type OttoSeatEnforcement = 'monitor' | 'enforce';
+export type OttoBillingEnforcement = 'disabled' | 'enforce';
 export type OttoSeatStatus =
   | 'unreported'
   | 'within_limit'
@@ -30,11 +31,13 @@ export interface OttoLicensePayload {
   seatLimit: number;
   gracePeriodMs: number;
   seatEnforcement: OttoSeatEnforcement;
+  billingEnforcement?: OttoBillingEnforcement;
   modules: OttoLicenseCapability[];
   offline: boolean;
   telemetryAllowed: boolean;
   leaseEndpoint?: string;
   billingEndpoint?: string;
+  billingHoldEndpoint?: string;
   leaseToken?: string;
   telemetryToken?: string;
 }
@@ -84,6 +87,7 @@ export interface IssueLicenseInput {
   seatLimit: number;
   gracePeriodDays?: number;
   seatEnforcement?: OttoSeatEnforcement;
+  billingEnforcement?: OttoBillingEnforcement;
   modules: OttoLicenseCapability[];
   offline?: boolean;
   telemetryAllowed?: boolean;

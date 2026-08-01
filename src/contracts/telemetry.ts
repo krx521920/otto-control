@@ -29,6 +29,7 @@ export interface TelemetryRequestAuthentication {
 
 export interface DeploymentTelemetrySummary {
   deploymentId: string;
+  evidenceTrust: 'customer_server_reported';
   since: string;
   totalEvents: number;
   lastSeenAt: string | null;

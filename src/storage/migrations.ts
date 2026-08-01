@@ -728,6 +728,23 @@ const MIGRATIONS: Migration[] = [
        ON control_audit_witness_receipts(received_at DESC, id DESC)`,
     ],
   },
+  {
+    id: '019_license_billing_enforcement',
+    statements: [
+      `ALTER TABLE control_licenses
+       ADD COLUMN IF NOT EXISTS billing_enforcement TEXT NOT NULL DEFAULT 'disabled'`,
+      `ALTER TABLE control_licenses
+       ADD CONSTRAINT control_licenses_billing_enforcement_check
+       CHECK (billing_enforcement IN ('disabled', 'enforce')) NOT VALID`,
+      `ALTER TABLE control_licenses
+       VALIDATE CONSTRAINT control_licenses_billing_enforcement_check`,
+      `ALTER TABLE control_licenses
+       ADD CONSTRAINT control_licenses_offline_billing_check
+       CHECK (NOT offline OR billing_enforcement = 'disabled') NOT VALID`,
+      `ALTER TABLE control_licenses
+       VALIDATE CONSTRAINT control_licenses_offline_billing_check`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

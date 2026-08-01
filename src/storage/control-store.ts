@@ -107,6 +107,7 @@ export interface LicenseRecord {
   seatLimit: number;
   gracePeriodMs: number;
   seatEnforcement: OttoSeatEnforcement;
+  billingEnforcement?: 'disabled' | 'enforce';
   modules: OttoLicenseCapability[];
   offline: boolean;
   telemetryAllowed: boolean;

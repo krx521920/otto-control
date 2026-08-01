@@ -873,6 +873,7 @@ describe('commercial control HTTP routes', () => {
     expect(health.statusCode).toBe(200);
     expect(health.json().health).toMatchObject({
       deploymentId,
+      evidenceTrust: 'customer_server_reported',
       totalEvents: 1,
       eventCounts: { runtime_health: 1 },
       latestRuntimeHealth: {

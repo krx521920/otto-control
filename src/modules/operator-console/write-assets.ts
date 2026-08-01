@@ -78,12 +78,15 @@ function tomorrowDate() {
 function syncOfflineLicenseControls() {
   const offline = byId('license-offline').checked;
   const enforcement = byId('license-seat-enforcement');
+  const billingEnforcement = byId('license-billing-enforcement');
   const telemetry = byId('license-telemetry');
   if (offline) {
     enforcement.value = 'monitor';
+    billingEnforcement.value = 'disabled';
     telemetry.checked = false;
   }
   enforcement.disabled = offline;
+  billingEnforcement.disabled = offline;
   telemetry.disabled = offline;
 }
 function openDialog(id) {
@@ -164,6 +167,7 @@ byId('license-form').addEventListener('submit', async (event) => {
       seatLimit: Number(byId('license-seats').value),
       gracePeriodDays: Number(byId('license-grace').value),
       seatEnforcement: byId('license-seat-enforcement').value,
+      billingEnforcement: byId('license-billing-enforcement').value,
       modules,
       offline: byId('license-offline').checked,
       telemetryAllowed: byId('license-telemetry').checked,

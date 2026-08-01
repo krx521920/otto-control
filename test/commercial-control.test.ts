@@ -62,6 +62,7 @@ describe('commercial control service', () => {
       plan: 'enterprise',
       expiresAt: '2027-07-31T02:00:00.000Z',
       seatLimit: 200,
+      billingEnforcement: 'enforce',
       modules: ['enterprise_tree', 'direct_messages', 'park_service'],
     }, ADMIN);
 
@@ -71,10 +72,17 @@ describe('commercial control service', () => {
       machineFingerprint: FINGERPRINT,
       offline: false,
       telemetryAllowed: true,
+      billingEnforcement: 'enforce',
       issuedAtMs: now,
     });
     expect(envelope.license.leaseEndpoint).toBe(
       `https://control.otto.test/v1/licenses/${envelope.license.id}/lease`,
+    );
+    expect(envelope.license.billingEndpoint).toBe(
+      'https://control.otto.test/v1/billing/usage/consume',
+    );
+    expect(envelope.license.billingHoldEndpoint).toBe(
+      'https://control.otto.test/v1/billing/holds',
     );
     expect(envelope.license.leaseToken).toHaveLength(43);
     expect(envelope.license.telemetryToken).toHaveLength(43);
@@ -84,6 +92,18 @@ describe('commercial control service', () => {
     const stored = store.licenses.get(envelope.license.id)!;
     expect(JSON.stringify(stored)).not.toContain(envelope.license.leaseToken!);
     expect(JSON.stringify(stored)).not.toContain(envelope.license.telemetryToken!);
+  });
+
+  it('refuses real-time billing enforcement in an offline License', async () => {
+    await expect(service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'government-offline',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 200,
+      billingEnforcement: 'enforce',
+      modules: ['enterprise_tree'],
+      offline: true,
+    }, ADMIN)).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
   });
 
   it('builds a safe operator overview and classifies License lifecycle risk', async () => {

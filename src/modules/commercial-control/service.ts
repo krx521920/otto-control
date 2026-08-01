@@ -5,6 +5,7 @@ import {
   type IssueLicenseInput,
   type OttoLeasePayload,
   type OttoLeaseRequest,
+  type OttoBillingEnforcement,
   type OttoLicensePayload,
   type OttoSeatEnforcement,
   type OttoSignedLeaseEnvelope,
@@ -180,6 +181,7 @@ function licensePayload(
     seatLimit: license.seatLimit,
     gracePeriodMs: license.gracePeriodMs,
     seatEnforcement: license.seatEnforcement,
+    billingEnforcement: license.billingEnforcement ?? 'disabled',
     modules: license.modules,
     offline: license.offline,
     telemetryAllowed: license.telemetryAllowed,
@@ -187,6 +189,7 @@ function licensePayload(
   if (!license.offline) {
     payload.leaseEndpoint = license.leaseEndpoint!;
     payload.billingEndpoint = new URL('/v1/billing/usage/consume', license.leaseEndpoint!).toString();
+    payload.billingHoldEndpoint = new URL('/v1/billing/holds', license.leaseEndpoint!).toString();
     payload.leaseToken = tokens.issue({
       purpose: 'lease',
       licenseId: license.id,
@@ -314,6 +317,7 @@ export class CommercialControlService {
       offline: record.offline,
       telemetryAllowed: record.telemetryAllowed,
       seatEnforcement: record.seatEnforcement,
+      billingEnforcement: record.billingEnforcement ?? 'disabled',
       gracePeriodDays: record.gracePeriodMs / (24 * 60 * 60 * 1000),
       state: operatorLicenseState(record, this.#now()),
       issuedAt: new Date(record.issuedAtMs).toISOString(),
@@ -540,6 +544,7 @@ export class CommercialControlService {
       seatLimit: candidate.seatLimit,
       gracePeriodMs: candidate.gracePeriodMs,
       seatEnforcement: candidate.seatEnforcement,
+      billingEnforcement: candidate.billingEnforcement ?? 'disabled',
       modules: candidate.modules,
       offline: candidate.offline,
       telemetryAllowed: candidate.telemetryAllowed,
@@ -827,6 +832,16 @@ export class CommercialControlService {
     if (offline && seatEnforcement === 'enforce') {
       throw invalidRequest('offline License cannot enforce real-time seat usage');
     }
+    const billingEnforcement: OttoBillingEnforcement =
+      body.billingEnforcement === undefined
+        ? 'disabled'
+        : body.billingEnforcement as OttoBillingEnforcement;
+    if (!['disabled', 'enforce'].includes(billingEnforcement)) {
+      throw invalidRequest('billingEnforcement must be disabled or enforce');
+    }
+    if (offline && billingEnforcement === 'enforce') {
+      throw invalidRequest('offline License cannot enforce real-time billing');
+    }
     const id = prefixedId('lic');
     const leaseEndpoint = offline
       ? null
@@ -844,6 +859,7 @@ export class CommercialControlService {
       seatLimit,
       gracePeriodMs,
       seatEnforcement,
+      billingEnforcement,
       modules,
       offline,
       telemetryAllowed,
@@ -873,6 +889,7 @@ export class CommercialControlService {
         seatLimit,
         gracePeriodDays,
         seatEnforcement,
+        billingEnforcement,
         modules,
         offline,
         expiresAtMs,

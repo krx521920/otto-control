@@ -854,6 +854,7 @@ export class MemoryControlStore implements ControlStore {
       .sort((left, right) => right - left)[0];
     return {
       deploymentId: input.deploymentId,
+      evidenceTrust: 'customer_server_reported',
       since: new Date(input.sinceMs).toISOString(),
       totalEvents: events.length,
       lastSeenAt: lastSeen === undefined ? null : new Date(lastSeen).toISOString(),

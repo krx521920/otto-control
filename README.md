@@ -62,6 +62,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Immutable top-up, freeze, capture, release, consumption, and refund transactions
 - Centrally controlled per-module rates; private deployments report units, not prices
 - Request idempotency, original-charge refund limits, and automatic expired-hold release
+- Signed Otto execution policy with fail-closed module gates, pre-execution credit
+  holds, durable capture/release recovery, and cross-repository conformance CI
 - Organization/module statements plus UTF-8 CSV transaction exports
 - Production Compose stack with a three-node Patroni/PostgreSQL cluster, etcd
   quorum, automatic primary failover, a stable HAProxy write endpoint, three
