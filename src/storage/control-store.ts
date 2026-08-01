@@ -31,6 +31,12 @@ import type {
   CreditTransactionRecord,
   OttoBillingModule,
 } from '../contracts/billing.js';
+import type {
+  AlertDeliveryPayload,
+  AlertDeliveryRecord,
+  AlertDeliveryStatus,
+  AlertSeverity,
+} from '../contracts/alert-delivery.js';
 
 export type RecordStatus = 'active' | 'suspended';
 
@@ -495,5 +501,37 @@ export interface ControlStore {
     from: Date;
     to: Date;
   }): Promise<CreditStatement | null>;
+  enqueueAlertDelivery(input: {
+    id: string;
+    source: AlertDeliveryRecord['source'];
+    eventType: AlertDeliveryRecord['eventType'];
+    fingerprint: string;
+    severity: AlertSeverity;
+    payload: AlertDeliveryPayload;
+    createdAt: Date;
+    audit: AuditEventInput;
+  }): Promise<{ record: AlertDeliveryRecord; created: boolean }>;
+  claimAlertDelivery(input: {
+    now: Date;
+    leaseUntil: Date;
+  }): Promise<AlertDeliveryRecord | null>;
+  finishAlertDelivery(input: {
+    id: string;
+    expectedLeaseUntil: Date;
+    status: Extract<AlertDeliveryStatus, 'delivered' | 'retrying' | 'failed'>;
+    nextAttemptAt: Date;
+    lastError: string | null;
+    deliveredAt: Date | null;
+    updatedAt: Date;
+    audit: AuditEventInput | null;
+  }): Promise<AlertDeliveryRecord | null>;
+  getAlertDelivery(id: string): Promise<AlertDeliveryRecord | null>;
+  retryAlertDelivery(input: {
+    id: string;
+    retriedAt: Date;
+    audit: AuditEventInput;
+  }): Promise<AlertDeliveryRecord | null>;
+  listAlertDeliveries(limit: number): Promise<AlertDeliveryRecord[]>;
+  pruneAlertDeliveries(before: Date): Promise<number>;
   appendAuditEvent(input: AuditEventInput): Promise<void>;
 }

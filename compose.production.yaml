@@ -41,6 +41,7 @@ services:
       - source: control_signer_private_key
         target: control_signer_private_key.pem
       - postgres_password
+      - alert_webhook_secret
     volumes:
       - ./secrets:/run/otto-secrets:ro
       - ./backups/reports:/var/lib/otto-control/backup-reports:ro
@@ -85,6 +86,8 @@ secrets:
     file: ./secrets/control_signer_private_key.pem
   postgres_password:
     file: ./secrets/postgres_password
+  alert_webhook_secret:
+    file: ./secrets/alert_webhook_secret
 
 volumes:
   postgres_data:

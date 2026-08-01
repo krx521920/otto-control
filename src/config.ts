@@ -22,6 +22,12 @@ export interface ControlConfig {
   updatePolicyDurationMs: number;
   backupReportDirectory: string | null;
   backupStatusMaximumAgeHours: number;
+  alertWebhookUrl: string | null;
+  alertWebhookSecretFile: string | null;
+  alertPollIntervalMs: number;
+  alertWebhookTimeoutMs: number;
+  alertWebhookMaxAttempts: number;
+  alertRetentionDays: number;
 }
 
 const LOG_LEVELS = new Set<ControlLogLevel>([
@@ -192,6 +198,37 @@ function parseBackupStatusMaximumAgeHours(value: string | undefined): number {
   return hours;
 }
 
+function parseBoundedInteger(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  const normalized = value?.trim() || String(fallback);
+  if (!/^\d+$/u.test(normalized)) throw new Error(`${name} must be an integer`);
+  const parsed = Number(normalized);
+  if (parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
+function parseAlertWebhookUrl(value: string | undefined): string | null {
+  const normalized = value?.trim();
+  if (!normalized) return null;
+  let url: URL;
+  try {
+    url = new URL(normalized);
+  } catch {
+    throw new Error('CONTROL_ALERT_WEBHOOK_URL must be an absolute HTTPS URL');
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash) {
+    throw new Error('CONTROL_ALERT_WEBHOOK_URL must use HTTPS without credentials or fragments');
+  }
+  return url.toString();
+}
+
 function parseLogLevel(value: string | undefined): ControlLogLevel {
   const normalized = (value?.trim() || 'info') as ControlLogLevel;
   if (!LOG_LEVELS.has(normalized)) throw new Error('CONTROL_LOG_LEVEL is invalid');
@@ -219,8 +256,13 @@ export function loadControlConfig(
   const environment = parseEnvironment(env.NODE_ENV);
   const signerPrivateKeyFile = env.CONTROL_SIGNER_PRIVATE_KEY_FILE?.trim() || null;
   const signerKeyringFile = env.CONTROL_SIGNER_KEYRING_FILE?.trim() || null;
+  const alertWebhookUrl = parseAlertWebhookUrl(env.CONTROL_ALERT_WEBHOOK_URL);
+  const alertWebhookSecretFile = env.CONTROL_ALERT_WEBHOOK_SECRET_FILE?.trim() || null;
   if (signerPrivateKeyFile && signerKeyringFile) {
     throw new Error('CONTROL_SIGNER_PRIVATE_KEY_FILE and CONTROL_SIGNER_KEYRING_FILE cannot both be set');
+  }
+  if (alertWebhookUrl && !alertWebhookSecretFile) {
+    throw new Error('CONTROL_ALERT_WEBHOOK_SECRET_FILE is required with CONTROL_ALERT_WEBHOOK_URL');
   }
   return Object.freeze({
     environment,
@@ -229,7 +271,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.12.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.13.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -246,6 +288,36 @@ export function loadControlConfig(
     backupReportDirectory: env.CONTROL_BACKUP_REPORT_DIR?.trim() || null,
     backupStatusMaximumAgeHours: parseBackupStatusMaximumAgeHours(
       env.CONTROL_BACKUP_STATUS_MAX_AGE_HOURS,
+    ),
+    alertWebhookUrl,
+    alertWebhookSecretFile,
+    alertPollIntervalMs: parseBoundedInteger(
+      env.CONTROL_ALERT_POLL_INTERVAL_MS,
+      60_000,
+      5_000,
+      3_600_000,
+      'CONTROL_ALERT_POLL_INTERVAL_MS',
+    ),
+    alertWebhookTimeoutMs: parseBoundedInteger(
+      env.CONTROL_ALERT_WEBHOOK_TIMEOUT_MS,
+      10_000,
+      500,
+      30_000,
+      'CONTROL_ALERT_WEBHOOK_TIMEOUT_MS',
+    ),
+    alertWebhookMaxAttempts: parseBoundedInteger(
+      env.CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS,
+      8,
+      1,
+      20,
+      'CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS',
+    ),
+    alertRetentionDays: parseBoundedInteger(
+      env.CONTROL_ALERT_RETENTION_DAYS,
+      365,
+      30,
+      3_650,
+      'CONTROL_ALERT_RETENTION_DAYS',
     ),
   });
 }

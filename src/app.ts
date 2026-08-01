@@ -13,6 +13,7 @@ import { registerUpdatePolicyRoutes } from './routes/update-policy.js';
 import { registerBillingRoutes } from './routes/billing.js';
 import { registerReleaseArtifactRoutes } from './routes/release-artifacts.js';
 import { registerBackupStatusRoutes } from './routes/backup-status.js';
+import { registerAlertDeliveryRoutes } from './routes/alert-delivery.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
@@ -126,6 +127,7 @@ export async function buildControlApp(
       'update_policy',
       'signed_release_artifacts',
       'backup_inventory',
+      'outbound_alert_delivery',
     );
     capabilities.push('admin_identity', 'admin_rbac', 'admin_mfa', 'dual_control_approval');
     await registerAdminIdentityRoutes(app, {
@@ -145,6 +147,10 @@ export async function buildControlApp(
       service: commercialControl.backupStatus,
       identity: commercialControl.identity,
     });
+    await registerAlertDeliveryRoutes(app, {
+      service: commercialControl.alerts,
+      identity: commercialControl.identity,
+    });
     if (commercialControl.billing) {
       capabilities.push('credit_billing', 'billing_statement_export');
       await registerBillingRoutes(app, {
@@ -152,7 +158,18 @@ export async function buildControlApp(
         identity: commercialControl.identity,
       });
     }
-    app.addHook('onClose', async () => commercialControl.service.close());
+    app.addHook('onReady', async () => {
+      commercialControl.alerts.start((error) => {
+        app.log.error({ err: error }, 'alert delivery poll failed');
+      });
+    });
+    app.addHook('onClose', async () => {
+      try {
+        await commercialControl.alerts.close();
+      } finally {
+        await commercialControl.service.close();
+      }
+    });
   }
   await registerPlatformRoutes(app, config, {
     capabilities,

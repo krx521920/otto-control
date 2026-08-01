@@ -78,7 +78,7 @@ function holdId(): string {
 }
 
 function parseRange(rawFrom: unknown, rawTo: unknown): { from: Date; to: Date } {
-  const to = rawTo === undefined ? new Date() : new Date(String(rawTo));
+  const to = rawTo === undefined ? new Date(Date.now() + 1) : new Date(String(rawTo));
   const from = rawFrom === undefined
     ? new Date(to.getTime() - 30 * 24 * 60 * 60 * 1000)
     : new Date(String(rawFrom));

@@ -8,6 +8,7 @@ import { UpdatePolicyService } from './modules/update-policy/service.js';
 import { BillingService } from './modules/billing/service.js';
 import { ReleaseArtifactService } from './modules/release-artifacts/service.js';
 import { BackupStatusService } from './modules/backup-status/service.js';
+import { AlertDeliveryService } from './modules/alert-delivery/service.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 
 export interface CommercialControlRuntime {
@@ -18,6 +19,7 @@ export interface CommercialControlRuntime {
   billing?: BillingService;
   releaseArtifacts: ReleaseArtifactService;
   backupStatus: BackupStatusService;
+  alerts: AlertDeliveryService;
 }
 
 function missingConfiguration(config: Readonly<ControlConfig>): string[] {
@@ -64,12 +66,23 @@ export async function createCommercialControlRuntime(
       reportDirectory: config.backupReportDirectory,
       maximumAgeHours: config.backupStatusMaximumAgeHours,
     });
+    const alerts = new AlertDeliveryService({
+      store,
+      backupStatus,
+      webhookUrl: config.alertWebhookUrl,
+      webhookSecretFile: config.alertWebhookSecretFile,
+      pollIntervalMs: config.alertPollIntervalMs,
+      timeoutMs: config.alertWebhookTimeoutMs,
+      maxAttempts: config.alertWebhookMaxAttempts,
+      retentionDays: config.alertRetentionDays,
+    });
     return {
       adminToken: config.adminToken!,
       identity,
       billing: new BillingService({ store, tokenIssuer }),
       releaseArtifacts,
       backupStatus,
+      alerts,
       service: new CommercialControlService({
         store,
         signer,

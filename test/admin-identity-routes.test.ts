@@ -13,6 +13,7 @@ import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issu
 import { UpdatePolicyService } from '../src/modules/update-policy/service.js';
 import { ReleaseArtifactService } from '../src/modules/release-artifacts/service.js';
 import { BackupStatusService } from '../src/modules/backup-status/service.js';
+import { AlertDeliveryService } from '../src/modules/alert-delivery/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
 const ADMIN_TOKEN = 'bootstrap-admin-token-that-is-at-least-32-bytes';
@@ -37,6 +38,12 @@ const config: Readonly<ControlConfig> = {
   updatePolicyDurationMs: 300_000,
   backupReportDirectory: null,
   backupStatusMaximumAgeHours: 48,
+  alertWebhookUrl: null,
+  alertWebhookSecretFile: null,
+  alertPollIntervalMs: 60_000,
+  alertWebhookTimeoutMs: 10_000,
+  alertWebhookMaxAttempts: 8,
+  alertRetentionDays: 365,
 };
 
 describe('administrator identity HTTP routes', () => {
@@ -59,6 +66,13 @@ describe('administrator identity HTTP routes', () => {
     const tokenIssuer = new ControlTokenIssuer(TOKEN_SECRET);
     const identity = new AdminIdentityService({ store, controlSecret: TOKEN_SECRET });
     const releaseArtifacts = new ReleaseArtifactService({ store, signer });
+    const backupStatus = new BackupStatusService({ reportDirectory: null });
+    const alerts = new AlertDeliveryService({
+      store,
+      backupStatus,
+      webhookUrl: null,
+      webhookSecretFile: null,
+    });
     const app = await buildControlApp({
       config,
       logger: false,
@@ -66,7 +80,8 @@ describe('administrator identity HTTP routes', () => {
         adminToken: ADMIN_TOKEN,
         identity,
         releaseArtifacts,
-        backupStatus: new BackupStatusService({ reportDirectory: null }),
+        backupStatus,
+        alerts,
         service: new CommercialControlService({
           store,
           signer,

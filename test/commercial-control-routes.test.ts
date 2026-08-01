@@ -19,6 +19,7 @@ import { BillingService } from '../src/modules/billing/service.js';
 import { UpdatePolicyService } from '../src/modules/update-policy/service.js';
 import { ReleaseArtifactService } from '../src/modules/release-artifacts/service.js';
 import { BackupStatusService } from '../src/modules/backup-status/service.js';
+import { AlertDeliveryService } from '../src/modules/alert-delivery/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
 const ADMIN_TOKEN = 'test-admin-token-that-is-at-least-32-bytes';
@@ -41,6 +42,12 @@ const config: Readonly<ControlConfig> = {
   updatePolicyDurationMs: 300_000,
   backupReportDirectory: null,
   backupStatusMaximumAgeHours: 48,
+  alertWebhookUrl: null,
+  alertWebhookSecretFile: null,
+  alertPollIntervalMs: 60_000,
+  alertWebhookTimeoutMs: 10_000,
+  alertWebhookMaxAttempts: 8,
+  alertRetentionDays: 365,
 };
 
 describe('commercial control HTTP routes', () => {
@@ -104,6 +111,13 @@ describe('commercial control HTTP routes', () => {
       publicBaseUrl: config.publicBaseUrl!,
     });
     const releaseArtifacts = new ReleaseArtifactService({ store, signer: keyring });
+    const backupStatus = new BackupStatusService({ reportDirectory: null });
+    const alerts = new AlertDeliveryService({
+      store,
+      backupStatus,
+      webhookUrl: null,
+      webhookSecretFile: null,
+    });
     app = await buildControlApp({
       config,
       logger: false,
@@ -111,7 +125,8 @@ describe('commercial control HTTP routes', () => {
         adminToken: ADMIN_TOKEN,
         identity,
         releaseArtifacts,
-        backupStatus: new BackupStatusService({ reportDirectory: null }),
+        backupStatus,
+        alerts,
         service,
         billing: new BillingService({ store, tokenIssuer }),
         updatePolicy: new UpdatePolicyService({
@@ -211,6 +226,7 @@ describe('commercial control HTTP routes', () => {
       'update_policy',
       'signed_release_artifacts',
       'backup_inventory',
+      'outbound_alert_delivery',
       'admin_identity',
       'admin_rbac',
       'admin_mfa',
@@ -226,6 +242,29 @@ describe('commercial control HTTP routes', () => {
     });
     expect(backupStatus.statusCode).toBe(200);
     expect(backupStatus.json()).toMatchObject({ status: 'not_configured' });
+
+    const alertDeliveries = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/alerts/deliveries',
+      headers: { authorization: `Bearer ${securitySessionToken}` },
+    });
+    expect(alertDeliveries.statusCode).toBe(200);
+    expect(alertDeliveries.json()).toEqual({ enabled: false, deliveries: [] });
+
+    const alertPoll = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/alerts/poll',
+      headers: { authorization: `Bearer ${securitySessionToken}` },
+    });
+    expect(alertPoll.statusCode).toBe(200);
+    expect(alertPoll.json()).toMatchObject({ enabled: false, processed: 0 });
+
+    const alertRetry = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/alerts/deliveries/alert_${'a'.repeat(32)}/retry`,
+      headers: { authorization: `Bearer ${securitySessionToken}` },
+    });
+    expect(alertRetry.statusCode).toBe(404);
 
     const signingKey = await app.inject({
       method: 'GET',

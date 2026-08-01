@@ -61,6 +61,12 @@ import type {
   CreditTransactionType,
   OttoBillingModule,
 } from '../contracts/billing.js';
+import type {
+  AlertDeliveryPayload,
+  AlertDeliveryRecord,
+  AlertDeliveryStatus,
+  AlertSeverity,
+} from '../contracts/alert-delivery.js';
 import { runMigrations } from './migrations.js';
 
 const { Pool } = pg;
@@ -316,6 +322,23 @@ interface ReleaseArtifactRow {
   updated_at: Date;
 }
 
+interface AlertDeliveryRow {
+  id: string;
+  source: AlertDeliveryRecord['source'];
+  event_type: AlertDeliveryRecord['eventType'];
+  fingerprint: string;
+  severity: AlertSeverity;
+  payload: AlertDeliveryPayload;
+  status: AlertDeliveryStatus;
+  attempts: number;
+  next_attempt_at: Date;
+  lease_until: Date | null;
+  last_error: string | null;
+  delivered_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 function postgresCode(error: unknown): string | null {
   return error && typeof error === 'object' && 'code' in error
     ? String(error.code)
@@ -521,6 +544,25 @@ function releaseArtifactFromRow(row: ReleaseArtifactRow): ReleaseArtifactRecord 
     revokedAt: row.revoked_at,
     revokedBy: row.revoked_by,
     revocationReason: row.revocation_reason,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function alertDeliveryFromRow(row: AlertDeliveryRow): AlertDeliveryRecord {
+  return {
+    id: row.id,
+    source: row.source,
+    eventType: row.event_type,
+    fingerprint: row.fingerprint,
+    severity: row.severity,
+    payload: row.payload,
+    status: row.status,
+    attempts: row.attempts,
+    nextAttemptAt: row.next_attempt_at,
+    leaseUntil: row.lease_until,
+    lastError: row.last_error,
+    deliveredAt: row.delivered_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -2996,6 +3038,211 @@ export class PostgresControlStore implements ControlStore {
         transactionCount: Number(line.transaction_count),
       })),
     };
+  }
+
+  async enqueueAlertDelivery(input: {
+    id: string;
+    source: AlertDeliveryRecord['source'];
+    eventType: AlertDeliveryRecord['eventType'];
+    fingerprint: string;
+    severity: AlertSeverity;
+    payload: AlertDeliveryPayload;
+    createdAt: Date;
+    audit: AuditEventInput;
+  }): Promise<{ record: AlertDeliveryRecord; created: boolean }> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const inserted = await client.query<AlertDeliveryRow>(
+        `INSERT INTO control_alert_deliveries
+          (id, source, event_type, fingerprint, severity, payload, status, attempts,
+           next_attempt_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'pending', 0, $7, $7, $7)
+         ON CONFLICT (fingerprint) DO NOTHING
+         RETURNING *`,
+        [
+          input.id,
+          input.source,
+          input.eventType,
+          input.fingerprint,
+          input.severity,
+          JSON.stringify(input.payload),
+          input.createdAt,
+        ],
+      );
+      if (inserted.rows[0]) {
+        await client.query(
+          `INSERT INTO control_audit_events
+           (actor_id, action, target_type, target_id, detail)
+           VALUES ($1, $2, $3, $4, $5::jsonb)`,
+          [
+            input.audit.actorId,
+            input.audit.action,
+            input.audit.targetType,
+            input.audit.targetId,
+            JSON.stringify(input.audit.detail),
+          ],
+        );
+        await client.query('COMMIT');
+        return { record: alertDeliveryFromRow(inserted.rows[0]), created: true };
+      }
+      const existing = await client.query<AlertDeliveryRow>(
+        'SELECT * FROM control_alert_deliveries WHERE fingerprint = $1',
+        [input.fingerprint],
+      );
+      if (!existing.rows[0]) throw new Error('alert delivery conflict could not be resolved');
+      await client.query('COMMIT');
+      return { record: alertDeliveryFromRow(existing.rows[0]), created: false };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async claimAlertDelivery(input: {
+    now: Date;
+    leaseUntil: Date;
+  }): Promise<AlertDeliveryRecord | null> {
+    const result = await this.#pool.query<AlertDeliveryRow>(
+      `WITH candidate AS (
+         SELECT id FROM control_alert_deliveries
+         WHERE ((status IN ('pending', 'retrying') AND next_attempt_at <= $1)
+           OR (status = 'delivering' AND lease_until <= $1))
+         ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+         FOR UPDATE SKIP LOCKED
+         LIMIT 1
+       )
+       UPDATE control_alert_deliveries AS delivery
+       SET status = 'delivering', attempts = delivery.attempts + 1,
+           lease_until = $2, updated_at = $1
+       FROM candidate
+       WHERE delivery.id = candidate.id
+       RETURNING delivery.*`,
+      [input.now, input.leaseUntil],
+    );
+    return result.rows[0] ? alertDeliveryFromRow(result.rows[0]) : null;
+  }
+
+  async finishAlertDelivery(input: {
+    id: string;
+    expectedLeaseUntil: Date;
+    status: Extract<AlertDeliveryStatus, 'delivered' | 'retrying' | 'failed'>;
+    nextAttemptAt: Date;
+    lastError: string | null;
+    deliveredAt: Date | null;
+    updatedAt: Date;
+    audit: AuditEventInput | null;
+  }): Promise<AlertDeliveryRecord | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<AlertDeliveryRow>(
+        `UPDATE control_alert_deliveries
+         SET status = $2, next_attempt_at = $3, lease_until = NULL, last_error = $4,
+             delivered_at = $5, updated_at = $6
+         WHERE id = $1 AND status = 'delivering' AND lease_until = $7
+         RETURNING *`,
+        [
+          input.id,
+          input.status,
+          input.nextAttemptAt,
+          input.lastError,
+          input.deliveredAt,
+          input.updatedAt,
+          input.expectedLeaseUntil,
+        ],
+      );
+      if (result.rows[0] && input.audit) {
+        await client.query(
+          `INSERT INTO control_audit_events
+           (actor_id, action, target_type, target_id, detail)
+           VALUES ($1, $2, $3, $4, $5::jsonb)`,
+          [
+            input.audit.actorId,
+            input.audit.action,
+            input.audit.targetType,
+            input.audit.targetId,
+            JSON.stringify(input.audit.detail),
+          ],
+        );
+      }
+      await client.query('COMMIT');
+      return result.rows[0] ? alertDeliveryFromRow(result.rows[0]) : null;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listAlertDeliveries(limit: number): Promise<AlertDeliveryRecord[]> {
+    const result = await this.#pool.query<AlertDeliveryRow>(
+      `SELECT * FROM control_alert_deliveries
+       ORDER BY created_at DESC, id DESC
+       LIMIT $1`,
+      [limit],
+    );
+    return result.rows.map(alertDeliveryFromRow);
+  }
+
+  async getAlertDelivery(id: string): Promise<AlertDeliveryRecord | null> {
+    const result = await this.#pool.query<AlertDeliveryRow>(
+      'SELECT * FROM control_alert_deliveries WHERE id = $1',
+      [id],
+    );
+    return result.rows[0] ? alertDeliveryFromRow(result.rows[0]) : null;
+  }
+
+  async retryAlertDelivery(input: {
+    id: string;
+    retriedAt: Date;
+    audit: AuditEventInput;
+  }): Promise<AlertDeliveryRecord | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<AlertDeliveryRow>(
+        `UPDATE control_alert_deliveries
+         SET status = 'pending', attempts = 0, next_attempt_at = $2,
+             lease_until = NULL, last_error = NULL, delivered_at = NULL, updated_at = $2
+         WHERE id = $1 AND status = 'failed'
+         RETURNING *`,
+        [input.id, input.retriedAt],
+      );
+      if (result.rows[0]) {
+        await client.query(
+          `INSERT INTO control_audit_events
+           (actor_id, action, target_type, target_id, detail)
+           VALUES ($1, $2, $3, $4, $5::jsonb)`,
+          [
+            input.audit.actorId,
+            input.audit.action,
+            input.audit.targetType,
+            input.audit.targetId,
+            JSON.stringify(input.audit.detail),
+          ],
+        );
+      }
+      await client.query('COMMIT');
+      return result.rows[0] ? alertDeliveryFromRow(result.rows[0]) : null;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async pruneAlertDeliveries(before: Date): Promise<number> {
+    const result = await this.#pool.query(
+      `DELETE FROM control_alert_deliveries
+       WHERE status IN ('delivered', 'failed') AND updated_at < $1`,
+      [before],
+    );
+    return result.rowCount ?? 0;
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

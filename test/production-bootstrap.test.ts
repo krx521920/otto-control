@@ -28,6 +28,10 @@ describe('production bootstrap', () => {
         join(output, 'secrets', 'backup_encryption_key'),
         'utf8',
       ).trim();
+      const alertWebhookSecret = readFileSync(
+        join(output, 'secrets', 'alert_webhook_secret'),
+        'utf8',
+      ).trim();
       const signer = readFileSync(
         join(output, 'secrets', 'control_signer_private_key.pem'),
         'utf8',
@@ -46,11 +50,16 @@ describe('production bootstrap', () => {
         'CONTROL_BACKUP_REPORT_DIR=/var/lib/otto-control/backup-reports',
       );
       expect(environment).toContain('CONTROL_BACKUP_STATUS_MAX_AGE_HOURS=48');
+      expect(environment).toContain('CONTROL_ALERT_WEBHOOK_URL=');
+      expect(environment).toContain(
+        'CONTROL_ALERT_WEBHOOK_SECRET_FILE=/run/secrets/alert_webhook_secret',
+      );
       expect(environment).toContain('CONTROL_BACKUP_S3_ADDRESSING_STYLE=path');
       expect(environment).not.toMatch(/CONTROL_BACKUP_S3_SECRET_ACCESS_KEY=[^\n]+/u);
       expect(environment).not.toContain(adminToken);
       expect(environment).not.toContain(databasePassword);
       expect(environment).not.toContain(backupKey);
+      expect(environment).not.toContain(alertWebhookSecret);
       expect(signer).toContain('BEGIN PRIVATE KEY');
       expect(keyring).toEqual({
         version: 1,

@@ -44,6 +44,12 @@ import type {
   CreditTransactionRecord,
   OttoBillingModule,
 } from '../../src/contracts/billing.js';
+import type {
+  AlertDeliveryPayload,
+  AlertDeliveryRecord,
+  AlertDeliveryStatus,
+  AlertSeverity,
+} from '../../src/contracts/alert-delivery.js';
 import { conflict } from '../../src/errors.js';
 
 const role = (
@@ -57,6 +63,7 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
   'signing_key.read', 'signing_key.manage', 'telemetry.read',
   'backup.read',
+  'alert.read', 'alert.manage',
   'update_distribution.manage', 'update_release.create', 'update_release.read',
   'update_release.publish', 'identity.read', 'identity.manage', 'approval.request',
   'approval.read', 'approval.decide',
@@ -96,11 +103,13 @@ export class MemoryControlStore implements ControlStore {
   readonly billingRates = new Map<string, BillingRateRecord>();
   readonly creditHolds = new Map<string, CreditHoldRecord>();
   readonly creditTransactions = new Map<string, CreditTransactionRecord>();
+  readonly alertDeliveries = new Map<string, AlertDeliveryRecord>();
   readonly adminRoles = new Map<string, AdminRoleRecord>([
     ['super_admin', role('super_admin', 'Super administrator', ALL_PERMISSIONS)],
     ['security_admin', role('security_admin', 'Security administrator', [
       'signing_key.read', 'signing_key.manage', 'identity.read', 'identity.manage',
       'approval.request', 'approval.read', 'approval.decide', 'backup.read',
+      'alert.read', 'alert.manage',
     ])],
     ['license_admin', role('license_admin', 'License administrator', [
       'customer.create', 'deployment.create', 'license.issue', 'license.read',
@@ -115,6 +124,7 @@ export class MemoryControlStore implements ControlStore {
     ['auditor', role('auditor', 'Auditor', [
       'license.read', 'license.usage.read', 'signing_key.read', 'telemetry.read', 'update_release.read',
       'identity.read', 'approval.read', 'backup.read',
+      'alert.read',
       'billing.read',
     ])],
   ]);
@@ -1506,6 +1516,134 @@ export class MemoryControlStore implements ControlStore {
         left.organizationId.localeCompare(right.organizationId) || left.module.localeCompare(right.module)
       )),
     };
+  }
+
+  async enqueueAlertDelivery(input: {
+    id: string;
+    source: AlertDeliveryRecord['source'];
+    eventType: AlertDeliveryRecord['eventType'];
+    fingerprint: string;
+    severity: AlertSeverity;
+    payload: AlertDeliveryPayload;
+    createdAt: Date;
+    audit: AuditEventInput;
+  }): Promise<{ record: AlertDeliveryRecord; created: boolean }> {
+    const existing = [...this.alertDeliveries.values()]
+      .find((delivery) => delivery.fingerprint === input.fingerprint);
+    if (existing) return { record: existing, created: false };
+    const { audit, ...deliveryInput } = input;
+    const record: AlertDeliveryRecord = {
+      ...deliveryInput,
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: input.createdAt,
+      leaseUntil: null,
+      lastError: null,
+      deliveredAt: null,
+      updatedAt: input.createdAt,
+    };
+    this.alertDeliveries.set(record.id, record);
+    this.audits.push(audit);
+    return { record, created: true };
+  }
+
+  async claimAlertDelivery(input: {
+    now: Date;
+    leaseUntil: Date;
+  }): Promise<AlertDeliveryRecord | null> {
+    const record = [...this.alertDeliveries.values()]
+      .filter((delivery) => (
+        (['pending', 'retrying'].includes(delivery.status)
+          && delivery.nextAttemptAt <= input.now)
+        || (delivery.status === 'delivering'
+          && delivery.leaseUntil !== null && delivery.leaseUntil <= input.now)
+      ))
+      .sort((left, right) => (
+        left.nextAttemptAt.getTime() - right.nextAttemptAt.getTime()
+        || left.createdAt.getTime() - right.createdAt.getTime()
+        || left.id.localeCompare(right.id)
+      ))[0];
+    if (!record) return null;
+    const claimed: AlertDeliveryRecord = {
+      ...record,
+      status: 'delivering',
+      attempts: record.attempts + 1,
+      leaseUntil: input.leaseUntil,
+      updatedAt: input.now,
+    };
+    this.alertDeliveries.set(claimed.id, claimed);
+    return claimed;
+  }
+
+  async finishAlertDelivery(input: {
+    id: string;
+    expectedLeaseUntil: Date;
+    status: Extract<AlertDeliveryStatus, 'delivered' | 'retrying' | 'failed'>;
+    nextAttemptAt: Date;
+    lastError: string | null;
+    deliveredAt: Date | null;
+    updatedAt: Date;
+    audit: AuditEventInput | null;
+  }): Promise<AlertDeliveryRecord | null> {
+    const record = this.alertDeliveries.get(input.id);
+    if (!record || record.status !== 'delivering'
+      || record.leaseUntil?.getTime() !== input.expectedLeaseUntil.getTime()) return null;
+    const { audit, expectedLeaseUntil: _expectedLeaseUntil, ...deliveryInput } = input;
+    void _expectedLeaseUntil;
+    const finished: AlertDeliveryRecord = {
+      ...record,
+      ...deliveryInput,
+      leaseUntil: null,
+    };
+    this.alertDeliveries.set(finished.id, finished);
+    if (audit) this.audits.push(audit);
+    return finished;
+  }
+
+  async listAlertDeliveries(limit: number): Promise<AlertDeliveryRecord[]> {
+    return [...this.alertDeliveries.values()]
+      .sort((left, right) => (
+        right.createdAt.getTime() - left.createdAt.getTime()
+        || right.id.localeCompare(left.id)
+      ))
+      .slice(0, limit);
+  }
+
+  async getAlertDelivery(id: string): Promise<AlertDeliveryRecord | null> {
+    return this.alertDeliveries.get(id) ?? null;
+  }
+
+  async retryAlertDelivery(input: {
+    id: string;
+    retriedAt: Date;
+    audit: AuditEventInput;
+  }): Promise<AlertDeliveryRecord | null> {
+    const record = this.alertDeliveries.get(input.id);
+    if (!record || record.status !== 'failed') return null;
+    const retried: AlertDeliveryRecord = {
+      ...record,
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: input.retriedAt,
+      leaseUntil: null,
+      lastError: null,
+      deliveredAt: null,
+      updatedAt: input.retriedAt,
+    };
+    this.alertDeliveries.set(retried.id, retried);
+    this.audits.push(input.audit);
+    return retried;
+  }
+
+  async pruneAlertDeliveries(before: Date): Promise<number> {
+    let deleted = 0;
+    for (const [id, delivery] of this.alertDeliveries) {
+      if (['delivered', 'failed'].includes(delivery.status) && delivery.updatedAt < before) {
+        this.alertDeliveries.delete(id);
+        deleted += 1;
+      }
+    }
+    return deleted;
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

@@ -15,6 +15,12 @@ describe('control configuration', () => {
       trustProxy: false,
       backupReportDirectory: null,
       backupStatusMaximumAgeHours: 48,
+      alertWebhookUrl: null,
+      alertWebhookSecretFile: null,
+      alertPollIntervalMs: 60_000,
+      alertWebhookTimeoutMs: 10_000,
+      alertWebhookMaxAttempts: 8,
+      alertRetentionDays: 365,
     });
   });
 
@@ -39,6 +45,18 @@ describe('control configuration', () => {
     );
     expect(() => loadControlConfig({ CONTROL_BACKUP_STATUS_MAX_AGE_HOURS: '721' })).toThrow(
       'CONTROL_BACKUP_STATUS_MAX_AGE_HOURS must be between 1 and 720',
+    );
+    expect(() => loadControlConfig({ CONTROL_ALERT_WEBHOOK_URL: 'http://alerts.test' })).toThrow(
+      'CONTROL_ALERT_WEBHOOK_URL must use HTTPS',
+    );
+    expect(() => loadControlConfig({
+      CONTROL_ALERT_WEBHOOK_URL: 'https://alerts.example.test/hooks/otto',
+    })).toThrow('CONTROL_ALERT_WEBHOOK_SECRET_FILE is required');
+    expect(() => loadControlConfig({ CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS: '21' })).toThrow(
+      'CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS must be between 1 and 20',
+    );
+    expect(() => loadControlConfig({ CONTROL_ALERT_RETENTION_DAYS: '29' })).toThrow(
+      'CONTROL_ALERT_RETENTION_DAYS must be between 30 and 3650',
     );
   });
 

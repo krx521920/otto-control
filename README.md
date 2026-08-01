@@ -62,6 +62,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   immutable writes, remote SHA-256 verification, and bounded retries
 - RBAC-protected backup inventory with fresh, stale, missing, optional-failure,
   and required-failure states plus recovery alerts and bounded history parsing
+- PostgreSQL-backed outbound alert outbox with HMAC-signed HTTPS webhooks,
+  fingerprint deduplication, leased workers, bounded retries, and delivery audit
 
 ## Development
 
@@ -166,6 +168,33 @@ can inspect the latest result, bounded history, age, and recovery alerts through
 latest report fails visibly; optional off-site failures are degraded, while
 required off-site failures are failed.
 
+### Outbound recovery alerts
+
+Set `CONTROL_ALERT_WEBHOOK_URL` to an HTTPS endpoint to actively deliver backup
+recovery warnings and failures. Production bootstrap creates a separate webhook
+secret at `secrets/alert_webhook_secret`; the secret is mounted read-only and is
+never stored in PostgreSQL. When no URL is configured, the worker remains inert
+and the administrator status APIs continue to work without external traffic.
+
+Each condition is first committed to the PostgreSQL outbox and deduplicated by a
+SHA-256 condition fingerprint. Workers claim due rows with a lease, retry after
+30 seconds with exponential backoff capped at one hour, and stop after the
+configured attempt limit. Delivery state and audit records are updated in one
+database transaction. Delivery is intentionally at-least-once: a receiver must
+deduplicate `X-Otto-Alert-Id`, reject stale `X-Otto-Alert-Timestamp` values, and
+verify `X-Otto-Alert-Signature` in constant time. The signature is lowercase
+hex HMAC-SHA-256 over `timestamp + "\\n" + rawRequestBody`, prefixed with `v1=`.
+
+Webhook payloads contain only backup status, reason, age, generated backup name,
+alert codes, and timestamps. They do not contain database rows, credentials,
+local paths, customer content, chats, prompts, files, or backup bytes. A 2xx
+response acknowledges delivery; redirects and every other status are failures.
+Administrators with `alert.read` can inspect delivery history, while
+`alert.manage` is required to request an immediate poll or retry a terminally
+failed delivery. Delivered and terminally failed rows are retained for
+`CONTROL_ALERT_RETENTION_DAYS` and then pruned; pending work is never removed by
+retention cleanup.
+
 Restore requires the exact confirmation phrase:
 
 ```bash
@@ -204,7 +233,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.12.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.13.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -225,6 +254,12 @@ a misleading success report.
 | `CONTROL_BACKUP_RETENTION_DAYS` | `30` | Number of days encrypted local backups are retained |
 | `CONTROL_BACKUP_REPORT_DIR` | empty | Read-only directory containing backup inventory reports |
 | `CONTROL_BACKUP_STATUS_MAX_AGE_HOURS` | `48` | Maximum acceptable age of the latest completed backup report |
+| `CONTROL_ALERT_WEBHOOK_URL` | empty | HTTPS endpoint receiving signed operational alerts; empty disables delivery |
+| `CONTROL_ALERT_WEBHOOK_SECRET_FILE` | empty | Read-only file containing the webhook HMAC secret |
+| `CONTROL_ALERT_POLL_INTERVAL_MS` | `60000` | Background outbox polling interval, from 5 seconds to 1 hour |
+| `CONTROL_ALERT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-delivery timeout, from 500 to 30000 milliseconds |
+| `CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS` | `8` | Maximum delivery attempts before a terminal failure |
+| `CONTROL_ALERT_RETENTION_DAYS` | `365` | Days to retain delivered and terminally failed alert records |
 | `CONTROL_BACKUP_OFFSITE_REQUIRED` | `false` | Fail the scheduled backup when remote replication cannot be verified |
 | `CONTROL_BACKUP_S3_ENDPOINT` | empty | HTTPS origin for AWS S3, MinIO, or another S3-compatible service |
 | `CONTROL_BACKUP_S3_BUCKET` | empty | Bucket receiving encrypted backup objects |
@@ -508,6 +543,9 @@ POST /v1/admin/signing-keys/:keyId/revoke
 GET  /v1/signing-keyring
 GET  /v1/admin/deployments/:deploymentId/health?hours=24
 GET  /v1/admin/backups/status?limit=20
+GET  /v1/admin/alerts/deliveries?limit=50
+POST /v1/admin/alerts/poll
+POST /v1/admin/alerts/deliveries/:deliveryId/retry
 POST /v1/admin/update-distributions
 PUT  /v1/admin/deployments/:deploymentId/update-distribution
 POST /v1/admin/update-releases
@@ -537,11 +575,12 @@ Traefik
        -> update_policy (implemented foundation)
        -> release_artifacts (implemented foundation)
        -> backup_status (implemented foundation)
+       -> alert_delivery (implemented foundation)
        -> audit
 ```
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are an operator-facing administration UI, outbound alert delivery,
-vendor-specific signer-broker deployment recipes, and eventually the separate
-federation gateway.
+next phases are an operator-facing administration UI, multi-channel alert
+routing, vendor-specific signer-broker deployment recipes, and eventually the
+separate federation gateway.

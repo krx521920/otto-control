@@ -33,6 +33,7 @@ function main() {
     resolve(secretDirectory, 'control_token_secret'),
     resolve(secretDirectory, 'postgres_password'),
     resolve(secretDirectory, 'backup_encryption_key'),
+    resolve(secretDirectory, 'alert_webhook_secret'),
   ];
   const existing = targets.find(existsSync);
   if (existing) throw new Error(`refusing to overwrite existing production identity file: ${existing}`);
@@ -61,6 +62,7 @@ function main() {
   writeSecret(resolve(secretDirectory, 'control_token_secret'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'postgres_password'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'backup_encryption_key'), randomBytes(48).toString('base64url'));
+  writeSecret(resolve(secretDirectory, 'alert_webhook_secret'), randomBytes(48).toString('base64url'));
 
   const environment = [
     'NODE_ENV=production',
@@ -85,6 +87,12 @@ function main() {
     'CONTROL_BACKUP_RETENTION_DAYS=30',
     'CONTROL_BACKUP_REPORT_DIR=/var/lib/otto-control/backup-reports',
     'CONTROL_BACKUP_STATUS_MAX_AGE_HOURS=48',
+    'CONTROL_ALERT_WEBHOOK_URL=',
+    'CONTROL_ALERT_WEBHOOK_SECRET_FILE=/run/secrets/alert_webhook_secret',
+    'CONTROL_ALERT_POLL_INTERVAL_MS=60000',
+    'CONTROL_ALERT_WEBHOOK_TIMEOUT_MS=10000',
+    'CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS=8',
+    'CONTROL_ALERT_RETENTION_DAYS=365',
     'CONTROL_BACKUP_OFFSITE_REQUIRED=false',
     'CONTROL_BACKUP_S3_ENDPOINT=',
     'CONTROL_BACKUP_S3_BUCKET=',

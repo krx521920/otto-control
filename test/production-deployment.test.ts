@@ -24,6 +24,18 @@ describe('production deployment assets', () => {
     expect(compose).toContain('target: control_signer_private_key.pem');
     expect(compose).toContain('file: ./secrets/control_signer_private_key.pem');
     expect(compose).toContain('./secrets:/run/otto-secrets:ro');
+    expect(compose).toContain('- alert_webhook_secret');
+    expect(compose).toContain('file: ./secrets/alert_webhook_secret');
+    const postgresService = compose.slice(
+      compose.indexOf('  postgres:'),
+      compose.indexOf('  control:'),
+    );
+    const controlService = compose.slice(
+      compose.indexOf('  control:'),
+      compose.indexOf('  caddy:'),
+    );
+    expect(postgresService).not.toContain('alert_webhook_secret');
+    expect(controlService).toContain('- alert_webhook_secret');
     expect(compose).not.toMatch(/POSTGRES_PASSWORD:\s*[^\n]/u);
   });
 

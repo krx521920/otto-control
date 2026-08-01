@@ -22,6 +22,12 @@ const baseConfig: Readonly<ControlConfig> = {
   updatePolicyDurationMs: 300_000,
   backupReportDirectory: null,
   backupStatusMaximumAgeHours: 48,
+  alertWebhookUrl: null,
+  alertWebhookSecretFile: null,
+  alertPollIntervalMs: 60_000,
+  alertWebhookTimeoutMs: 10_000,
+  alertWebhookMaxAttempts: 8,
+  alertRetentionDays: 365,
 };
 
 describe('commercial control runtime configuration', () => {
