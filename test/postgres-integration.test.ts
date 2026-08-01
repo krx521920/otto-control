@@ -149,6 +149,12 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       leaseRequest,
       issued.license.leaseToken!,
     )).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(control.renewLicense(issued.license.id, {
+      expiresAt: '2028-08-01T10:00:00.000Z',
+      gracePeriodDays: 10,
+    }, 'admin:test')).resolves.toMatchObject({
+      license: { revision: 2, gracePeriodMs: 10 * 24 * 60 * 60 * 1000 },
+    });
 
     const audit = new AuditService({
       store,
@@ -181,7 +187,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       licenses: { total: 1, active: 1 },
     });
     await expect(service(reopened).licenseLifecycle(issued.license.id, 10)).resolves.toMatchObject([
-      { revision: 1, changeType: 'issued' },
+      { revision: 2, changeType: 'renewed' },
     ]);
   });
 
