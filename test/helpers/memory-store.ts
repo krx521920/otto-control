@@ -61,6 +61,7 @@ import type {
   AuditAnchorRecord,
   AuditAnchorStatus,
 } from '../../src/contracts/audit-anchor.js';
+import type { AuditWitnessReceiptRecord } from '../../src/contracts/audit-witness.js';
 import { AUDIT_GENESIS_HASH, auditEventHash } from '../../src/audit-chain.js';
 import { conflict } from '../../src/errors.js';
 
@@ -120,6 +121,7 @@ export class MemoryControlStore implements ControlStore {
   readonly creditTransactions = new Map<string, CreditTransactionRecord>();
   readonly alertDeliveries = new Map<string, AlertDeliveryRecord>();
   readonly auditAnchors = new Map<string, AuditAnchorRecord>();
+  readonly auditWitnessReceipts: AuditWitnessReceiptRecord[] = [];
   #auditHeadHash = AUDIT_GENESIS_HASH;
   readonly adminRoles = new Map<string, AdminRoleRecord>([
     ['super_admin', role('super_admin', 'Super administrator', ALL_PERMISSIONS)],
@@ -1885,6 +1887,46 @@ export class MemoryControlStore implements ControlStore {
         || right.id.localeCompare(left.id)
       ))
       .slice(0, limit);
+  }
+
+  async ingestAuditWitnessReceipt(input: {
+    record: AuditWitnessReceiptRecord;
+    audit: AuditEventInput;
+  }): Promise<{ record: AuditWitnessReceiptRecord; replayed: boolean }> {
+    const replay = this.auditWitnessReceipts.find((receipt) => (
+      receipt.sourceId === input.record.sourceId
+      && receipt.fingerprint === input.record.fingerprint
+    ));
+    if (replay) return { record: replay, replayed: true };
+    if (this.auditWitnessReceipts.some((receipt) => (
+      receipt.sourceId === input.record.sourceId && receipt.anchorId === input.record.anchorId
+    ))) throw conflict('audit witness anchor id was reused');
+    const latest = this.auditWitnessReceipts
+      .filter((receipt) => receipt.sourceId === input.record.sourceId)
+      .sort((left, right) => right.chainSequence - left.chainSequence)[0];
+    if (latest && input.record.chainSequence < latest.chainSequence) {
+      throw conflict('audit witness rejected a chain sequence rollback');
+    }
+    if (latest && input.record.chainSequence === latest.chainSequence
+      && input.record.headHash !== latest.headHash) {
+      throw conflict('audit witness detected conflicting heads at the same sequence');
+    }
+    this.auditWitnessReceipts.push(input.record);
+    this.#recordAudit(input.audit);
+    return { record: input.record, replayed: false };
+  }
+
+  async listAuditWitnessReceipts(input: {
+    sourceId?: string;
+    limit: number;
+  }): Promise<AuditWitnessReceiptRecord[]> {
+    return this.auditWitnessReceipts
+      .filter((receipt) => !input.sourceId || receipt.sourceId === input.sourceId)
+      .sort((left, right) => (
+        right.receivedAt.getTime() - left.receivedAt.getTime()
+        || right.id.localeCompare(left.id)
+      ))
+      .slice(0, input.limit);
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

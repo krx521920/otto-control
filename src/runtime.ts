@@ -11,6 +11,8 @@ import { BackupStatusService } from './modules/backup-status/service.js';
 import { AlertDeliveryService } from './modules/alert-delivery/service.js';
 import { AuditService } from './modules/audit/service.js';
 import { AuditAnchorService } from './modules/audit-anchor/service.js';
+import { AuditWitnessService } from './modules/audit-witness/service.js';
+import { loadAuditWitnessSources } from './modules/audit-witness/source-config.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 
 export interface CommercialControlRuntime {
@@ -24,6 +26,7 @@ export interface CommercialControlRuntime {
   alerts: AlertDeliveryService;
   audit?: AuditService;
   auditAnchors?: AuditAnchorService;
+  auditWitness?: AuditWitnessService;
 }
 
 function missingConfiguration(config: Readonly<ControlConfig>): string[] {
@@ -103,6 +106,10 @@ export async function createCommercialControlRuntime(
         pollIntervalMs: config.auditAnchorPollIntervalMs,
         timeoutMs: config.auditAnchorTimeoutMs,
         maxAttempts: config.auditAnchorMaxAttempts,
+      }),
+      auditWitness: new AuditWitnessService({
+        store,
+        sources: loadAuditWitnessSources(config.auditWitnessSourcesFile),
       }),
       service: new CommercialControlService({
         store,

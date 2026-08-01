@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "primary-control",
+      "issuer": "https://control.example.com",
+      "tokenFile": "source_primary_token",
+      "publicKeyFiles": [
+        "source_primary_current.pem",
+        "source_primary_next.pem"
+      ]
+    }
+  ]
+}

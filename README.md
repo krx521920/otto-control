@@ -68,6 +68,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   redaction, CSV evidence export, and Ed25519-signed integrity receipts
 - Durable external audit-anchor outbox with stable chain-head deduplication,
   leased workers, exponential retry, terminal-failure recovery, and destination status
+- Independently deployable audit witness with pinned rotating Ed25519 keys, isolated
+  source tokens, idempotent receipt storage, rollback detection, and fork rejection
 - Same-origin operator console with MFA login, RBAC-filtered commercial inventory,
   customer/deployment/License onboarding, renewal, seat management, immutable
   lifecycle history, dual-control review and execution, backup readiness, alert
@@ -235,6 +237,26 @@ preferably in immutable or append-only storage. A 2xx response acknowledges
 delivery; an optional `X-Otto-Audit-Anchor-Reference` response header is retained
 as the external object or receipt identifier.
 
+An Otto Control instance can run as the independent receiver by setting
+`CONTROL_AUDIT_WITNESS_SOURCES_FILE`. Copy
+`deploy/audit-witness-sources.example.json` into its read-only secrets directory,
+create a separate 32-byte source token file, and pin one or more Ed25519 public
+key files exported by the sending control plane. Paths in the manifest resolve
+relative to the manifest. Multiple public keys allow a controlled rotation window.
+Point the sender's `CONTROL_AUDIT_ANCHOR_URL` at
+`https://WITNESS/v1/audit-witness/anchors` and give it the matching token.
+
+The receiver verifies source authentication, issuer, receipt structure, stable
+fingerprint, signing-key allowlist, Ed25519 signature, clock skew, and sequence
+consistency before writing. Replays are idempotent; a lower sequence, reused
+anchor ID, or different head at the same sequence is rejected. Deploy the witness
+on a separate host, database, administrator boundary, and preferably append-only
+storage. Pointing a control plane at itself validates the protocol but does not
+protect against that host's superuser. A later higher-sequence receipt proves a
+new signed state but, without exporting sensitive event preimages, cannot by
+itself mathematically prove every intermediate event extends an earlier head;
+retain and periodically compare all witness receipts.
+
 Restore requires the exact confirmation phrase:
 
 ```bash
@@ -273,7 +295,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.20.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.21.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -307,6 +329,7 @@ a misleading success report.
 | `CONTROL_AUDIT_ANCHOR_POLL_INTERVAL_MS` | `60000` | Background anchor outbox polling interval, from 5 seconds to 1 hour |
 | `CONTROL_AUDIT_ANCHOR_TIMEOUT_MS` | `10000` | Per-delivery timeout, from 500 to 30000 milliseconds |
 | `CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS` | `8` | Maximum delivery attempts before a terminal failure |
+| `CONTROL_AUDIT_WITNESS_SOURCES_FILE` | empty | Version 1 trusted-source manifest for an independent witness receiver |
 | `CONTROL_BACKUP_OFFSITE_REQUIRED` | `false` | Fail the scheduled backup when remote replication cannot be verified |
 | `CONTROL_BACKUP_S3_ENDPOINT` | empty | HTTPS origin for AWS S3, MinIO, or another S3-compatible service |
 | `CONTROL_BACKUP_S3_BUCKET` | empty | Bucket receiving encrypted backup objects |
@@ -660,6 +683,8 @@ POST /v1/admin/audit/verify
 GET  /v1/admin/audit/anchors?limit=50
 POST /v1/admin/audit/anchors/poll
 POST /v1/admin/audit/anchors/:anchorId/retry
+POST /v1/audit-witness/anchors
+GET  /v1/admin/audit-witness/receipts?sourceId=primary-control&limit=50
 POST /v1/admin/update-distributions
 PUT  /v1/admin/deployments/:deploymentId/update-distribution
 POST /v1/admin/update-releases
@@ -693,9 +718,10 @@ Traefik
        -> operator_console (implemented onboarding, License lifecycle, and dual control)
        -> audit (implemented query, export, and signed integrity verification)
        -> audit_anchor (implemented durable external evidence delivery)
+       -> audit_witness (implemented independent verification and receipt retention)
 ```
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are vendor-specific signer-broker deployment recipes, an independently
-deployable audit witness receiver, and eventually the separate federation gateway.
+next phases are vendor-specific signer-broker deployment recipes, append-only
+witness-storage adapters, and eventually the separate federation gateway.

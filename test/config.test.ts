@@ -28,6 +28,7 @@ describe('control configuration', () => {
       auditAnchorPollIntervalMs: 60_000,
       auditAnchorTimeoutMs: 10_000,
       auditAnchorMaxAttempts: 8,
+      auditWitnessSourcesFile: null,
     });
   });
 

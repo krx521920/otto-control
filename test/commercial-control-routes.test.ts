@@ -1,11 +1,11 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildControlApp } from '../src/app.js';
 import type { ControlConfig } from '../src/config.js';
-import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import { canonicalJson, LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
 import { ManagedSigningKeyring } from '../src/crypto/signing-keyring.js';
 import {
   signTelemetryRequest,
@@ -22,9 +22,11 @@ import { BackupStatusService } from '../src/modules/backup-status/service.js';
 import { AlertDeliveryService } from '../src/modules/alert-delivery/service.js';
 import { AuditService } from '../src/modules/audit/service.js';
 import { AuditAnchorService } from '../src/modules/audit-anchor/service.js';
+import { AuditWitnessService } from '../src/modules/audit-witness/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
 const ADMIN_TOKEN = 'test-admin-token-that-is-at-least-32-bytes';
+const WITNESS_TOKEN = 'test-witness-source-token-that-is-at-least-32-bytes';
 const config: Readonly<ControlConfig> = {
   environment: 'test',
   host: '127.0.0.1',
@@ -57,6 +59,7 @@ const config: Readonly<ControlConfig> = {
   auditAnchorPollIntervalMs: 60_000,
   auditAnchorTimeoutMs: 10_000,
   auditAnchorMaxAttempts: 8,
+  auditWitnessSourcesFile: null,
 };
 
 describe('commercial control HTTP routes', () => {
@@ -66,6 +69,7 @@ describe('commercial control HTTP routes', () => {
   let adminSessionToken: string;
   let securitySessionToken: string;
   let auditorSessionToken: string;
+  let auditService: AuditService;
 
   beforeEach(async () => {
     const keys = generateKeyPairSync('ed25519');
@@ -144,6 +148,7 @@ describe('commercial control HTTP routes', () => {
       signer: keyring,
       issuer: config.publicBaseUrl!,
     });
+    auditService = audit;
     app = await buildControlApp({
       config,
       logger: false,
@@ -155,6 +160,15 @@ describe('commercial control HTTP routes', () => {
         alerts,
         audit,
         auditAnchors: new AuditAnchorService({ store, audit }),
+        auditWitness: new AuditWitnessService({
+          store,
+          sources: [{
+            id: 'test-control',
+            issuer: config.publicBaseUrl!,
+            tokenHash: createHash('sha256').update(WITNESS_TOKEN).digest(),
+            publicKeys: new Map([[signer.keyId, signer.publicKey]]),
+          }],
+        }),
         service,
         billing: new BillingService({ store, tokenIssuer }),
         updatePolicy: new UpdatePolicyService({
@@ -262,6 +276,7 @@ describe('commercial control HTTP routes', () => {
       'dual_control_approval',
       'tamper_evident_audit',
       'external_audit_anchoring',
+      'external_audit_witness',
       'credit_billing',
       'billing_statement_export',
     ]);
@@ -338,6 +353,45 @@ describe('commercial control HTTP routes', () => {
     });
     expect(anchorPoll.statusCode).toBe(200);
     expect(anchorPoll.json()).toMatchObject({ enabled: false, processed: 0 });
+
+    const evidence = await auditService.verify();
+    const witnessFingerprint = createHash('sha256').update(canonicalJson({
+      issuer: evidence.receipt.issuer,
+      lastSequence: evidence.receipt.lastSequence,
+      headHash: evidence.receipt.headHash,
+    })).digest('hex');
+    const witnessIngest = await app.inject({
+      method: 'POST',
+      url: '/v1/audit-witness/anchors',
+      headers: { authorization: `Bearer ${WITNESS_TOKEN}` },
+      payload: {
+        version: 1,
+        anchorId: `anchor_${'1'.padStart(32, '0')}`,
+        fingerprint: witnessFingerprint,
+        evidence,
+      },
+    });
+    expect(witnessIngest.statusCode).toBe(201);
+    expect(witnessIngest.headers['x-otto-audit-anchor-reference']).toMatch(/^witness_/u);
+
+    const witnessReceipts = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/audit-witness/receipts',
+      headers: { authorization: `Bearer ${auditorSessionToken}` },
+    });
+    expect(witnessReceipts.statusCode).toBe(200);
+    expect(witnessReceipts.json()).toMatchObject({
+      enabled: true,
+      sources: [{ id: 'test-control', issuer: config.publicBaseUrl }],
+      receipts: [{ sourceId: 'test-control', fingerprint: witnessFingerprint }],
+    });
+    const rejectedWitnessIngest = await app.inject({
+      method: 'POST',
+      url: '/v1/audit-witness/anchors',
+      headers: { authorization: 'Bearer untrusted-source' },
+      payload: {},
+    });
+    expect(rejectedWitnessIngest.statusCode).toBe(401);
 
     const operatorPage = await app.inject({ method: 'GET', url: '/admin' });
     expect(operatorPage.statusCode).toBe(200);

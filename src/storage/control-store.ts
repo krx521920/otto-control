@@ -47,6 +47,7 @@ import type {
   AuditAnchorRecord,
   AuditAnchorStatus,
 } from '../contracts/audit-anchor.js';
+import type { AuditWitnessReceiptRecord } from '../contracts/audit-witness.js';
 
 export type RecordStatus = 'active' | 'suspended';
 
@@ -607,5 +608,13 @@ export interface ControlStore {
     audit: AuditEventInput;
   }): Promise<AuditAnchorRecord | null>;
   listAuditAnchors(limit: number): Promise<AuditAnchorRecord[]>;
+  ingestAuditWitnessReceipt(input: {
+    record: AuditWitnessReceiptRecord;
+    audit: AuditEventInput;
+  }): Promise<{ record: AuditWitnessReceiptRecord; replayed: boolean }>;
+  listAuditWitnessReceipts(input: {
+    sourceId?: string;
+    limit: number;
+  }): Promise<AuditWitnessReceiptRecord[]>;
   appendAuditEvent(input: AuditEventInput): Promise<void>;
 }

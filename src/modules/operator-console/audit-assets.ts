@@ -102,6 +102,23 @@ async function refreshAuditAnchors() {
     list.append(item);
   });
   if (!data.anchors.length) { const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = '尚无外部锚定记录。'; list.append(empty); }
+  await refreshAuditWitness();
+}
+async function refreshAuditWitness() {
+  const data = await request('/v1/admin/audit-witness/receipts?limit=10');
+  setText('audit-witness-sources', data.enabled ? ('可信来源：' + data.sources.map((source) => source.id).join('、')) : '尚未配置可信来源');
+  const list = byId('audit-witness-list'); list.replaceChildren();
+  data.receipts.forEach((receipt) => {
+    const item = document.createElement('div'); item.className = 'audit-anchor-item';
+    const identity = document.createElement('div');
+    const hash = document.createElement('code'); hash.textContent = receipt.headHash;
+    const metadata = document.createElement('small'); metadata.textContent = receipt.sourceId + ' · ' + localTime(receipt.receivedAt);
+    identity.append(hash, metadata);
+    const sequence = document.createElement('span'); sequence.className = 'status-pill good'; sequence.textContent = '链序号 #' + receipt.chainSequence;
+    const key = document.createElement('small'); key.textContent = '密钥 ' + receipt.signingKeyId;
+    item.append(identity, sequence, key); list.append(item);
+  });
+  if (!data.receipts.length) { const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = '尚未收到独立见证回执。'; list.append(empty); }
 }
 async function pollAuditAnchors() {
   const button = byId('poll-audit-anchors'); button.disabled = true;

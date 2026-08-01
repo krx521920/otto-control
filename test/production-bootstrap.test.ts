@@ -62,6 +62,7 @@ describe('production bootstrap', () => {
       expect(environment).toContain(
         'CONTROL_AUDIT_ANCHOR_TOKEN_FILE=/run/secrets/audit_anchor_token',
       );
+      expect(environment).toContain('CONTROL_AUDIT_WITNESS_SOURCES_FILE=');
       expect(environment).toContain('CONTROL_BACKUP_S3_ADDRESSING_STYLE=path');
       expect(environment).not.toMatch(/CONTROL_BACKUP_S3_SECRET_ACCESS_KEY=[^\n]+/u);
       expect(environment).not.toContain(adminToken);

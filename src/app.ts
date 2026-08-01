@@ -17,6 +17,7 @@ import { registerAlertDeliveryRoutes } from './routes/alert-delivery.js';
 import { registerOperatorConsoleRoutes } from './routes/operator-console.js';
 import { registerAuditRoutes } from './routes/audit.js';
 import { registerAuditAnchorRoutes } from './routes/audit-anchor.js';
+import { registerAuditWitnessRoutes } from './routes/audit-witness.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
@@ -166,6 +167,13 @@ export async function buildControlApp(
       capabilities.push('external_audit_anchoring');
       await registerAuditAnchorRoutes(app, {
         service: commercialControl.auditAnchors,
+        identity: commercialControl.identity,
+      });
+    }
+    if (commercialControl.auditWitness) {
+      capabilities.push('external_audit_witness');
+      await registerAuditWitnessRoutes(app, {
+        service: commercialControl.auditWitness,
         identity: commercialControl.identity,
       });
     }

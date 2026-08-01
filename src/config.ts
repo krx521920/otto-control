@@ -35,6 +35,7 @@ export interface ControlConfig {
   auditAnchorPollIntervalMs: number;
   auditAnchorTimeoutMs: number;
   auditAnchorMaxAttempts: number;
+  auditWitnessSourcesFile: string | null;
 }
 
 const LOG_LEVELS = new Set<ControlLogLevel>([
@@ -302,7 +303,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.20.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.21.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -381,5 +382,6 @@ export function loadControlConfig(
       20,
       'CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS',
     ),
+    auditWitnessSourcesFile: env.CONTROL_AUDIT_WITNESS_SOURCES_FILE?.trim() || null,
   });
 }

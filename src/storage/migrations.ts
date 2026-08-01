@@ -705,6 +705,29 @@ const MIGRATIONS: Migration[] = [
        ON CONFLICT DO NOTHING`,
     ],
   },
+  {
+    id: '018_audit_witness_receipts',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_audit_witness_receipts (
+        id TEXT PRIMARY KEY CHECK (id ~ '^witness_[a-f0-9]{32}$'),
+        source_id TEXT NOT NULL CHECK (source_id ~ '^[a-z][a-z0-9_-]{1,63}$'),
+        anchor_id TEXT NOT NULL CHECK (anchor_id ~ '^anchor_[a-f0-9]{32}$'),
+        fingerprint TEXT NOT NULL CHECK (fingerprint ~ '^[a-f0-9]{64}$'),
+        issuer TEXT NOT NULL,
+        chain_sequence BIGINT NOT NULL CHECK (chain_sequence >= 0),
+        head_hash TEXT NOT NULL CHECK (head_hash ~ '^[a-f0-9]{64}$'),
+        signing_key_id TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        received_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (source_id, anchor_id),
+        UNIQUE (source_id, fingerprint)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_audit_witness_source_sequence
+       ON control_audit_witness_receipts(source_id, chain_sequence DESC, received_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_audit_witness_received
+       ON control_audit_witness_receipts(received_at DESC, id DESC)`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

@@ -80,6 +80,7 @@ import type {
   AuditAnchorRecord,
   AuditAnchorStatus,
 } from '../contracts/audit-anchor.js';
+import type { AuditWitnessReceiptRecord } from '../contracts/audit-witness.js';
 import { runMigrations } from './migrations.js';
 
 const { Pool } = pg;
@@ -388,6 +389,19 @@ interface AuditAnchorRow {
   updated_at: Date;
 }
 
+interface AuditWitnessReceiptRow {
+  id: string;
+  source_id: string;
+  anchor_id: string;
+  fingerprint: string;
+  issuer: string;
+  chain_sequence: string;
+  head_hash: string;
+  signing_key_id: string;
+  payload: AuditAnchorPayload;
+  received_at: Date;
+}
+
 interface CommercialInventoryCountRow {
   customer_total: string;
   customer_active: string;
@@ -663,6 +677,21 @@ function auditAnchorFromRow(row: AuditAnchorRow): AuditAnchorRecord {
     remoteReference: row.remote_reference,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function auditWitnessReceiptFromRow(row: AuditWitnessReceiptRow): AuditWitnessReceiptRecord {
+  return {
+    id: row.id,
+    sourceId: row.source_id,
+    anchorId: row.anchor_id,
+    fingerprint: row.fingerprint,
+    issuer: row.issuer,
+    chainSequence: Number(row.chain_sequence),
+    headHash: row.head_hash,
+    signingKeyId: row.signing_key_id,
+    payload: row.payload,
+    receivedAt: row.received_at,
   };
 }
 
@@ -3667,6 +3696,93 @@ export class PostgresControlStore implements ControlStore {
       [limit],
     );
     return result.rows.map(auditAnchorFromRow);
+  }
+
+  async ingestAuditWitnessReceipt(input: {
+    record: AuditWitnessReceiptRecord;
+    audit: AuditEventInput;
+  }): Promise<{ record: AuditWitnessReceiptRecord; replayed: boolean }> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext('otto_control_audit_witness:' || $1))",
+        [input.record.sourceId],
+      );
+      const replay = await client.query<AuditWitnessReceiptRow>(
+        `SELECT * FROM control_audit_witness_receipts
+         WHERE source_id = $1 AND fingerprint = $2`,
+        [input.record.sourceId, input.record.fingerprint],
+      );
+      if (replay.rows[0]) {
+        await client.query('COMMIT');
+        return { record: auditWitnessReceiptFromRow(replay.rows[0]), replayed: true };
+      }
+      const reusedAnchorId = await client.query<{ id: string }>(
+        `SELECT id FROM control_audit_witness_receipts
+         WHERE source_id = $1 AND anchor_id = $2`,
+        [input.record.sourceId, input.record.anchorId],
+      );
+      if (reusedAnchorId.rows[0]) throw conflict('audit witness anchor id was reused');
+      const latest = await client.query<{ chain_sequence: string; head_hash: string }>(
+        `SELECT chain_sequence, head_hash FROM control_audit_witness_receipts
+         WHERE source_id = $1 ORDER BY chain_sequence DESC, received_at DESC LIMIT 1`,
+        [input.record.sourceId],
+      );
+      if (latest.rows[0]) {
+        const latestSequence = Number(latest.rows[0].chain_sequence);
+        if (input.record.chainSequence < latestSequence) {
+          throw conflict('audit witness rejected a chain sequence rollback');
+        }
+        if (input.record.chainSequence === latestSequence
+          && input.record.headHash !== latest.rows[0].head_hash) {
+          throw conflict('audit witness detected conflicting heads at the same sequence');
+        }
+      }
+      const inserted = await client.query<AuditWitnessReceiptRow>(
+        `INSERT INTO control_audit_witness_receipts
+          (id, source_id, anchor_id, fingerprint, issuer, chain_sequence, head_hash,
+           signing_key_id, payload, received_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+         RETURNING *`,
+        [
+          input.record.id,
+          input.record.sourceId,
+          input.record.anchorId,
+          input.record.fingerprint,
+          input.record.issuer,
+          input.record.chainSequence,
+          input.record.headHash,
+          input.record.signingKeyId,
+          JSON.stringify(input.record.payload),
+          input.record.receivedAt,
+        ],
+      );
+      await appendChainedAuditEvent(client, input.audit);
+      await client.query('COMMIT');
+      return { record: auditWitnessReceiptFromRow(inserted.rows[0]!), replayed: false };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listAuditWitnessReceipts(input: {
+    sourceId?: string;
+    limit: number;
+  }): Promise<AuditWitnessReceiptRecord[]> {
+    const values: unknown[] = [];
+    const where = input.sourceId ? 'WHERE source_id = $1' : '';
+    if (input.sourceId) values.push(input.sourceId);
+    values.push(input.limit);
+    const result = await this.#pool.query<AuditWitnessReceiptRow>(
+      `SELECT * FROM control_audit_witness_receipts ${where}
+       ORDER BY received_at DESC, id DESC LIMIT $${values.length}`,
+      values,
+    );
+    return result.rows.map(auditWitnessReceiptFromRow);
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

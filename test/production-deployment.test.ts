@@ -12,6 +12,10 @@ describe('production deployment assets', () => {
     expect(ignore).toContain('secrets');
     expect(ignore).toContain('.env.*');
     expect(ignore).toContain('*.pem');
+    expect(JSON.parse(repositoryFile('deploy/audit-witness-sources.example.json'))).toMatchObject({
+      version: 1,
+      sources: [{ id: 'primary-control' }],
+    });
   });
 
   it('isolates PostgreSQL and hardens the control runtime', () => {
