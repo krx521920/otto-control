@@ -7,6 +7,26 @@ function repositoryFile(path: string): string {
 }
 
 describe('production deployment assets', () => {
+  it('runs immutable, least-privilege GitHub quality and container gates', () => {
+    const workflow = repositoryFile('.github/workflows/ci.yml');
+    expect(workflow).toContain('pull_request:');
+    expect(workflow).toContain('push:');
+    expect(workflow).toContain('contents: read');
+    expect(workflow).toContain('cancel-in-progress: true');
+    expect(workflow).toContain('npm ci');
+    expect(workflow).toContain('npm run check');
+    expect(workflow).toContain('git diff --check');
+    expect(workflow).toContain('needs: quality');
+    expect(workflow).toContain('docker build --tag otto-control:ci .');
+    expect(workflow).toContain(
+      'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683',
+    );
+    expect(workflow).toContain(
+      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+    );
+    expect(workflow).not.toMatch(/permissions:\s*write-all/u);
+  });
+
   it('keeps credentials out of the image build context', () => {
     const ignore = repositoryFile('.dockerignore');
     expect(ignore).toContain('secrets');

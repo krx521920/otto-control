@@ -11,6 +11,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 
 - TypeScript and Node.js 22
 - Fastify 5 with a 1 MB default body limit
+- GitHub CI for locked dependency installation, lint, type checking, tests,
+  production compilation, whitespace validation, and production container builds
 - Versioned `/v1` API surface
 - Liveness and readiness endpoints
 - Generated request IDs and a stable JSON error envelope
@@ -99,6 +101,12 @@ Run all local gates:
 ```bash
 npm run check
 ```
+
+The same gates run automatically for every pull request targeting `main` and
+every push to `main`. The container job starts only after source quality gates
+pass, so a green workflow proves both the TypeScript application and the
+production Dockerfile build from the committed lockfile. GitHub Actions use
+read-only repository permissions and are pinned to immutable commits.
 
 ## Production Compose deployment
 
