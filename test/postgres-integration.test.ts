@@ -110,8 +110,24 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       const migrations = await pool.query<{ id: string }>(
         'SELECT id FROM control_schema_migrations ORDER BY id',
       );
-      expect(migrations.rows.at(-1)?.id).toBe('018_audit_witness_receipts');
+      expect(migrations.rows.at(-1)?.id).toBe('019_license_billing_enforcement');
       expect(new Set(migrations.rows.map((row) => row.id)).size).toBe(migrations.rows.length);
+      const billingPolicyColumn = await pool.query<{
+        column_name: string;
+        column_default: string;
+        is_nullable: string;
+      }>(
+        `SELECT column_name, column_default, is_nullable
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'control_licenses'
+           AND column_name = 'billing_enforcement'`,
+      );
+      expect(billingPolicyColumn.rows[0]).toMatchObject({
+        column_name: 'billing_enforcement',
+        is_nullable: 'NO',
+      });
+      expect(billingPolicyColumn.rows[0]?.column_default).toContain('disabled');
       const tables = await pool.query<{ licenses: string; billing: string; witness: string }>(
         `SELECT
           to_regclass('public.control_licenses')::text AS licenses,
