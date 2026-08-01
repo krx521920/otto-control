@@ -8,6 +8,7 @@ import type {
   AdminPrincipal,
   AdminRoleRecord,
 } from '../../contracts/admin-identity.js';
+import { ADMIN_APPROVAL_OPERATIONS } from '../../contracts/admin-identity.js';
 import { canonicalJson } from '../../crypto/signed-envelope.js';
 import {
   approvalRequired,
@@ -33,9 +34,9 @@ import {
 
 const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{2,63}$/u;
 const ROLE_PATTERN = /^[a-z][a-z0-9_]{2,63}$/u;
-const OPERATION_PATTERN = /^[a-z][a-z0-9_.:-]{2,127}$/u;
 const MAX_FAILED_LOGINS = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const MAX_APPROVAL_REQUEST_BYTES = 16 * 1024;
 
 function id(prefix: string): string {
   return `${prefix}_${randomUUID().replace(/-/gu, '')}`;
@@ -54,6 +55,37 @@ function requiredText(value: string, name: string, maxLength: number): string {
   if (!result) throw invalidRequest(`${name} is required`);
   if (result.length > maxLength) throw invalidRequest(`${name} is too long`);
   return result;
+}
+
+const APPROVAL_REQUEST_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  'license.revoke': [],
+  'license.transfer_machine': ['machineFingerprint'],
+  'license.rebind_deployment': ['deploymentId'],
+  'signing_key.activate': [],
+  'signing_key.retire': [],
+  'signing_key.revoke': ['replacementKeyId', 'reason'],
+  'update_release.activate': [],
+  'update_release.rollback': [],
+  'release_artifact.revoke': ['reason'],
+  'billing.rate.set': ['module', 'unitSize', 'creditsPerUnit'],
+  'billing.topup': ['amount', 'idempotencyKey', 'referenceId', 'description'],
+  'billing.refund': ['amount', 'idempotencyKey', 'transactionId', 'referenceId', 'description'],
+};
+
+function approvalRequestSnapshot(operation: string, value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw invalidRequest('approval request must be an object');
+  }
+  const source = value as Record<string, unknown>;
+  const snapshot = Object.fromEntries(
+    APPROVAL_REQUEST_FIELDS[operation]!.filter((key) => source[key] !== undefined)
+      .map((key) => [key, source[key]]),
+  );
+  const serialized = canonicalJson(snapshot);
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_APPROVAL_REQUEST_BYTES) {
+    throw invalidRequest('approval request exceeds 16 KiB');
+  }
+  return JSON.parse(serialized) as Record<string, unknown>;
 }
 
 function validatePassword(password: string): void {
@@ -384,15 +416,30 @@ export class AdminIdentityService {
     const operation = requiredText(input.operation, 'operation', 128);
     const targetType = requiredText(input.targetType, 'targetType', 80);
     const targetId = requiredText(input.targetId, 'targetId', 160);
-    if (!OPERATION_PATTERN.test(operation)) throw invalidRequest('operation is invalid');
+    if (!(ADMIN_APPROVAL_OPERATIONS as readonly string[]).includes(operation)) {
+      throw invalidRequest('operation is not eligible for approval');
+    }
+    const request = approvalRequestSnapshot(operation, input.request);
     const now = new Date(this.#now());
+    const requestHash = this.approvalHash({ operation, targetType, targetId, request });
+    const duplicate = (await this.#store.listAdminApprovals(500)).find((approval) => (
+      approval.requesterAccountId === principal.accountId &&
+      approval.operation === operation &&
+      approval.targetType === targetType &&
+      approval.targetId === targetId &&
+      approval.requestHash === requestHash &&
+      ['pending', 'approved'].includes(approval.status) &&
+      approval.expiresAt > now
+    ));
+    if (duplicate) throw conflict(`matching approval is already ${duplicate.status}`);
     const approval = await this.#store.createAdminApproval({
       id: id('apr'),
       requesterAccountId: principal.accountId,
       operation,
       targetType,
       targetId,
-      requestHash: this.approvalHash({ operation, targetType, targetId, request: input.request }),
+      requestHash,
+      request,
       requiredApprovals: 1,
       expiresAt: new Date(now.getTime() + this.#approvalDurationMs),
       createdAt: now,

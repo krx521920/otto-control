@@ -689,6 +689,7 @@ export class MemoryControlStore implements ControlStore {
     targetType: string;
     targetId: string;
     requestHash: string;
+    request: Record<string, unknown>;
     requiredApprovals: number;
     expiresAt: Date;
     createdAt: Date;

@@ -600,7 +600,14 @@ const MIGRATIONS: Migration[] = [
       `INSERT INTO control_admin_role_permissions (role_id, permission_id)
        SELECT role_id, 'license.export'
        FROM (VALUES ('super_admin'), ('license_admin')) AS roles(role_id)
-       ON CONFLICT DO NOTHING`,
+      ON CONFLICT DO NOTHING`,
+    ],
+  },
+  {
+    id: '014_approval_request_snapshot',
+    statements: [
+      `ALTER TABLE control_admin_approvals
+       ADD COLUMN IF NOT EXISTS request_payload JSONB NOT NULL DEFAULT '{}'::jsonb`,
     ],
   },
 ];

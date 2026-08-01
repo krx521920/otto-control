@@ -33,6 +33,21 @@ export const ADMIN_PERMISSIONS = [
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];
 export type AdminAccountStatus = 'pending' | 'active' | 'disabled';
 export type AdminApprovalStatus = 'pending' | 'approved' | 'rejected' | 'executed' | 'expired';
+export const ADMIN_APPROVAL_OPERATIONS = [
+  'license.revoke',
+  'license.transfer_machine',
+  'license.rebind_deployment',
+  'signing_key.activate',
+  'signing_key.retire',
+  'signing_key.revoke',
+  'update_release.activate',
+  'update_release.rollback',
+  'release_artifact.revoke',
+  'billing.rate.set',
+  'billing.topup',
+  'billing.refund',
+] as const;
+export type AdminApprovalOperation = (typeof ADMIN_APPROVAL_OPERATIONS)[number];
 
 export interface AdminAccountRecord {
   id: string;
@@ -96,6 +111,7 @@ export interface AdminApprovalRecord {
   targetType: string;
   targetId: string;
   requestHash: string;
+  request: Record<string, unknown>;
   status: AdminApprovalStatus;
   requiredApprovals: number;
   approvalCount: number;

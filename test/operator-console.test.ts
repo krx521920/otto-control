@@ -54,6 +54,11 @@ describe('operator console assets', () => {
     expect(response.body).toContain("'/resize'");
     expect(response.body).toContain("hasPermission('license.manage')");
     expect(response.body).toContain("hasPermission('license.usage.read')");
+    expect(response.body).toContain('/v1/admin/approvals?limit=50');
+    expect(response.body).toContain("'x-otto-approval-id': approval.id");
+    expect(response.body).toContain("operation: 'license.revoke'");
+    expect(response.body).toContain("hasPermission('approval.decide')");
+    expect(response.body).toContain('approval.request || {}');
     expect(response.body).toContain('URL.createObjectURL(blob)');
     expect(response.body).toContain('otto-license-');
   });

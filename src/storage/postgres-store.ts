@@ -192,6 +192,7 @@ interface AdminApprovalRow {
   target_type: string;
   target_id: string;
   request_hash: string;
+  request_payload: Record<string, unknown>;
   status: AdminApprovalStatus;
   required_approvals: number;
   approval_count: number | string;
@@ -496,6 +497,7 @@ function adminApprovalFromRow(row: AdminApprovalRow): AdminApprovalRecord {
     targetType: row.target_type,
     targetId: row.target_id,
     requestHash: row.request_hash,
+    request: row.request_payload,
     status: row.status,
     requiredApprovals: row.required_approvals,
     approvalCount: Number(row.approval_count),
@@ -1702,6 +1704,7 @@ export class PostgresControlStore implements ControlStore {
     targetType: string;
     targetId: string;
     requestHash: string;
+    request: Record<string, unknown>;
     requiredApprovals: number;
     expiresAt: Date;
     createdAt: Date;
@@ -1710,8 +1713,8 @@ export class PostgresControlStore implements ControlStore {
       `WITH inserted AS (
          INSERT INTO control_admin_approvals
            (id, requester_account_id, operation, target_type, target_id, request_hash,
-            required_approvals, expires_at, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+            request_payload, required_approvals, expires_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $10)
          RETURNING *
        )
        SELECT inserted.*, 0 AS approval_count FROM inserted`,
@@ -1722,6 +1725,7 @@ export class PostgresControlStore implements ControlStore {
         input.targetType,
         input.targetId,
         input.requestHash,
+        JSON.stringify(input.request),
         input.requiredApprovals,
         input.expiresAt,
         input.createdAt,

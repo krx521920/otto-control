@@ -103,8 +103,28 @@ describe('administrator identity service', () => {
       operation: 'signing_key.revoke',
       targetType: 'signing_key',
       targetId: 'fedcba9876543210',
-      request,
+      request: { ...request, prompt: 'must never enter approval storage' },
     });
+    expect(approval.request).toEqual(request);
+    expect(approval.request).not.toHaveProperty('prompt');
+    await expect(fixture.identity.requestApproval(fixture.session.principal, {
+      operation: 'signing_key.revoke',
+      targetType: 'signing_key',
+      targetId: 'fedcba9876543210',
+      request,
+    })).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(fixture.identity.requestApproval(fixture.session.principal, {
+      operation: 'unknown.operation',
+      targetType: 'unknown',
+      targetId: 'unknown_target',
+      request: {},
+    })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(fixture.identity.requestApproval(fixture.session.principal, {
+      operation: 'signing_key.revoke',
+      targetType: 'signing_key',
+      targetId: 'fedcba9876543210',
+      request: { reason: 'x'.repeat(17 * 1024) },
+    })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
     await expect(fixture.identity.decideApproval(
       fixture.session.principal,
       approval.id,

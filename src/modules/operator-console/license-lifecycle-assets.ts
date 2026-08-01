@@ -109,6 +109,8 @@ function renderLicenseHistory(events, readable) {
 function configureLifecycleForms(detail) {
   const canManage = hasPermission('license.manage') && detail.state !== 'revoked';
   byId('license-manage-actions').classList.toggle('hidden', !canManage);
+  const canRequestRevocation = hasPermission('license.revoke') && hasPermission('approval.request') && detail.state !== 'revoked';
+  byId('license-danger-actions').classList.toggle('hidden', !canRequestRevocation);
   if (!canManage) return;
   const dayMs = 24 * 60 * 60 * 1000;
   const expiresAtMs = Date.parse(detail.expiresAt);

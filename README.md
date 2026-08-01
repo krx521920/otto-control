@@ -66,7 +66,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   fingerprint deduplication, leased workers, bounded retries, and delivery audit
 - Same-origin operator console with MFA login, RBAC-filtered commercial inventory,
   customer/deployment/License onboarding, renewal, seat management, immutable
-  lifecycle history, backup readiness, alert retry, strict CSP, and tab-scoped sessions
+  lifecycle history, dual-control review and execution, backup readiness, alert
+  retry, strict CSP, and tab-scoped sessions
 
 ## Development
 
@@ -236,7 +237,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.16.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.17.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -383,7 +384,10 @@ High-risk operations require another administrator. The requester first calls
 body. A different account with `approval.decide` approves it. The requester then
 repeats the protected call with `X-Otto-Approval-Id`. The approval is bound to a
 canonical SHA-256 request digest, expires after thirty minutes, rejects
-self-approval, and is consumed once. Supported protected operation names are:
+self-approval, and is consumed once. A normalized request snapshot is persisted
+for the reviewer, but each operation has an explicit field allowlist and a
+16 KiB limit so this channel cannot be used to store customer content. Supported
+protected operation names are:
 
 ```text
 license.revoke
@@ -394,6 +398,10 @@ signing_key.retire
 signing_key.revoke
 update_release.activate
 update_release.rollback
+release_artifact.revoke
+billing.rate.set
+billing.topup
+billing.refund
 ```
 
 ### Operator console
@@ -417,6 +425,14 @@ immutable revision history. `license.manage` adds renewal and seat/policy forms;
 offline Licenses remain locked to monitor mode. Revoked Licenses are read-only.
 The complete signed envelope endpoint requires the separate `license.export`
 permission, which is intentionally not granted to the read-only auditor role.
+
+The approval center lists pending and historical high-risk operations. A second
+administrator with `approval.decide` sees the normalized request snapshot and
+can approve or reject with a reason; self-approval is unavailable. The original
+requester can execute an approved operation once, after which the approval is
+atomically marked `executed`. License revocation requests can be created directly
+from the License lifecycle dialog, and the generic executor covers every
+server-supported approval operation.
 
 Newly issued or updated signed License envelopes, including their derived
 deployment credentials, exist only in page memory and can be downloaded as JSON
@@ -617,12 +633,11 @@ Traefik
        -> release_artifacts (implemented foundation)
        -> backup_status (implemented foundation)
        -> alert_delivery (implemented foundation)
-       -> operator_console (implemented onboarding and License lifecycle foundation)
+       -> operator_console (implemented onboarding, License lifecycle, and dual control)
        -> audit
 ```
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are dual-approval workflows in the operator console, multi-channel
-alert routing, vendor-specific signer-broker deployment recipes, and eventually
-the separate federation gateway.
+next phases are multi-channel alert routing, vendor-specific signer-broker
+deployment recipes, and eventually the separate federation gateway.

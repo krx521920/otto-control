@@ -73,6 +73,12 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
         <div id="customers-panel" class="table-panel hidden" role="tabpanel"><table><thead><tr><th>客户</th><th>客户 ID</th><th>状态</th><th>更新时间</th></tr></thead><tbody id="customers-body"></tbody></table></div>
       </section>
 
+      <section id="approval-center" class="section-block hidden">
+        <div class="section-heading"><div><p class="section-label">DUAL CONTROL</p><h2>高风险操作审批</h2></div><span id="approval-pending-count" class="status-pill neutral">0 项待处理</span></div>
+        <p class="inline-message">申请人与复核人必须是不同管理员；批准结果与请求内容绑定，且只能执行一次。</p>
+        <div class="table-panel"><table class="approval-table"><thead><tr><th>操作</th><th>目标</th><th>申请人</th><th>状态</th><th>有效期</th><th>下一步</th></tr></thead><tbody id="approvals-body"></tbody></table></div>
+      </section>
+
       <section class="operations-grid">
         <div class="section-block">
           <div class="section-heading"><div><p class="section-label">RECOVERY READINESS</p><h2>备份状态</h2></div><span id="backup-state" class="status-pill neutral">读取中</span></div>
@@ -165,7 +171,15 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
         <form id="license-renew-form" class="lifecycle-form"><h3>续期</h3><label>新到期日期<input id="license-renew-expiry" type="date" required></label><label>到期宽限期（天）<input id="license-renew-grace" type="number" min="0" max="30" required></label><p class="form-error" role="alert"></p><button class="primary compact" type="submit">生成续期授权</button></form>
         <form id="license-resize-form" class="lifecycle-form"><h3>席位与策略</h3><label>授权席位<input id="license-resize-seats" type="number" min="1" max="100000" required></label><label>席位策略<select id="license-resize-enforcement"><option value="monitor">仅监测</option><option value="enforce">超额限制</option></select></label><label>超额宽限期（天）<input id="license-resize-grace" type="number" min="0" max="30" required></label><p class="form-error" role="alert"></p><button class="primary compact" type="submit">生成调整授权</button></form>
       </section>
+      <section id="license-danger-actions" class="lifecycle-section danger-zone hidden"><div><h3>吊销授权</h3><p>吊销会使在线部署在下一次租约刷新时失去授权，需要另一位管理员批准。</p></div><button id="request-license-revoke" class="danger-button" type="button">申请吊销</button></section>
     </div>
+  </dialog>
+
+  <dialog id="approval-decision-dialog" class="action-dialog wide">
+    <div class="dialog-heading"><div><p class="section-label">SECOND REVIEW</p><h2 id="approval-decision-title">复核高风险操作</h2></div><button class="icon-close" data-close="approval-decision-dialog" type="button" aria-label="关闭">×</button></div>
+    <dl class="license-summary"><div><dt>操作</dt><dd id="approval-operation">-</dd></div><div><dt>目标</dt><dd id="approval-target">-</dd></div><div><dt>申请人</dt><dd id="approval-requester">-</dd></div><div><dt>审批到期</dt><dd id="approval-expiry">-</dd></div></dl>
+    <section class="lifecycle-section"><h3>请求内容</h3><pre id="approval-request-payload" class="approval-payload">{}</pre></section>
+    <form id="approval-decision-form"><label>复核说明<textarea id="approval-reason" maxlength="500" rows="3" placeholder="批准时可选；拒绝时必须填写原因"></textarea></label><p class="form-error" role="alert"></p><div class="dialog-actions"><button id="reject-approval" class="danger-button" type="button">拒绝</button><button id="approve-approval" class="primary compact" type="button">批准</button></div></form>
   </dialog>
 
   <div id="toast" class="toast hidden" role="status"></div>
@@ -475,6 +489,7 @@ async function refreshDashboard() {
     permissionAware('/v1/admin/alerts/deliveries?limit=20', renderAlerts, (message) => {
       const list = byId('alert-list'); list.textContent = message;
     }),
+    refreshApprovals(),
   ]);
   if (state.token) setStatus(byId('service-state'), '已连接', 'good');
 }
