@@ -208,6 +208,7 @@ describe('production deployment assets', () => {
     expect(backup).toContain('--type="$TYPE" backup');
     expect(backup).toContain('otto-pgbackrest --stanza=otto-control check');
     expect(pitr).toContain('postgres-pitr-drill');
+    expect(pitr).toContain('--cmd=/usr/local/bin/otto-pgbackrest');
     expect(pitr).toContain('--type=time --target="$PITR_TARGET"');
     expect(pitr).toContain('CONTROL_PITR_MAX_BACKUP_AGE_HOURS');
     expect(pitr).toContain('backup_age_seconds');

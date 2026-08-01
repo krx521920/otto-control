@@ -115,9 +115,11 @@ if DRILL_OUTPUT=$(compose --profile ops exec -T --user postgres -e PITR_TARGET="
     chmod 0700 "$PGDATA"
     if [ -n "$PITR_TARGET" ]; then
       otto-pgbackrest --stanza=otto-control \
+        --cmd=/usr/local/bin/otto-pgbackrest \
         --type=time --target="$PITR_TARGET" --target-action=promote restore
     else
       otto-pgbackrest --stanza=otto-control \
+        --cmd=/usr/local/bin/otto-pgbackrest \
         --type=immediate --target-action=promote restore
     fi
     pg_ctl -D "$PGDATA" \
