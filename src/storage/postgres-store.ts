@@ -88,6 +88,7 @@ const { Pool } = pg;
 interface PostgresStoreOptions {
   connectionString: string;
   ssl: boolean;
+  onPoolError?: (error: Error) => void;
 }
 
 interface CustomerRow {
@@ -826,6 +827,10 @@ export class PostgresControlStore implements ControlStore {
       connectionTimeoutMillis: 10_000,
       ssl: options.ssl ? { rejectUnauthorized: true } : false,
     });
+    // node-postgres emits idle-client failures on the Pool. Without a listener,
+    // a primary failover becomes an uncaught EventEmitter error and terminates
+    // the whole Control process instead of allowing the pool to reconnect.
+    pool.on('error', (error) => options.onPoolError?.(error));
     const client = await pool.connect();
     let migrationError: unknown;
     try {

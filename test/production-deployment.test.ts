@@ -199,6 +199,7 @@ describe('production deployment assets', () => {
     const backup = repositoryFile('deploy/backup-pitr-postgres.sh');
     const pitr = repositoryFile('deploy/drill-pitr-postgres.sh');
     const failover = repositoryFile('deploy/drill-postgres-failover.sh');
+    const postgresStore = repositoryFile('src/storage/postgres-store.ts');
     expect(backup).toContain('--type="$TYPE" backup');
     expect(backup).toContain('otto-pgbackrest --stanza=otto-control check');
     expect(pitr).toContain('postgres-pitr-drill');
@@ -207,9 +208,10 @@ describe('production deployment assets', () => {
     expect(pitr).toContain('backup_age_seconds');
     expect(pitr).toContain('control_schema_migrations');
     expect(failover).toContain('--confirm=FAILOVER_OTTO_CONTROL');
-    expect(failover).toContain('compose stop "$OLD_PRIMARY"');
+    expect(failover).toContain('compose kill -s SIGKILL "$OLD_PRIMARY"');
     expect(failover).toContain('CREATE TEMP TABLE otto_control_failover_probe');
     expect(failover).toContain('former_primary_rejoined=true');
+    expect(postgresStore).toContain("pool.on('error'");
     expect(repositoryFile('deploy/systemd/otto-control-pitr-full.timer')).toContain(
       'Persistent=true',
     );

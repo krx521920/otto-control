@@ -54,6 +54,15 @@ export async function createCommercialControlRuntime(
   const store = await PostgresControlStore.connect({
     connectionString: config.databaseUrl!,
     ssl: config.databaseSsl,
+    onPoolError: (error) => {
+      process.stderr.write(
+        `${JSON.stringify({
+          level: 'error',
+          event: 'postgres_idle_client_error',
+          message: error.message,
+        })}\n`,
+      );
+    },
   });
   try {
     // Local files should be read-only secret mounts. KMS/HSM adapters implement

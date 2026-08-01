@@ -57,7 +57,10 @@ trap cleanup EXIT HUP INT TERM
 
 STARTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 STARTED_SECONDS=$(date '+%s')
-compose stop "$OLD_PRIMARY"
+# A hard kill models the unplanned process/host failure that Patroni is
+# expected to recover from. A graceful PostgreSQL stop writes a final shutdown
+# checkpoint after replication disconnects and is a switchover, not a failover.
+compose kill -s SIGKILL "$OLD_PRIMARY"
 
 ATTEMPT=0
 NEW_PRIMARY=''
