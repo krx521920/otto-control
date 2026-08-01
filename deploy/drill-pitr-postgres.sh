@@ -74,7 +74,7 @@ DRILL_STARTED=true
 STARTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 STARTED_SECONDS=$(date '+%s')
 
-LATEST_BACKUP_SECONDS=$(compose --profile ops exec -T postgres-pitr-drill sh -ec '
+LATEST_BACKUP_SECONDS=$(compose --profile ops exec -T --user postgres postgres-pitr-drill sh -ec '
   otto-pgbackrest --stanza=otto-control --output=json info |
     python3 /usr/local/bin/otto-pgbackrest-latest-backup
 ')
@@ -86,7 +86,7 @@ if [ "$BACKUP_AGE_SECONDS" -lt 0 ] || [ "$BACKUP_AGE_SECONDS" -gt "$MAX_BACKUP_A
   exit 1
 fi
 
-DRILL_OUTPUT=$(compose --profile ops exec -T -e PITR_TARGET="$TARGET" postgres-pitr-drill \
+DRILL_OUTPUT=$(compose --profile ops exec -T --user postgres -e PITR_TARGET="$TARGET" postgres-pitr-drill \
   sh -ec '
     pg_ctl -D "$PGDATA" -m immediate stop >/dev/null 2>&1 || true
     find "$PGDATA" -mindepth 1 -delete

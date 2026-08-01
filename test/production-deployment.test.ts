@@ -110,7 +110,24 @@ describe('production deployment assets', () => {
     const dockerfile = repositoryFile('Dockerfile');
     expect(compose).toContain('"443:443"');
     expect(compose).not.toContain('"7788:7788"');
-    expect(dockerfile).toContain('USER node');
+    expect(dockerfile).toContain('ENTRYPOINT ["/usr/local/bin/otto-control-entrypoint"]');
+    const entrypoint = repositoryFile('deploy/control-entrypoint.sh');
+    expect(entrypoint).toContain('exec su-exec node "$@"');
+    expect(entrypoint).toContain('/run/otto-runtime-secrets');
+    expect(compose).toContain('/run/otto-runtime-secrets:rw,noexec,nosuid');
+  });
+
+  it('stages host-only production secrets before dropping container privileges', () => {
+    const compose = repositoryFile('compose.production.yaml');
+    const patroni = repositoryFile('deploy/postgres-ha/patroni-entrypoint.sh');
+    const control = repositoryFile('deploy/control-entrypoint.sh');
+    const pitr = repositoryFile('deploy/drill-pitr-postgres.sh');
+    expect(patroni).toContain('stage_secret /run/secrets/postgres_password');
+    expect(patroni).toContain('PGBACKREST_CIPHER_FILE=/run/patroni/pgbackrest_cipher_pass');
+    expect(control).toContain('CONTROL_DATABASE_PASSWORD_FILE');
+    expect(control).toContain('CONTROL_SIGNER_KEYRING_FILE');
+    expect(compose).toContain('exec gosu postgres tail -f /dev/null');
+    expect(pitr).toContain('--user postgres postgres-pitr-drill');
   });
 
   it('creates atomic verified backups and requires a safety backup before restore', () => {

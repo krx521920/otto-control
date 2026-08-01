@@ -1,6 +1,7 @@
 name: otto-control
 
 x-postgres-common: &postgres-common
+  image: ${POSTGRES_HA_IMAGE:-otto-control-postgres-ha:local}
   build:
     context: .
     dockerfile: deploy/postgres-ha/Dockerfile
@@ -31,7 +32,7 @@ x-postgres-common: &postgres-common
   read_only: true
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=32m
-    - /run/patroni:rw,noexec,nosuid,size=2m
+    - /run/patroni:rw,noexec,nosuid,size=2m,mode=0700
     - /var/run/postgresql:rw,noexec,nosuid,size=2m
     - /var/log/pgbackrest:rw,noexec,nosuid,size=16m
   security_opt:
@@ -64,6 +65,7 @@ x-control-common: &control-common
   read_only: true
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=32m
+    - /run/otto-runtime-secrets:rw,noexec,nosuid,size=1m,uid=1000,gid=1000,mode=0700
   networks:
     - backend
     - edge
@@ -71,6 +73,9 @@ x-control-common: &control-common
     - no-new-privileges:true
   cap_drop:
     - ALL
+  cap_add:
+    - SETGID
+    - SETUID
 
 services:
   etcd-1:
@@ -194,7 +199,7 @@ services:
     security_opt: [no-new-privileges:true]
 
   postgres-tools:
-    image: postgres:17-alpine
+    image: ${POSTGRES_HA_IMAGE:-otto-control-postgres-ha:local}
     restart: unless-stopped
     depends_on:
       postgres-router:
@@ -205,14 +210,15 @@ services:
       PGPASSFILE: /tmp/.pgpass
       PGPORT: "5432"
       PGUSER: ${POSTGRES_USER:-otto_control}
-    user: postgres
+    user: root
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
         password="$$(cat /run/secrets/postgres_password)"
-        printf '%s:%s:%s:%s:%s\n' "$$PGHOST" "$$PGPORT" "$$PGDATABASE" "$$PGUSER" "$$password" > "$$PGPASSFILE"
-        chmod 0600 "$$PGPASSFILE"
-        exec tail -f /dev/null
+        printf '%s:%s:%s:%s:%s\n' "$$PGHOST" "$$PGPORT" "$$PGDATABASE" "$$PGUSER" "$$password" |
+          gosu postgres sh -c 'umask 077; cat > "$$PGPASSFILE"'
+        unset password
+        exec gosu postgres tail -f /dev/null
     secrets: [postgres_password]
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=1m,mode=1777
@@ -224,6 +230,7 @@ services:
     networks: [backend]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    cap_add: [SETGID, SETUID]
 
   control-a:
     <<: *control-common
@@ -254,22 +261,29 @@ services:
     build:
       context: .
       dockerfile: deploy/postgres-ha/Dockerfile
-    entrypoint: [tail, -f, /dev/null]
-    user: postgres
+    entrypoint: ["/bin/sh", "-ec"]
+    user: root
     read_only: true
     environment:
       PGDATA: /var/lib/postgresql/data/pgdata
+      PGBACKREST_CIPHER_FILE: /run/patroni/pgbackrest_cipher_pass
+    command:
+      - |
+        gosu postgres sh -c 'umask 077; cat > /run/patroni/pgbackrest_cipher_pass' < /run/secrets/pgbackrest_cipher_pass
+        exec gosu postgres tail -f /dev/null
     secrets: [pgbackrest_cipher_pass]
     volumes:
       - postgres_pitr_drill_data:/var/lib/postgresql/data
       - pgbackrest_repository:/var/lib/pgbackrest:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
+      - /run/patroni:rw,noexec,nosuid,size=1m,uid=999,gid=999,mode=0700
       - /var/run/postgresql:rw,noexec,nosuid,size=2m,mode=1777
       - /var/log/pgbackrest:rw,noexec,nosuid,size=16m,mode=1777
     networks: [database]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    cap_add: [SETGID, SETUID]
 
 secrets:
   control_admin_token:

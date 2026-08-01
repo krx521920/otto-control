@@ -48,6 +48,18 @@ chown -R postgres:postgres \
   /var/run/postgresql \
   /run/patroni
 
+stage_secret() {
+  source_path=$1
+  target_path=$2
+  gosu postgres sh -c 'umask 077; cat > "$1"' sh "$target_path" < "$source_path"
+}
+
+POSTGRES_APP_PASSWORD_FILE=/run/patroni/postgres_password
+PGBACKREST_CIPHER_FILE=/run/patroni/pgbackrest_cipher_pass
+stage_secret /run/secrets/postgres_password "$POSTGRES_APP_PASSWORD_FILE"
+stage_secret /run/secrets/pgbackrest_cipher_pass "$PGBACKREST_CIPHER_FILE"
+export POSTGRES_APP_PASSWORD_FILE PGBACKREST_CIPHER_FILE
+
 cat > /run/patroni/patroni.yml <<EOF
 scope: otto-control
 namespace: /service/
