@@ -33,6 +33,14 @@ export const OPERATOR_CONSOLE_WRITE_CSS = `.write-actions { display: flex; flex-
 
 export const OPERATOR_CONSOLE_WRITE_JS = `let latestOverview = null;
 let lastLicenseEnvelope = null;
+function presentLicenseEnvelope(result, title) {
+  lastLicenseEnvelope = result;
+  setText('issued-result-title', title || '授权文件已生成');
+  setText('issued-license-id', result.license.id);
+  setText('issued-customer', result.license.customerName);
+  setText('issued-expiry', localTime(result.license.expiresAtMs));
+  byId('license-result-dialog').showModal();
+}
 function hasPermission(permission) {
   return Boolean(state.principal && state.principal.permissions.includes(permission));
 }
@@ -160,12 +168,8 @@ byId('license-form').addEventListener('submit', async (event) => {
       offline: byId('license-offline').checked,
       telemetryAllowed: byId('license-telemetry').checked,
     }) });
-    lastLicenseEnvelope = result;
-    setText('issued-license-id', result.license.id);
-    setText('issued-customer', result.license.customerName);
-    setText('issued-expiry', localTime(result.license.expiresAtMs));
     closeDialog('license-dialog');
-    byId('license-result-dialog').showModal();
+    presentLicenseEnvelope(result, '授权签发成功');
     await refreshDashboard();
   });
 });

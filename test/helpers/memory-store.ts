@@ -61,6 +61,7 @@ const role = (
 
 const ALL_PERMISSIONS: AdminPermission[] = [
   'commercial.read', 'customer.create', 'deployment.create', 'license.issue', 'license.read',
+  'license.export',
   'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
   'signing_key.read', 'signing_key.manage', 'telemetry.read',
   'backup.read',
@@ -114,6 +115,7 @@ export class MemoryControlStore implements ControlStore {
     ])],
     ['license_admin', role('license_admin', 'License administrator', [
       'commercial.read', 'customer.create', 'deployment.create', 'license.issue', 'license.read',
+      'license.export',
       'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
       'telemetry.read', 'approval.request', 'approval.read',
       'billing.read', 'billing.topup', 'billing.manage', 'billing.refund',

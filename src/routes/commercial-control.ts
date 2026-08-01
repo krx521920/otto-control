@@ -102,9 +102,17 @@ export async function registerCommercialControlRoutes(
     );
 
     admin.get<{ Params: { licenseId: string } }>('/licenses/:licenseId', async (request) => {
-      await authenticateAdmin(request, options, 'license.read');
+      await authenticateAdmin(request, options, 'license.export');
       return options.service.getLicenseEnvelope(request.params.licenseId);
     });
+
+    admin.get<{ Params: { licenseId: string } }>(
+      '/licenses/:licenseId/summary',
+      async (request) => {
+        await authenticateAdmin(request, options, 'license.read');
+        return { license: await options.service.operatorLicenseDetail(request.params.licenseId) };
+      },
+    );
 
     admin.post<{ Params: { licenseId: string } }>(
       '/licenses/:licenseId/renew',

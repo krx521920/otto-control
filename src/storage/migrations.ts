@@ -589,6 +589,17 @@ const MIGRATIONS: Migration[] = [
       `INSERT INTO control_admin_role_permissions (role_id, permission_id)
        SELECT role_id, 'commercial.read'
        FROM (VALUES ('super_admin'), ('license_admin'), ('auditor')) AS roles(role_id)
+      ON CONFLICT DO NOTHING`,
+    ],
+  },
+  {
+    id: '013_license_export_permission',
+    statements: [
+      `INSERT INTO control_admin_permissions (id) VALUES ('license.export')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT role_id, 'license.export'
+       FROM (VALUES ('super_admin'), ('license_admin')) AS roles(role_id)
        ON CONFLICT DO NOTHING`,
     ],
   },

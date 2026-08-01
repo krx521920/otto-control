@@ -4,6 +4,7 @@ export const ADMIN_PERMISSIONS = [
   'deployment.create',
   'license.issue',
   'license.read',
+  'license.export',
   'license.revoke',
   'license.manage',
   'license.transfer',

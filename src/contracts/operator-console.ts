@@ -32,6 +32,15 @@ export interface OperatorLicenseView {
   updatedAt: string;
 }
 
+export interface OperatorLicenseDetail extends OperatorLicenseView {
+  revision: number;
+  issuedAt: string;
+  gracePeriodDays: number;
+  seatEnforcement: 'monitor' | 'enforce';
+  modules: string[];
+  telemetryAllowed: boolean;
+}
+
 export interface OperatorOverview {
   generatedAt: string;
   counts: {

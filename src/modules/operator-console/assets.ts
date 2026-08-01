@@ -68,7 +68,7 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
           <button class="tab" data-tab="deployments" role="tab" type="button">部署</button>
           <button class="tab" data-tab="customers" role="tab" type="button">客户</button>
         </div>
-        <div id="licenses-panel" class="table-panel" role="tabpanel"><table><thead><tr><th>客户</th><th>方案</th><th>席位</th><th>方式</th><th>状态</th><th>到期时间</th></tr></thead><tbody id="licenses-body"></tbody></table></div>
+        <div id="licenses-panel" class="table-panel" role="tabpanel"><table><thead><tr><th>客户</th><th>方案</th><th>席位</th><th>方式</th><th>状态</th><th>到期时间</th><th>操作</th></tr></thead><tbody id="licenses-body"></tbody></table></div>
         <div id="deployments-panel" class="table-panel hidden" role="tabpanel"><table><thead><tr><th>部署</th><th>客户</th><th>企业 ID</th><th>状态</th><th>更新时间</th></tr></thead><tbody id="deployments-body"></tbody></table></div>
         <div id="customers-panel" class="table-panel hidden" role="tabpanel"><table><thead><tr><th>客户</th><th>客户 ID</th><th>状态</th><th>更新时间</th></tr></thead><tbody id="customers-body"></tbody></table></div>
       </section>
@@ -123,7 +123,7 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
         <label>部署 ID<input id="license-deployment" list="deployment-options" required></label>
         <label>版本方案<select id="license-plan"><option value="basic">基础版</option><option value="enterprise" selected>企业版</option><option value="park">产业园版</option><option value="government">政企版</option></select></label>
         <label>到期日期<input id="license-expiry" type="date" required></label>
-        <label>授权席位<input id="license-seats" type="number" min="1" max="1000000" value="50" required></label>
+        <label>授权席位<input id="license-seats" type="number" min="1" max="100000" value="50" required></label>
         <label>宽限期（天）<input id="license-grace" type="number" min="0" max="30" value="7" required></label>
         <label>席位策略<select id="license-seat-enforcement"><option value="monitor">仅监测</option><option value="enforce">超额限制</option></select></label>
       </div>
@@ -143,10 +143,29 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
   </dialog>
 
   <dialog id="license-result-dialog" class="action-dialog">
-    <div class="dialog-heading"><div><p class="section-label">ISSUED</p><h2>授权签发成功</h2></div><button class="icon-close" data-close="license-result-dialog" type="button" aria-label="关闭">×</button></div>
+    <div class="dialog-heading"><div><p class="section-label">SIGNED LICENSE</p><h2 id="issued-result-title">授权文件已生成</h2></div><button class="icon-close" data-close="license-result-dialog" type="button" aria-label="关闭">×</button></div>
     <div class="issued-summary"><span>License ID</span><strong id="issued-license-id">-</strong><span>客户</span><strong id="issued-customer">-</strong><span>到期时间</span><strong id="issued-expiry">-</strong></div>
     <p class="sensitive-note">授权文件包含部署凭证，仅在本次页面会话中保留。请下载后交付给对应客户。</p>
     <div class="dialog-actions"><button class="secondary" data-close="license-result-dialog" type="button">关闭</button><button id="download-license" class="primary compact" type="button">下载授权文件</button></div>
+  </dialog>
+
+  <dialog id="license-lifecycle-dialog" class="action-dialog wide lifecycle-dialog">
+    <div class="dialog-heading"><div><p class="section-label">LICENSE LIFECYCLE</p><h2 id="lifecycle-title">License 详情</h2></div><button class="icon-close" data-close="license-lifecycle-dialog" type="button" aria-label="关闭">×</button></div>
+    <p id="lifecycle-loading" class="inline-message">正在读取授权状态...</p>
+    <div id="lifecycle-content" class="hidden">
+      <dl class="license-summary">
+        <div><dt>License ID</dt><dd id="lifecycle-id">-</dd></div><div><dt>当前版本</dt><dd id="lifecycle-revision">-</dd></div>
+        <div><dt>客户</dt><dd id="lifecycle-customer">-</dd></div><div><dt>部署</dt><dd id="lifecycle-deployment">-</dd></div>
+        <div><dt>到期时间</dt><dd id="lifecycle-expiry">-</dd></div><div><dt>授权方式</dt><dd id="lifecycle-mode">-</dd></div>
+      </dl>
+      <section class="lifecycle-section"><h3>授权模块</h3><div id="lifecycle-modules" class="module-tags"></div></section>
+      <section class="lifecycle-section"><div class="subheading"><h3>席位使用</h3><span id="lifecycle-seat-status" class="status-pill neutral">读取中</span></div><dl class="license-summary compact"><div><dt>活跃席位</dt><dd id="lifecycle-active-seats">-</dd></div><div><dt>授权席位</dt><dd id="lifecycle-seat-limit">-</dd></div><div><dt>宽限截止</dt><dd id="lifecycle-seat-grace">-</dd></div><div><dt>最近上报</dt><dd id="lifecycle-seat-reported">-</dd></div></dl></section>
+      <section class="lifecycle-section"><h3>变更历史</h3><div id="lifecycle-history" class="lifecycle-history"></div></section>
+      <section id="license-manage-actions" class="lifecycle-section manage-grid hidden">
+        <form id="license-renew-form" class="lifecycle-form"><h3>续期</h3><label>新到期日期<input id="license-renew-expiry" type="date" required></label><label>到期宽限期（天）<input id="license-renew-grace" type="number" min="0" max="30" required></label><p class="form-error" role="alert"></p><button class="primary compact" type="submit">生成续期授权</button></form>
+        <form id="license-resize-form" class="lifecycle-form"><h3>席位与策略</h3><label>授权席位<input id="license-resize-seats" type="number" min="1" max="100000" required></label><label>席位策略<select id="license-resize-enforcement"><option value="monitor">仅监测</option><option value="enforce">超额限制</option></select></label><label>超额宽限期（天）<input id="license-resize-grace" type="number" min="0" max="30" required></label><p class="form-error" role="alert"></p><button class="primary compact" type="submit">生成调整授权</button></form>
+      </section>
+    </div>
   </dialog>
 
   <div id="toast" class="toast hidden" role="status"></div>
@@ -356,10 +375,16 @@ function renderOverview(data) {
   licenseBody.replaceChildren();
   data.recent.licenses.slice(0, 12).forEach((license) => {
     const row = document.createElement('tr');
-    addCells(row, [license.customerName, license.plan, license.seatLimit, license.offline ? '离线' : '在线', badge(licenseLabels[license.state], licenseTone(license.state)), localTime(license.expiresAt)]);
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'table-action';
+    action.textContent = hasPermission('license.manage') ? '管理' : '查看';
+    action.disabled = !hasPermission('license.read');
+    if (!action.disabled) action.addEventListener('click', () => openLicenseLifecycle(license.id));
+    addCells(row, [license.customerName, license.plan, license.seatLimit, license.offline ? '离线' : '在线', badge(licenseLabels[license.state], licenseTone(license.state)), localTime(license.expiresAt), action]);
     licenseBody.append(row);
   });
-  if (!data.recent.licenses.length) emptyRow(licenseBody, 6, '暂无 License');
+  if (!data.recent.licenses.length) emptyRow(licenseBody, 7, '暂无 License');
 
   const deploymentBody = byId('deployments-body');
   deploymentBody.replaceChildren();

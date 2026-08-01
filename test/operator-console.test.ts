@@ -1,3 +1,5 @@
+import vm from 'node:vm';
+
 import Fastify from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -31,6 +33,7 @@ describe('operator console assets', () => {
     const response = await app.inject({ method: 'GET', url: '/admin/assets/app.js' });
     expect(response.statusCode).toBe(200);
     expect(response.headers['content-type']).toContain('text/javascript');
+    expect(() => new vm.Script(response.body)).not.toThrow();
     expect(response.body).toContain('sessionStorage');
     expect(response.body).not.toContain('localStorage');
     expect(response.body).not.toContain('innerHTML');
@@ -44,6 +47,13 @@ describe('operator console assets', () => {
     expect(response.body).toContain("request('/v1/admin/customers', { method: 'POST'");
     expect(response.body).toContain("request('/v1/admin/deployments', { method: 'POST'");
     expect(response.body).toContain("request('/v1/admin/licenses', { method: 'POST'");
+    expect(response.body).toContain("'/summary'");
+    expect(response.body).toContain("'/lifecycle?limit=50'");
+    expect(response.body).toContain("'/seats'");
+    expect(response.body).toContain("'/renew'");
+    expect(response.body).toContain("'/resize'");
+    expect(response.body).toContain("hasPermission('license.manage')");
+    expect(response.body).toContain("hasPermission('license.usage.read')");
     expect(response.body).toContain('URL.createObjectURL(blob)');
     expect(response.body).toContain('otto-license-');
   });

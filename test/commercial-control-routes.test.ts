@@ -56,6 +56,7 @@ describe('commercial control HTTP routes', () => {
   let standbyKeyId: string;
   let adminSessionToken: string;
   let securitySessionToken: string;
+  let auditorSessionToken: string;
 
   beforeEach(async () => {
     const keys = generateKeyPairSync('ed25519');
@@ -102,6 +103,17 @@ describe('commercial control HTTP routes', () => {
       accountId: securityEnrollment.account.id,
       enrollmentToken: securityEnrollment.enrollmentToken,
       totpCode: generateTotpCode(securityEnrollment.mfaSecret),
+    })).token;
+    const auditorEnrollment = await identity.createAccount(adminSession.principal, {
+      username: 'audit.admin',
+      displayName: 'Audit Admin',
+      password: 'SecureControl2026',
+      roleIds: ['auditor'],
+    });
+    auditorSessionToken = (await identity.confirmEnrollment({
+      accountId: auditorEnrollment.account.id,
+      enrollmentToken: auditorEnrollment.enrollmentToken,
+      totpCode: generateTotpCode(auditorEnrollment.mfaSecret),
     })).token;
     const service = new CommercialControlService({
       store,
@@ -460,6 +472,39 @@ describe('commercial control HTTP routes', () => {
     expect(licenseResponse.json().signingKeyId).toMatch(/^[a-f0-9]{16}$/u);
     const license = licenseResponse.json().license as Record<string, unknown>;
 
+    const summaryResponse = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/licenses/${license.id as string}/summary`,
+      headers: authorization,
+    });
+    expect(summaryResponse.statusCode).toBe(200);
+    expect(summaryResponse.json().license).toMatchObject({
+      id: license.id,
+      revision: 1,
+      deploymentId: license.deploymentId,
+      seatLimit: 100,
+      modules: ['enterprise_tree', 'direct_messages'],
+      state: 'active',
+    });
+    expect(summaryResponse.json().license).not.toHaveProperty('machineFingerprint');
+    expect(summaryResponse.json().license).not.toHaveProperty('signature');
+    expect(summaryResponse.json().license).not.toHaveProperty('leaseToken');
+    expect(summaryResponse.json().license).not.toHaveProperty('telemetryToken');
+
+    const auditorSummaryResponse = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/licenses/${license.id as string}/summary`,
+      headers: { authorization: `Bearer ${auditorSessionToken}` },
+    });
+    expect(auditorSummaryResponse.statusCode).toBe(200);
+    const auditorExportResponse = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/licenses/${license.id as string}`,
+      headers: { authorization: `Bearer ${auditorSessionToken}` },
+    });
+    expect(auditorExportResponse.statusCode).toBe(403);
+    expect(auditorExportResponse.json()).toMatchObject({ error: { code: 'FORBIDDEN' } });
+
     const leaseResponse = await app.inject({
       method: 'POST',
       url: `/v1/licenses/${license.id as string}/lease`,
@@ -511,6 +556,17 @@ describe('commercial control HTTP routes', () => {
     });
     expect(resizeResponse.statusCode).toBe(200);
     expect(resizeResponse.json().license).toMatchObject({ revision: 3, seatLimit: 50 });
+
+    const changedSummaryResponse = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/licenses/${license.id as string}/summary`,
+      headers: authorization,
+    });
+    expect(changedSummaryResponse.json().license).toMatchObject({
+      revision: 3,
+      seatLimit: 50,
+      seatEnforcement: 'monitor',
+    });
 
     const lifecycleResponse = await app.inject({
       method: 'GET',

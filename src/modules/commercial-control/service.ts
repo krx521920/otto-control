@@ -18,6 +18,7 @@ import type {
   TelemetryRequestAuthentication,
 } from '../../contracts/telemetry.js';
 import type {
+  OperatorLicenseDetail,
   OperatorLicenseState,
   OperatorOverview,
 } from '../../contracts/operator-console.js';
@@ -294,6 +295,30 @@ export class CommercialControlService {
           updatedAt: record.updatedAt.toISOString(),
         })),
       },
+    };
+  }
+
+  async operatorLicenseDetail(id: string): Promise<OperatorLicenseDetail> {
+    const record = await this.#store.getLicense(id);
+    if (!record) throw notFound('license not found');
+    return {
+      id: record.id,
+      revision: record.revision,
+      deploymentId: record.deploymentId,
+      customerName: record.customerName,
+      organizationId: record.organizationId,
+      plan: record.plan,
+      seatLimit: record.seatLimit,
+      moduleCount: record.modules.length,
+      modules: [...record.modules],
+      offline: record.offline,
+      telemetryAllowed: record.telemetryAllowed,
+      seatEnforcement: record.seatEnforcement,
+      gracePeriodDays: record.gracePeriodMs / (24 * 60 * 60 * 1000),
+      state: operatorLicenseState(record, this.#now()),
+      issuedAt: new Date(record.issuedAtMs).toISOString(),
+      expiresAt: new Date(record.expiresAtMs).toISOString(),
+      updatedAt: record.updatedAt.toISOString(),
     };
   }
 

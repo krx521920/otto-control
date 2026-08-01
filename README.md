@@ -65,8 +65,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - PostgreSQL-backed outbound alert outbox with HMAC-signed HTTPS webhooks,
   fingerprint deduplication, leased workers, bounded retries, and delivery audit
 - Same-origin operator console with MFA login, RBAC-filtered commercial inventory,
-  customer/deployment/License onboarding, backup readiness, alert retry, strict
-  CSP, and tab-scoped sessions
+  customer/deployment/License onboarding, renewal, seat management, immutable
+  lifecycle history, backup readiness, alert retry, strict CSP, and tab-scoped sessions
 
 ## Development
 
@@ -236,7 +236,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.15.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.16.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -410,12 +410,21 @@ License through structured forms. Deployment IDs are generated with browser
 cryptographic randomness; module grants are explicit checkboxes; offline
 licenses automatically disable real-time seat enforcement and telemetry.
 
-The newly issued signed License envelope, including its derived deployment
-credentials, exists only in page memory and can be downloaded as JSON for secure
-customer delivery. It is cleared when the result dialog closes and is never put
-in browser persistent storage. Failed alerts can be returned to the durable
-retry queue. Inventory responses exclude machine fingerprints, License
-signatures, bearer tokens, telemetry secrets, and customer content.
+Selecting a License opens a permission-aware lifecycle view. `license.read`
+exposes a dedicated redacted summary without the machine fingerprint, signature,
+lease token, or telemetry token. `license.usage.read` adds active-seat state and
+immutable revision history. `license.manage` adds renewal and seat/policy forms;
+offline Licenses remain locked to monitor mode. Revoked Licenses are read-only.
+The complete signed envelope endpoint requires the separate `license.export`
+permission, which is intentionally not granted to the read-only auditor role.
+
+Newly issued or updated signed License envelopes, including their derived
+deployment credentials, exist only in page memory and can be downloaded as JSON
+for secure customer delivery. They are cleared when the result dialog closes
+and are never put in browser persistent storage. Failed alerts can be returned
+to the durable retry queue. Inventory and summary responses exclude machine
+fingerprints, License signatures, bearer tokens, telemetry secrets, and customer
+content.
 
 `commercial.read` is granted to `super_admin`, `license_admin`, and `auditor`;
 write buttons are permission-aware, and every API call is still authorized
@@ -559,6 +568,7 @@ POST /v1/admin/customers
 POST /v1/admin/deployments
 POST /v1/admin/licenses
 GET  /v1/admin/licenses/:licenseId
+GET  /v1/admin/licenses/:licenseId/summary
 POST /v1/admin/licenses/:licenseId/renew
 POST /v1/admin/licenses/:licenseId/resize
 POST /v1/admin/licenses/:licenseId/transfer-machine
@@ -607,12 +617,12 @@ Traefik
        -> release_artifacts (implemented foundation)
        -> backup_status (implemented foundation)
        -> alert_delivery (implemented foundation)
-       -> operator_console (implemented read-only operations foundation)
+       -> operator_console (implemented onboarding and License lifecycle foundation)
        -> audit
 ```
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are License lifecycle and dual-approval workflows in the operator
-console, multi-channel alert routing, vendor-specific signer-broker deployment
-recipes, and eventually the separate federation gateway.
+next phases are dual-approval workflows in the operator console, multi-channel
+alert routing, vendor-specific signer-broker deployment recipes, and eventually
+the separate federation gateway.
