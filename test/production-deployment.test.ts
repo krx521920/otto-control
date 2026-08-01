@@ -101,6 +101,7 @@ describe('production deployment assets', () => {
     expect(entrypoint).toContain('archive-push %p');
     expect(entrypoint).toContain('archive-get %f %p');
     expect(entrypoint).toContain('use_pg_rewind: true');
+    expect(entrypoint).toMatch(/postgresql:\n\s+use_pg_rewind:[\s\S]+?pg_hba:/u);
     expect(pgbackrest).toContain('repo1-cipher-type=aes-256-cbc');
     expect(pgbackrest).toContain('repo1-retention-full=4');
   });
@@ -124,13 +125,16 @@ describe('production deployment assets', () => {
     const pitr = repositoryFile('deploy/drill-pitr-postgres.sh');
     const pgbackrest = repositoryFile('deploy/postgres-ha/otto-pgbackrest');
     expect(patroni).toContain('stage_secret /run/secrets/postgres_password');
-    expect(patroni).toContain('PGBACKREST_CIPHER_FILE=/run/patroni/pgbackrest_cipher_pass');
+    expect(patroni).toContain(
+      'OTTO_PGBACKREST_CIPHER_FILE=/run/patroni/pgbackrest_cipher_pass',
+    );
     expect(control).toContain('CONTROL_DATABASE_PASSWORD_FILE');
     expect(control).toContain('CONTROL_SIGNER_KEYRING_FILE');
     expect(compose).toContain('exec gosu postgres tail -f /dev/null');
     expect(compose).toContain('DAC_READ_SEARCH');
     expect(pitr).toContain('--user postgres postgres-pitr-drill');
     expect(pgbackrest).toContain('PGBACKREST_REPO1_CIPHER_PASS=$(cat "$CIPHER_FILE")');
+    expect(pgbackrest).toContain('OTTO_PGBACKREST_CIPHER_FILE');
     expect(pgbackrest).not.toContain('--repo1-cipher-pass=');
   });
 

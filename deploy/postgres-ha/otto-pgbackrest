@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-CIPHER_FILE=${PGBACKREST_CIPHER_FILE:-/run/secrets/pgbackrest_cipher_pass}
+CIPHER_FILE=${OTTO_PGBACKREST_CIPHER_FILE:-/run/secrets/pgbackrest_cipher_pass}
 if [ ! -s "$CIPHER_FILE" ]; then
   printf '%s\n' 'pgBackRest repository encryption secret is missing' >&2
   exit 1

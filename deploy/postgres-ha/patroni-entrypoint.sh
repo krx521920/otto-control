@@ -55,10 +55,10 @@ stage_secret() {
 }
 
 POSTGRES_APP_PASSWORD_FILE=/run/patroni/postgres_password
-PGBACKREST_CIPHER_FILE=/run/patroni/pgbackrest_cipher_pass
+OTTO_PGBACKREST_CIPHER_FILE=/run/patroni/pgbackrest_cipher_pass
 stage_secret /run/secrets/postgres_password "$POSTGRES_APP_PASSWORD_FILE"
-stage_secret /run/secrets/pgbackrest_cipher_pass "$PGBACKREST_CIPHER_FILE"
-export POSTGRES_APP_PASSWORD_FILE PGBACKREST_CIPHER_FILE
+stage_secret /run/secrets/pgbackrest_cipher_pass "$OTTO_PGBACKREST_CIPHER_FILE"
+export POSTGRES_APP_PASSWORD_FILE OTTO_PGBACKREST_CIPHER_FILE
 
 cat > /run/patroni/patroni.yml <<EOF
 scope: otto-control
@@ -85,13 +85,13 @@ bootstrap:
     synchronous_node_count: 1
     ttl: 30
     failsafe_mode: true
-    pg_hba:
-      - local all all trust
-      - host replication replicator 0.0.0.0/0 scram-sha-256
-      - host all all 0.0.0.0/0 scram-sha-256
     postgresql:
       use_pg_rewind: true
       use_slots: true
+      pg_hba:
+        - local all all trust
+        - host replication replicator 0.0.0.0/0 scram-sha-256
+        - host all all 0.0.0.0/0 scram-sha-256
       parameters:
         archive_command: '/usr/local/bin/otto-pgbackrest --stanza=otto-control archive-push %p'
         archive_mode: 'on'

@@ -267,7 +267,7 @@ services:
     read_only: true
     environment:
       PGDATA: /var/lib/postgresql/data/pgdata
-      PGBACKREST_CIPHER_FILE: /run/patroni/pgbackrest_cipher_pass
+      OTTO_PGBACKREST_CIPHER_FILE: /run/patroni/pgbackrest_cipher_pass
     command:
       - |
         gosu postgres sh -c 'umask 077; cat > /run/patroni/pgbackrest_cipher_pass' < /run/secrets/pgbackrest_cipher_pass
