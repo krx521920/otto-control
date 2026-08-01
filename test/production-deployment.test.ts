@@ -135,6 +135,12 @@ describe('production deployment assets', () => {
     expect(compose).toContain('exec gosu postgres tail -f /dev/null');
     expect(compose).toContain('DAC_READ_SEARCH');
     expect(pitr).toContain('--user postgres postgres-pitr-drill');
+    const physicalBackup = repositoryFile('deploy/backup-pitr-postgres.sh');
+    expect(physicalBackup).toContain(
+      'compose exec -T --user postgres "$PRIMARY" otto-pgbackrest',
+    );
+    expect(pgbackrest).toContain('exec gosu postgres "$0" "$@"');
+    expect(pgbackrest).toContain('/run/patroni/pgbackrest_cipher_pass');
     expect(pgbackrest).toContain('PGBACKREST_REPO1_CIPHER_PASS=$(cat "$CIPHER_FILE")');
     expect(pgbackrest).toContain('OTTO_PGBACKREST_CIPHER_FILE');
     expect(pgbackrest).not.toContain('--repo1-cipher-pass=');

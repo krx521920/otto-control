@@ -1,7 +1,11 @@
 #!/bin/sh
 set -eu
 
-CIPHER_FILE=${OTTO_PGBACKREST_CIPHER_FILE:-/run/secrets/pgbackrest_cipher_pass}
+if [ "$(id -u)" -eq 0 ]; then
+  exec gosu postgres "$0" "$@"
+fi
+
+CIPHER_FILE=${OTTO_PGBACKREST_CIPHER_FILE:-/run/patroni/pgbackrest_cipher_pass}
 if [ ! -s "$CIPHER_FILE" ]; then
   printf '%s\n' 'pgBackRest repository encryption secret is missing' >&2
   exit 1

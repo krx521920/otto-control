@@ -74,11 +74,11 @@ PRIMARY=$(find_primary) || {
 STARTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 STARTED_SECONDS=$(date '+%s')
 
-compose exec -T "$PRIMARY" otto-pgbackrest --stanza=otto-control stanza-create
-compose exec -T "$PRIMARY" otto-pgbackrest --stanza=otto-control check
-compose exec -T "$PRIMARY" otto-pgbackrest \
+compose exec -T --user postgres "$PRIMARY" otto-pgbackrest --stanza=otto-control stanza-create
+compose exec -T --user postgres "$PRIMARY" otto-pgbackrest --stanza=otto-control check
+compose exec -T --user postgres "$PRIMARY" otto-pgbackrest \
   --stanza=otto-control --type="$TYPE" backup
-compose exec -T "$PRIMARY" otto-pgbackrest --stanza=otto-control expire
+compose exec -T --user postgres "$PRIMARY" otto-pgbackrest --stanza=otto-control expire
 
 COMPLETED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 DURATION_SECONDS=$(($(date '+%s') - STARTED_SECONDS))
@@ -90,7 +90,7 @@ REPORT_FILE="$REPORT_DIR/physical-backup-$(date -u '+%Y%m%dT%H%M%SZ').txt"
   printf 'started_at=%s\n' "$STARTED_AT"
   printf 'completed_at=%s\n' "$COMPLETED_AT"
   printf 'duration_seconds=%s\n' "$DURATION_SECONDS"
-  compose exec -T "$PRIMARY" otto-pgbackrest --stanza=otto-control info
+  compose exec -T --user postgres "$PRIMARY" otto-pgbackrest --stanza=otto-control info
 } > "$REPORT_FILE"
 
 find "$REPORT_DIR" -type f -name 'physical-backup-*.txt' \
