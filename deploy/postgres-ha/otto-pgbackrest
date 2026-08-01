@@ -14,6 +14,12 @@ fi
 PGBACKREST_REPO1_CIPHER_PASS=$(cat "$CIPHER_FILE")
 export PGBACKREST_REPO1_CIPHER_PASS
 
-exec pgbackrest \
-  --config=/etc/pgbackrest/pgbackrest.conf \
-  "$@"
+for argument in "$@"; do
+  case "$argument" in
+    --config|--config=*)
+      exec pgbackrest "$@"
+      ;;
+  esac
+done
+
+exec pgbackrest --config=/etc/pgbackrest/pgbackrest.conf "$@"

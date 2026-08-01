@@ -204,6 +204,7 @@ describe('production deployment assets', () => {
     const backup = repositoryFile('deploy/backup-pitr-postgres.sh');
     const pitr = repositoryFile('deploy/drill-pitr-postgres.sh');
     const failover = repositoryFile('deploy/drill-postgres-failover.sh');
+    const pgBackRestWrapper = repositoryFile('deploy/postgres-ha/otto-pgbackrest');
     const postgresStore = repositoryFile('src/storage/postgres-store.ts');
     expect(backup).toContain('--type="$TYPE" backup');
     expect(backup).toContain('otto-pgbackrest --stanza=otto-control check');
@@ -213,6 +214,8 @@ describe('production deployment assets', () => {
     expect(pitr).toContain('CONTROL_PITR_MAX_BACKUP_AGE_HOURS');
     expect(pitr).toContain('backup_age_seconds');
     expect(pitr).toContain('control_schema_migrations');
+    expect(pgBackRestWrapper).toContain('--config|--config=*');
+    expect(pgBackRestWrapper).toContain('exec pgbackrest "$@"');
     expect(failover).toContain('--confirm=FAILOVER_OTTO_CONTROL');
     expect(failover).toContain('http://127.0.0.1:8008/synchronous');
     expect(failover).toContain('stable_rounds');
