@@ -530,6 +530,7 @@ export interface ControlStore {
   }): Promise<CreditStatement | null>;
   enqueueAlertDelivery(input: {
     id: string;
+    channelId: string;
     source: AlertDeliveryRecord['source'];
     eventType: AlertDeliveryRecord['eventType'];
     fingerprint: string;
@@ -541,6 +542,7 @@ export interface ControlStore {
   claimAlertDelivery(input: {
     now: Date;
     leaseUntil: Date;
+    channelIds: string[];
   }): Promise<AlertDeliveryRecord | null>;
   finishAlertDelivery(input: {
     id: string;

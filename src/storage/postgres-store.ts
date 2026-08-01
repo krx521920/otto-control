@@ -326,6 +326,7 @@ interface ReleaseArtifactRow {
 
 interface AlertDeliveryRow {
   id: string;
+  channel_id: string;
   source: AlertDeliveryRecord['source'];
   event_type: AlertDeliveryRecord['eventType'];
   fingerprint: string;
@@ -570,6 +571,7 @@ function releaseArtifactFromRow(row: ReleaseArtifactRow): ReleaseArtifactRecord 
 function alertDeliveryFromRow(row: AlertDeliveryRow): AlertDeliveryRecord {
   return {
     id: row.id,
+    channelId: row.channel_id,
     source: row.source,
     eventType: row.event_type,
     fingerprint: row.fingerprint,
@@ -3151,6 +3153,7 @@ export class PostgresControlStore implements ControlStore {
 
   async enqueueAlertDelivery(input: {
     id: string;
+    channelId: string;
     source: AlertDeliveryRecord['source'];
     eventType: AlertDeliveryRecord['eventType'];
     fingerprint: string;
@@ -3164,13 +3167,14 @@ export class PostgresControlStore implements ControlStore {
       await client.query('BEGIN');
       const inserted = await client.query<AlertDeliveryRow>(
         `INSERT INTO control_alert_deliveries
-          (id, source, event_type, fingerprint, severity, payload, status, attempts,
+          (id, channel_id, source, event_type, fingerprint, severity, payload, status, attempts,
            next_attempt_at, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'pending', 0, $7, $7, $7)
-         ON CONFLICT (fingerprint) DO NOTHING
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending', 0, $8, $8, $8)
+         ON CONFLICT (fingerprint, channel_id) DO NOTHING
          RETURNING *`,
         [
           input.id,
+          input.channelId,
           input.source,
           input.eventType,
           input.fingerprint,
@@ -3196,8 +3200,8 @@ export class PostgresControlStore implements ControlStore {
         return { record: alertDeliveryFromRow(inserted.rows[0]), created: true };
       }
       const existing = await client.query<AlertDeliveryRow>(
-        'SELECT * FROM control_alert_deliveries WHERE fingerprint = $1',
-        [input.fingerprint],
+        'SELECT * FROM control_alert_deliveries WHERE fingerprint = $1 AND channel_id = $2',
+        [input.fingerprint, input.channelId],
       );
       if (!existing.rows[0]) throw new Error('alert delivery conflict could not be resolved');
       await client.query('COMMIT');
@@ -3213,11 +3217,13 @@ export class PostgresControlStore implements ControlStore {
   async claimAlertDelivery(input: {
     now: Date;
     leaseUntil: Date;
+    channelIds: string[];
   }): Promise<AlertDeliveryRecord | null> {
     const result = await this.#pool.query<AlertDeliveryRow>(
       `WITH candidate AS (
          SELECT id FROM control_alert_deliveries
-         WHERE ((status IN ('pending', 'retrying') AND next_attempt_at <= $1)
+         WHERE channel_id = ANY($3::text[])
+           AND ((status IN ('pending', 'retrying') AND next_attempt_at <= $1)
            OR (status = 'delivering' AND lease_until <= $1))
          ORDER BY next_attempt_at ASC, created_at ASC, id ASC
          FOR UPDATE SKIP LOCKED
@@ -3229,7 +3235,7 @@ export class PostgresControlStore implements ControlStore {
        FROM candidate
        WHERE delivery.id = candidate.id
        RETURNING delivery.*`,
-      [input.now, input.leaseUntil],
+      [input.now, input.leaseUntil, input.channelIds],
     );
     return result.rows[0] ? alertDeliveryFromRow(result.rows[0]) : null;
   }

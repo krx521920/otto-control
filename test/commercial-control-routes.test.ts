@@ -42,6 +42,7 @@ const config: Readonly<ControlConfig> = {
   updatePolicyDurationMs: 300_000,
   backupReportDirectory: null,
   backupStatusMaximumAgeHours: 48,
+  alertChannelsFile: null,
   alertWebhookUrl: null,
   alertWebhookSecretFile: null,
   alertPollIntervalMs: 60_000,
@@ -262,7 +263,7 @@ describe('commercial control HTTP routes', () => {
       headers: { authorization: `Bearer ${securitySessionToken}` },
     });
     expect(alertDeliveries.statusCode).toBe(200);
-    expect(alertDeliveries.json()).toEqual({ enabled: false, deliveries: [] });
+    expect(alertDeliveries.json()).toEqual({ enabled: false, channels: [], deliveries: [] });
 
     const alertPoll = await app.inject({
       method: 'POST',
@@ -270,7 +271,7 @@ describe('commercial control HTTP routes', () => {
       headers: { authorization: `Bearer ${securitySessionToken}` },
     });
     expect(alertPoll.statusCode).toBe(200);
-    expect(alertPoll.json()).toMatchObject({ enabled: false, processed: 0 });
+    expect(alertPoll.json()).toMatchObject({ enabled: false, enqueuedCount: 0, processed: 0 });
 
     const operatorPage = await app.inject({ method: 'GET', url: '/admin' });
     expect(operatorPage.statusCode).toBe(200);

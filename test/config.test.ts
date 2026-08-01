@@ -15,6 +15,7 @@ describe('control configuration', () => {
       trustProxy: false,
       backupReportDirectory: null,
       backupStatusMaximumAgeHours: 48,
+      alertChannelsFile: null,
       alertWebhookUrl: null,
       alertWebhookSecretFile: null,
       alertPollIntervalMs: 60_000,
@@ -52,6 +53,11 @@ describe('control configuration', () => {
     expect(() => loadControlConfig({
       CONTROL_ALERT_WEBHOOK_URL: 'https://alerts.example.test/hooks/otto',
     })).toThrow('CONTROL_ALERT_WEBHOOK_SECRET_FILE is required');
+    expect(() => loadControlConfig({
+      CONTROL_ALERT_CHANNELS_FILE: 'channels.json',
+      CONTROL_ALERT_WEBHOOK_URL: 'https://alerts.example.test/hooks/otto',
+      CONTROL_ALERT_WEBHOOK_SECRET_FILE: 'secret',
+    })).toThrow('CONTROL_ALERT_CHANNELS_FILE cannot be combined');
     expect(() => loadControlConfig({ CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS: '21' })).toThrow(
       'CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS must be between 1 and 20',
     );

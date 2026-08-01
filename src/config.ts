@@ -22,6 +22,7 @@ export interface ControlConfig {
   updatePolicyDurationMs: number;
   backupReportDirectory: string | null;
   backupStatusMaximumAgeHours: number;
+  alertChannelsFile: string | null;
   alertWebhookUrl: string | null;
   alertWebhookSecretFile: string | null;
   alertPollIntervalMs: number;
@@ -258,11 +259,15 @@ export function loadControlConfig(
   const signerKeyringFile = env.CONTROL_SIGNER_KEYRING_FILE?.trim() || null;
   const alertWebhookUrl = parseAlertWebhookUrl(env.CONTROL_ALERT_WEBHOOK_URL);
   const alertWebhookSecretFile = env.CONTROL_ALERT_WEBHOOK_SECRET_FILE?.trim() || null;
+  const alertChannelsFile = env.CONTROL_ALERT_CHANNELS_FILE?.trim() || null;
   if (signerPrivateKeyFile && signerKeyringFile) {
     throw new Error('CONTROL_SIGNER_PRIVATE_KEY_FILE and CONTROL_SIGNER_KEYRING_FILE cannot both be set');
   }
   if (alertWebhookUrl && !alertWebhookSecretFile) {
     throw new Error('CONTROL_ALERT_WEBHOOK_SECRET_FILE is required with CONTROL_ALERT_WEBHOOK_URL');
+  }
+  if (alertChannelsFile && (alertWebhookUrl || alertWebhookSecretFile)) {
+    throw new Error('CONTROL_ALERT_CHANNELS_FILE cannot be combined with legacy alert webhook settings');
   }
   return Object.freeze({
     environment,
@@ -271,7 +276,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.17.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.18.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -289,6 +294,7 @@ export function loadControlConfig(
     backupStatusMaximumAgeHours: parseBackupStatusMaximumAgeHours(
       env.CONTROL_BACKUP_STATUS_MAX_AGE_HOURS,
     ),
+    alertChannelsFile,
     alertWebhookUrl,
     alertWebhookSecretFile,
     alertPollIntervalMs: parseBoundedInteger(

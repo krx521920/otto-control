@@ -53,6 +53,9 @@ describe('PostgreSQL migrations', () => {
     expect(statements.some((statement) => statement.includes("VALUES ('commercial.read')"))).toBe(true);
     expect(statements.some((statement) => statement.includes("VALUES ('license.export')"))).toBe(true);
     expect(statements.some((statement) => statement.includes('request_payload JSONB'))).toBe(true);
+    expect(statements.some((statement) => (
+      statement.includes('idx_control_alert_deliveries_fingerprint_channel')
+    ))).toBe(true);
   });
 
   it('rolls back a failed migration and always releases the lock', async () => {

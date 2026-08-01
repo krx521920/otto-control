@@ -22,6 +22,7 @@ const baseConfig: Readonly<ControlConfig> = {
   updatePolicyDurationMs: 300_000,
   backupReportDirectory: null,
   backupStatusMaximumAgeHours: 48,
+  alertChannelsFile: null,
   alertWebhookUrl: null,
   alertWebhookSecretFile: null,
   alertPollIntervalMs: 60_000,

@@ -69,6 +69,7 @@ export async function createCommercialControlRuntime(
     const alerts = new AlertDeliveryService({
       store,
       backupStatus,
+      channelsFile: config.alertChannelsFile,
       webhookUrl: config.alertWebhookUrl,
       webhookSecretFile: config.alertWebhookSecretFile,
       pollIntervalMs: config.alertPollIntervalMs,

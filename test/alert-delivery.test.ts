@@ -88,6 +88,7 @@ describe('outbound recovery alert delivery', () => {
         enabled: true,
         observedStatus: 'failed',
         enqueued: true,
+        enqueuedCount: 1,
         processed: 1,
         delivered: 1,
       });
@@ -114,6 +115,7 @@ describe('outbound recovery alert delivery', () => {
       });
       expect(fetcher).toHaveBeenCalledTimes(1);
       expect((await service.list()).deliveries[0]).toMatchObject({
+        channelId: 'legacy-webhook',
         status: 'delivered',
         attempts: 1,
         lastError: null,
@@ -206,12 +208,152 @@ describe('outbound recovery alert delivery', () => {
       enabled: false,
       observedStatus: null,
       enqueued: false,
+      enqueuedCount: 0,
       processed: 0,
       delivered: 0,
       retrying: 0,
       failed: 0,
     });
-    expect(await service.list()).toEqual({ enabled: false, deliveries: [] });
+    expect(await service.list()).toEqual({ enabled: false, channels: [], deliveries: [] });
+  });
+
+  it('delivers one alert independently to every matching enabled channel', async () => {
+    const files = fixture();
+    const channelsFile = join(files.directory, 'alert-channels.json');
+    const secondSecretFile = join(files.directory, 'security-secret');
+    const secondSecret = 'second-alert-channel-secret-that-is-long-enough';
+    const now = Date.parse('2026-08-01T12:00:00.000Z');
+    try {
+      mkdirSync(files.reportDirectory);
+      writeFileSync(
+        join(files.reportDirectory, 'latest.json'),
+        JSON.stringify(failedBackupReport('2026-08-01T11:00:00.000Z')),
+      );
+      writeFileSync(secondSecretFile, secondSecret);
+      writeFileSync(channelsFile, JSON.stringify({
+        version: 1,
+        channels: [
+          {
+            id: 'operations',
+            name: 'Operations',
+            url: 'https://operations.example.test/hooks/otto',
+            secretFile: files.secretFile,
+            enabled: true,
+            minimumSeverity: 'warning',
+          },
+          {
+            id: 'security',
+            name: 'Security',
+            url: 'https://security.example.test/hooks/otto',
+            secretFile: secondSecretFile,
+            enabled: true,
+            minimumSeverity: 'critical',
+          },
+          {
+            id: 'paused',
+            name: 'Paused channel',
+            url: 'https://paused.example.test/hooks/otto',
+            secretFile: join(files.directory, 'not-required-while-disabled'),
+            enabled: false,
+            minimumSeverity: 'warning',
+          },
+        ],
+      }));
+      const store = new MemoryControlStore();
+      const fetcher = vi.fn(async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        void input;
+        void init;
+        return new Response(null, { status: 204 });
+      });
+      const service = new AlertDeliveryService({
+        store,
+        backupStatus: new BackupStatusService({
+          reportDirectory: files.reportDirectory,
+          now: () => now,
+        }),
+        channelsFile,
+        now: () => now,
+        fetcher: fetcher as unknown as typeof fetch,
+      });
+
+      await expect(service.pollOnce()).resolves.toMatchObject({
+        enqueued: true,
+        enqueuedCount: 2,
+        processed: 2,
+        delivered: 2,
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      const requests = fetcher.mock.calls.map(([url, request]) => ({
+        url: String(url),
+        headers: new Headers(request?.headers),
+        body: String(request?.body),
+      }));
+      expect(requests.map((request) => request.url).sort()).toEqual([
+        'https://operations.example.test/hooks/otto',
+        'https://security.example.test/hooks/otto',
+      ]);
+      for (const request of requests) {
+        const channelId = request.headers.get('x-otto-alert-channel');
+        const secret = channelId === 'operations' ? files.secret : secondSecret;
+        expect(request.headers.get('x-otto-alert-signature')).toBe(
+          `v1=${createHmac('sha256', secret).update(`${now}\n${request.body}`).digest('hex')}`,
+        );
+      }
+      const listing = await service.list();
+      expect(listing.channels).toEqual([
+        { id: 'operations', name: 'Operations', enabled: true, minimumSeverity: 'warning' },
+        { id: 'security', name: 'Security', enabled: true, minimumSeverity: 'critical' },
+        { id: 'paused', name: 'Paused channel', enabled: false, minimumSeverity: 'warning' },
+      ]);
+      expect(listing.deliveries.map((delivery) => delivery.channelId).sort()).toEqual([
+        'operations',
+        'security',
+      ]);
+    } finally {
+      rmSync(files.directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not send warning alerts to critical-only channels', async () => {
+    const files = fixture();
+    const now = Date.parse('2026-08-01T12:00:00.000Z');
+    try {
+      mkdirSync(files.reportDirectory);
+      const report = failedBackupReport('2026-08-01T11:00:00.000Z');
+      report.offsite.required = false;
+      writeFileSync(join(files.reportDirectory, 'latest.json'), JSON.stringify(report));
+      const fetcher = vi.fn(async () => new Response(null, { status: 204 }));
+      const service = new AlertDeliveryService({
+        store: new MemoryControlStore(),
+        backupStatus: new BackupStatusService({
+          reportDirectory: files.reportDirectory,
+          now: () => now,
+        }),
+        channels: [{
+          id: 'critical-only',
+          name: 'Critical only',
+          url: 'https://security.example.test/hooks/critical',
+          secretFile: files.secretFile,
+          enabled: true,
+          minimumSeverity: 'critical',
+        }],
+        now: () => now,
+        fetcher: fetcher as unknown as typeof fetch,
+      });
+
+      await expect(service.pollOnce()).resolves.toMatchObject({
+        observedStatus: 'degraded',
+        enqueued: false,
+        enqueuedCount: 0,
+        processed: 0,
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally {
+      rmSync(files.directory, { recursive: true, force: true });
+    }
   });
 
   it('prunes only old terminal delivery records', async () => {
@@ -237,6 +379,7 @@ describe('outbound recovery alert delivery', () => {
     };
     await store.enqueueAlertDelivery({
       id: payload.eventId,
+      channelId: 'legacy-webhook',
       source: payload.source,
       eventType: payload.eventType,
       fingerprint: payload.fingerprint,
@@ -251,7 +394,11 @@ describe('outbound recovery alert delivery', () => {
         detail: { source: payload.source },
       },
     });
-    const claimed = await store.claimAlertDelivery({ now: old, leaseUntil: recent });
+    const claimed = await store.claimAlertDelivery({
+      now: old,
+      leaseUntil: recent,
+      channelIds: ['legacy-webhook'],
+    });
     expect(claimed).not.toBeNull();
     await store.finishAlertDelivery({
       id: payload.eventId,

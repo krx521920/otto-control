@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "channels": [
+    {
+      "id": "operations",
+      "name": "Operations",
+      "url": "https://operations.example.com/hooks/otto-control",
+      "secretFile": "/run/secrets/otto_control_operations_alert_secret",
+      "enabled": true,
+      "minimumSeverity": "warning"
+    },
+    {
+      "id": "security",
+      "name": "Security",
+      "url": "https://security.example.com/hooks/otto-control",
+      "secretFile": "/run/secrets/otto_control_security_alert_secret",
+      "enabled": true,
+      "minimumSeverity": "critical"
+    }
+  ]
+}

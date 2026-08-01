@@ -21,6 +21,7 @@ export interface AlertDeliveryPayload {
 
 export interface AlertDeliveryRecord {
   id: string;
+  channelId: string;
   source: 'backup_status';
   eventType: 'backup.recovery.alert';
   fingerprint: string;
@@ -51,6 +52,7 @@ export interface AlertPollResult {
   enabled: boolean;
   observedStatus: string | null;
   enqueued: boolean;
+  enqueuedCount: number;
   processed: number;
   delivered: number;
   retrying: number;

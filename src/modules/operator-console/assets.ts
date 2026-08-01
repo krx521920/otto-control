@@ -88,6 +88,7 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
 
         <div class="section-block">
           <div class="section-heading"><div><p class="section-label">ALERT DELIVERY</p><h2>运维告警</h2></div><button id="poll-alerts" class="secondary" type="button">立即检测</button></div>
+          <div id="alert-channels" class="alert-channels" aria-label="告警通道"></div>
           <div class="alert-summary"><strong id="alert-pending">0</strong><span>待投递或重试</span><strong id="alert-failed">0</strong><span>最终失败</span></div>
           <div id="alert-list" class="alert-list"></div>
         </div>
@@ -260,6 +261,11 @@ td { color: #24372f; }
 .alert-summary { display: grid; grid-template-columns: auto 1fr auto 1fr; align-items: baseline; gap: 8px; padding: 12px 14px; background: #f4f7f6; border-radius: 6px; }
 .alert-summary strong { font-size: 22px; }
 .alert-summary span { color: #6c7974; font-size: 12px; }
+.alert-channels { display: flex; flex-wrap: wrap; gap: 8px; margin: -4px 0 12px; }
+.alert-channel { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 4px 8px; color: #365047; background: #edf4f1; border: 1px solid #d8e5e0; border-radius: 5px; font-size: 12px; }
+.alert-channel::before { width: 7px; height: 7px; content: ''; background: #168462; border-radius: 50%; }
+.alert-channel.disabled { color: #7e8985; background: #f3f5f4; }
+.alert-channel.disabled::before { background: #aab2af; }
 .alert-list { margin-top: 12px; }
 .alert-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid #e7ecea; }
 .alert-item:last-child { border-bottom: 0; }
@@ -430,6 +436,15 @@ function renderBackup(data) {
   setText('backup-message', data.alerts.length ? data.alerts.map((item) => item.message).join('；') : '备份与恢复指标正常。');
 }
 function renderAlerts(data) {
+  const channels = byId('alert-channels');
+  channels.replaceChildren();
+  data.channels.forEach((channel) => {
+    const badge = document.createElement('span');
+    badge.className = 'alert-channel' + (channel.enabled ? '' : ' disabled');
+    badge.textContent = channel.name + ' · ' + (channel.enabled ? (channel.minimumSeverity === 'critical' ? '仅严重' : '警告及严重') : '已停用');
+    badge.title = channel.id;
+    channels.append(badge);
+  });
   const pending = data.deliveries.filter((item) => ['pending', 'delivering', 'retrying'].includes(item.status)).length;
   const failed = data.deliveries.filter((item) => item.status === 'failed').length;
   setText('alert-pending', pending);
@@ -443,7 +458,8 @@ function renderAlerts(data) {
     const title = document.createElement('strong');
     title.textContent = delivery.payload.condition.reason + ' · ' + delivery.status;
     const meta = document.createElement('small');
-    meta.textContent = localTime(delivery.updatedAt) + ' · 已尝试 ' + delivery.attempts + ' 次';
+    const channel = data.channels.find((item) => item.id === delivery.channelId);
+    meta.textContent = (channel ? channel.name : delivery.channelId) + ' · ' + localTime(delivery.updatedAt) + ' · 已尝试 ' + delivery.attempts + ' 次';
     copy.append(title, meta);
     item.append(copy);
     if (delivery.status === 'failed') {
@@ -466,7 +482,7 @@ function renderAlerts(data) {
   if (!data.deliveries.length) {
     const empty = document.createElement('p');
     empty.className = 'inline-message';
-    empty.textContent = data.enabled ? '暂无告警投递记录。' : '告警 Webhook 尚未启用。';
+    empty.textContent = data.enabled ? '暂无告警投递记录。' : '尚未启用告警通道。';
     list.append(empty);
   }
 }

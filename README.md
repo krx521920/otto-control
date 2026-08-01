@@ -237,7 +237,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.17.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.18.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -258,6 +258,7 @@ a misleading success report.
 | `CONTROL_BACKUP_RETENTION_DAYS` | `30` | Number of days encrypted local backups are retained |
 | `CONTROL_BACKUP_REPORT_DIR` | empty | Read-only directory containing backup inventory reports |
 | `CONTROL_BACKUP_STATUS_MAX_AGE_HOURS` | `48` | Maximum acceptable age of the latest completed backup report |
+| `CONTROL_ALERT_CHANNELS_FILE` | empty | Preferred version 1 multi-channel alert manifest; cannot be combined with legacy webhook settings |
 | `CONTROL_ALERT_WEBHOOK_URL` | empty | HTTPS endpoint receiving signed operational alerts; empty disables delivery |
 | `CONTROL_ALERT_WEBHOOK_SECRET_FILE` | empty | Read-only file containing the webhook HMAC secret |
 | `CONTROL_ALERT_POLL_INTERVAL_MS` | `60000` | Background outbox polling interval, from 5 seconds to 1 hour |
@@ -278,6 +279,14 @@ a misleading success report.
 | `CONTROL_DRILL_REPORT_RETENTION_DAYS` | `180` | Number of days successful restore-drill reports are retained |
 | `CONTROL_DRILL_MAX_BACKUP_AGE_HOURS` | `48` | Oldest encrypted backup accepted by a restore drill |
 | `OTTO_CONTROL_BACKUP_KEY_FILE` | empty | File containing the backup encryption key |
+
+Multi-channel alert delivery is configured with a read-only JSON manifest such
+as `deploy/alert-channels.example.json`. Each channel has a stable ID, display
+name, HTTPS endpoint, separate HMAC secret file, enabled state, and minimum
+severity. A backup alert is queued, retried, audited, and reported independently
+for every matching channel. Disabling a channel pauses its queued deliveries
+without consuming retry attempts; enabling it resumes them. The legacy single-webhook variables remain supported
+for existing deployments, but must not be combined with the manifest.
 
 ## Commercial control flow
 

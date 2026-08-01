@@ -1580,6 +1580,7 @@ export class MemoryControlStore implements ControlStore {
 
   async enqueueAlertDelivery(input: {
     id: string;
+    channelId: string;
     source: AlertDeliveryRecord['source'];
     eventType: AlertDeliveryRecord['eventType'];
     fingerprint: string;
@@ -1589,7 +1590,8 @@ export class MemoryControlStore implements ControlStore {
     audit: AuditEventInput;
   }): Promise<{ record: AlertDeliveryRecord; created: boolean }> {
     const existing = [...this.alertDeliveries.values()]
-      .find((delivery) => delivery.fingerprint === input.fingerprint);
+      .find((delivery) => delivery.fingerprint === input.fingerprint
+        && delivery.channelId === input.channelId);
     if (existing) return { record: existing, created: false };
     const { audit, ...deliveryInput } = input;
     const record: AlertDeliveryRecord = {
@@ -1610,13 +1612,15 @@ export class MemoryControlStore implements ControlStore {
   async claimAlertDelivery(input: {
     now: Date;
     leaseUntil: Date;
+    channelIds: string[];
   }): Promise<AlertDeliveryRecord | null> {
     const record = [...this.alertDeliveries.values()]
       .filter((delivery) => (
-        (['pending', 'retrying'].includes(delivery.status)
+        input.channelIds.includes(delivery.channelId)
+        && ((['pending', 'retrying'].includes(delivery.status)
           && delivery.nextAttemptAt <= input.now)
         || (delivery.status === 'delivering'
-          && delivery.leaseUntil !== null && delivery.leaseUntil <= input.now)
+          && delivery.leaseUntil !== null && delivery.leaseUntil <= input.now))
       ))
       .sort((left, right) => (
         left.nextAttemptAt.getTime() - right.nextAttemptAt.getTime()

@@ -39,6 +39,8 @@ describe('operator console assets', () => {
     expect(response.body).not.toContain('innerHTML');
     expect(response.body).toContain('/v1/admin-auth/login');
     expect(response.body).toContain('/v1/admin/overview?limit=50');
+    expect(response.body).toContain("byId('alert-channels')");
+    expect(response.body).toContain('delivery.channelId');
     expect(response.body).toContain("'customer.create'");
     expect(response.body).toContain("'deployment.create'");
     expect(response.body).toContain("'license.issue'");

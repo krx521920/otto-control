@@ -610,6 +610,24 @@ const MIGRATIONS: Migration[] = [
        ADD COLUMN IF NOT EXISTS request_payload JSONB NOT NULL DEFAULT '{}'::jsonb`,
     ],
   },
+  {
+    id: '015_alert_delivery_channels',
+    statements: [
+      `ALTER TABLE control_alert_deliveries
+       ADD COLUMN IF NOT EXISTS channel_id TEXT NOT NULL DEFAULT 'legacy-webhook'`,
+      `ALTER TABLE control_alert_deliveries
+       ADD CONSTRAINT control_alert_deliveries_channel_id_check
+       CHECK (channel_id ~ '^[a-z][a-z0-9_-]{1,63}$') NOT VALID`,
+      `ALTER TABLE control_alert_deliveries
+       VALIDATE CONSTRAINT control_alert_deliveries_channel_id_check`,
+      `ALTER TABLE control_alert_deliveries
+       DROP CONSTRAINT IF EXISTS control_alert_deliveries_fingerprint_key`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_alert_deliveries_fingerprint_channel
+       ON control_alert_deliveries(fingerprint, channel_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_alert_deliveries_channel_history
+       ON control_alert_deliveries(channel_id, created_at DESC)`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {
