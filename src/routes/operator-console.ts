@@ -5,6 +5,10 @@ import {
   OPERATOR_CONSOLE_HTML,
   OPERATOR_CONSOLE_JS,
 } from '../modules/operator-console/assets.js';
+import {
+  OPERATOR_CONSOLE_WRITE_CSS,
+  OPERATOR_CONSOLE_WRITE_JS,
+} from '../modules/operator-console/write-assets.js';
 
 const HTML_CSP = [
   "default-src 'none'",
@@ -35,8 +39,8 @@ export async function registerOperatorConsoleRoutes(app: FastifyInstance): Promi
   app.get('/admin/', page);
   app.get('/admin/assets/app.css', async (_request, reply) => hardened(reply)
     .type('text/css; charset=utf-8')
-    .send(OPERATOR_CONSOLE_CSS));
+    .send(`${OPERATOR_CONSOLE_CSS}\n${OPERATOR_CONSOLE_WRITE_CSS}`));
   app.get('/admin/assets/app.js', async (_request, reply) => hardened(reply)
     .type('text/javascript; charset=utf-8')
-    .send(OPERATOR_CONSOLE_JS));
+    .send(`${OPERATOR_CONSOLE_JS}\n${OPERATOR_CONSOLE_WRITE_JS}`));
 }

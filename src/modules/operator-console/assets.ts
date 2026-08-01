@@ -48,7 +48,14 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
       </div>
 
       <section class="section-block">
-        <div class="section-heading"><div><p class="section-label">COMMERCIAL INVENTORY</p><h2>客户与授权</h2></div></div>
+        <div class="section-heading">
+          <div><p class="section-label">COMMERCIAL INVENTORY</p><h2>客户与授权</h2></div>
+          <div class="write-actions">
+            <button id="create-customer-button" class="secondary hidden" type="button">新建客户</button>
+            <button id="create-deployment-button" class="secondary hidden" type="button">登记部署</button>
+            <button id="issue-license-button" class="primary compact hidden" type="button">签发 License</button>
+          </div>
+        </div>
         <div class="metric-grid">
           <article><span>客户</span><strong id="customer-total">0</strong><small id="customer-detail">0 家正常</small></article>
           <article><span>部署</span><strong id="deployment-total">0</strong><small id="deployment-detail">0 个在线管理</small></article>
@@ -81,6 +88,66 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
       </section>
     </section>
   </main>
+
+  <datalist id="customer-options"></datalist>
+  <datalist id="deployment-options"></datalist>
+
+  <dialog id="customer-dialog" class="action-dialog">
+    <form id="customer-form">
+      <div class="dialog-heading"><div><p class="section-label">CUSTOMER</p><h2>新建客户</h2></div><button class="icon-close" data-close="customer-dialog" type="button" aria-label="关闭">×</button></div>
+      <label>客户名称<input id="customer-name" maxlength="160" autocomplete="organization" required></label>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="secondary" data-close="customer-dialog" type="button">取消</button><button class="primary compact" type="submit">创建客户</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="deployment-dialog" class="action-dialog">
+    <form id="deployment-form">
+      <div class="dialog-heading"><div><p class="section-label">DEPLOYMENT</p><h2>登记客户服务器</h2></div><button class="icon-close" data-close="deployment-dialog" type="button" aria-label="关闭">×</button></div>
+      <div class="form-grid">
+        <label>所属客户 ID<input id="deployment-customer" list="customer-options" maxlength="128" required></label>
+        <label>部署名称<input id="deployment-name" maxlength="160" required></label>
+        <label>企业 ID<input id="deployment-organization" maxlength="128" required></label>
+        <label>部署 ID<input id="deployment-id" readonly required></label>
+      </div>
+      <label>机器指纹（SHA-256）<input id="deployment-fingerprint" maxlength="64" pattern="[a-fA-F0-9]{64}" spellcheck="false" required></label>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="secondary" data-close="deployment-dialog" type="button">取消</button><button class="primary compact" type="submit">登记部署</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="license-dialog" class="action-dialog wide">
+    <form id="license-form">
+      <div class="dialog-heading"><div><p class="section-label">LICENSE</p><h2>签发企业授权</h2></div><button class="icon-close" data-close="license-dialog" type="button" aria-label="关闭">×</button></div>
+      <div class="form-grid">
+        <label>部署 ID<input id="license-deployment" list="deployment-options" required></label>
+        <label>版本方案<select id="license-plan"><option value="basic">基础版</option><option value="enterprise" selected>企业版</option><option value="park">产业园版</option><option value="government">政企版</option></select></label>
+        <label>到期日期<input id="license-expiry" type="date" required></label>
+        <label>授权席位<input id="license-seats" type="number" min="1" max="1000000" value="50" required></label>
+        <label>宽限期（天）<input id="license-grace" type="number" min="0" max="30" value="7" required></label>
+        <label>席位策略<select id="license-seat-enforcement"><option value="monitor">仅监测</option><option value="enforce">超额限制</option></select></label>
+      </div>
+      <fieldset><legend>授权模块</legend><div class="module-grid">
+        <label><input type="checkbox" name="license-module" value="enterprise_tree" checked>企业组织</label>
+        <label><input type="checkbox" name="license-module" value="direct_messages" checked>企业私聊</label>
+        <label><input type="checkbox" name="license-module" value="park_service">产业园服务</label>
+        <label><input type="checkbox" name="license-module" value="atoa">A2A 协作</label>
+        <label><input type="checkbox" name="license-module" value="feishu_auto_reply">飞书自动回复</label>
+        <label><input type="checkbox" name="license-module" value="knowledge">企业知识</label>
+        <label><input type="checkbox" name="license-module" value="skill_market">Skill 市场</label>
+      </div></fieldset>
+      <div class="toggle-row"><label><input id="license-offline" type="checkbox">离线 License</label><label><input id="license-telemetry" type="checkbox" checked>允许匿名运行遥测</label></div>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="secondary" data-close="license-dialog" type="button">取消</button><button class="primary compact" type="submit">签发授权</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="license-result-dialog" class="action-dialog">
+    <div class="dialog-heading"><div><p class="section-label">ISSUED</p><h2>授权签发成功</h2></div><button class="icon-close" data-close="license-result-dialog" type="button" aria-label="关闭">×</button></div>
+    <div class="issued-summary"><span>License ID</span><strong id="issued-license-id">-</strong><span>客户</span><strong id="issued-customer">-</strong><span>到期时间</span><strong id="issued-expiry">-</strong></div>
+    <p class="sensitive-note">授权文件包含部署凭证，仅在本次页面会话中保留。请下载后交付给对应客户。</p>
+    <div class="dialog-actions"><button class="secondary" data-close="license-result-dialog" type="button">关闭</button><button id="download-license" class="primary compact" type="button">下载授权文件</button></div>
+  </dialog>
 
   <div id="toast" class="toast hidden" role="status"></div>
   <script type="module" src="/admin/assets/app.js"></script>
@@ -228,6 +295,7 @@ function showDashboard() {
   setText('admin-name', state.principal.displayName || state.principal.username);
   setText('admin-roles', state.principal.roles.join(' / '));
   setText('session-expiry', localTime(state.expiresAt));
+  configureWriteActions();
 }
 async function request(path, options) {
   const settings = Object.assign({ headers: {} }, options || {});
@@ -286,7 +354,7 @@ function renderOverview(data) {
 
   const licenseBody = byId('licenses-body');
   licenseBody.replaceChildren();
-  data.recent.licenses.forEach((license) => {
+  data.recent.licenses.slice(0, 12).forEach((license) => {
     const row = document.createElement('tr');
     addCells(row, [license.customerName, license.plan, license.seatLimit, license.offline ? '离线' : '在线', badge(licenseLabels[license.state], licenseTone(license.state)), localTime(license.expiresAt)]);
     licenseBody.append(row);
@@ -295,7 +363,7 @@ function renderOverview(data) {
 
   const deploymentBody = byId('deployments-body');
   deploymentBody.replaceChildren();
-  data.recent.deployments.forEach((deployment) => {
+  data.recent.deployments.slice(0, 12).forEach((deployment) => {
     const row = document.createElement('tr');
     addCells(row, [deployment.name, deployment.customerName, deployment.organizationId, badge(deployment.status === 'active' ? '有效' : '停用', deployment.status === 'active' ? '' : 'warning'), localTime(deployment.updatedAt)]);
     deploymentBody.append(row);
@@ -304,12 +372,13 @@ function renderOverview(data) {
 
   const customerBody = byId('customers-body');
   customerBody.replaceChildren();
-  data.recent.customers.forEach((customer) => {
+  data.recent.customers.slice(0, 12).forEach((customer) => {
     const row = document.createElement('tr');
     addCells(row, [customer.name, customer.id, badge(customer.status === 'active' ? '正常' : '停用', customer.status === 'active' ? '' : 'warning'), localTime(customer.updatedAt)]);
     customerBody.append(row);
   });
   if (!data.recent.customers.length) emptyRow(customerBody, 4, '暂无客户');
+  populateWriteOptions(data);
 }
 function renderBackup(data) {
   const tones = { healthy: 'good', degraded: 'warning', failed: 'danger', missing: 'danger', not_configured: 'neutral' };
@@ -372,7 +441,7 @@ async function refreshDashboard() {
   if (!state.token) return;
   setStatus(byId('service-state'), '正在刷新', 'neutral');
   await Promise.all([
-    permissionAware('/v1/admin/overview?limit=12', renderOverview, (message) => {
+    permissionAware('/v1/admin/overview?limit=50', renderOverview, (message) => {
       setText('generated-at', '无查看权限'); toast(message);
     }),
     permissionAware('/v1/admin/backups/status?limit=8', renderBackup, (message) => {

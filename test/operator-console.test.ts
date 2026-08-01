@@ -35,6 +35,16 @@ describe('operator console assets', () => {
     expect(response.body).not.toContain('localStorage');
     expect(response.body).not.toContain('innerHTML');
     expect(response.body).toContain('/v1/admin-auth/login');
-    expect(response.body).toContain('/v1/admin/overview?limit=12');
+    expect(response.body).toContain('/v1/admin/overview?limit=50');
+    expect(response.body).toContain("'customer.create'");
+    expect(response.body).toContain("'deployment.create'");
+    expect(response.body).toContain("'license.issue'");
+    expect(response.body).toContain('hasPermission(permission)');
+    expect(response.body).toContain('syncOfflineLicenseControls()');
+    expect(response.body).toContain("request('/v1/admin/customers', { method: 'POST'");
+    expect(response.body).toContain("request('/v1/admin/deployments', { method: 'POST'");
+    expect(response.body).toContain("request('/v1/admin/licenses', { method: 'POST'");
+    expect(response.body).toContain('URL.createObjectURL(blob)');
+    expect(response.body).toContain('otto-license-');
   });
 });
