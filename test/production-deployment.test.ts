@@ -137,6 +137,9 @@ describe('production deployment assets', () => {
     expect(pitr).toContain('--user postgres postgres-pitr-drill');
     expect(pitr).toContain('otto-pgbackrest --stanza=otto-control check');
     expect(pitr).toContain('isolated PITR restore failed:');
+    expect(pitr.indexOf('mkdir -p "$PGDATA"')).toBeLessThan(
+      pitr.indexOf('find "$PGDATA" -mindepth 1 -delete'),
+    );
     const physicalBackup = repositoryFile('deploy/backup-pitr-postgres.sh');
     expect(physicalBackup).toContain(
       'compose exec -T --user postgres "$PRIMARY" otto-pgbackrest',

@@ -110,8 +110,8 @@ fi
 if DRILL_OUTPUT=$(compose --profile ops exec -T --user postgres -e PITR_TARGET="$TARGET" postgres-pitr-drill \
   sh -ec '
     pg_ctl -D "$PGDATA" -m immediate stop >/dev/null 2>&1 || true
-    find "$PGDATA" -mindepth 1 -delete
     mkdir -p "$PGDATA"
+    find "$PGDATA" -mindepth 1 -delete
     chmod 0700 "$PGDATA"
     if [ -n "$PITR_TARGET" ]; then
       otto-pgbackrest --stanza=otto-control \
