@@ -113,7 +113,7 @@ cleanup() {
   if [ -n "$RESTORE_PIPE" ]; then rm -f -- "$RESTORE_PIPE"; fi
   if [ -n "$REPORT_TEMP" ]; then rm -f -- "$REPORT_TEMP"; fi
   if [ -n "$DRILL_DATABASE" ]; then
-    compose exec -T postgres dropdb \
+    compose exec -T postgres-tools dropdb \
       --username "$DB_USER" --if-exists --force "$DRILL_DATABASE" >/dev/null 2>&1 || true
   fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
@@ -141,7 +141,7 @@ fi
 STARTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 STARTED_SECONDS=$NOW_SECONDS
 DRILL_DATABASE="otto_drill_$(date -u '+%Y%m%d%H%M%S')_$$"
-compose exec -T postgres createdb \
+compose exec -T postgres-tools createdb \
   --username "$DB_USER" \
   --owner "$DB_USER" \
   --template template0 \
@@ -154,7 +154,7 @@ node "$ROOT/scripts/backup-crypto.mjs" decrypt \
   --output - \
   --key-file "$BACKUP_KEY_FILE" > "$RESTORE_PIPE" &
 RESTORE_PID=$!
-if ! compose exec -T postgres pg_restore \
+if ! compose exec -T postgres-tools pg_restore \
   --username "$DB_USER" \
   --dbname "$DRILL_DATABASE" \
   --no-owner \
@@ -177,7 +177,7 @@ RESTORE_PIPE=''
 
 REQUIRED_TABLES='control_schema_migrations control_customers control_deployments control_licenses control_signing_keys control_audit_events control_telemetry_events control_update_distributions control_update_releases control_deployment_update_assignments control_admin_accounts control_admin_roles control_admin_sessions control_admin_approvals control_admin_approval_decisions'
 for TABLE in $REQUIRED_TABLES; do
-  EXISTS=$(compose exec -T postgres psql \
+  EXISTS=$(compose exec -T postgres-tools psql \
     --username "$DB_USER" --dbname "$DRILL_DATABASE" --tuples-only --no-align \
     --command "SELECT CASE WHEN to_regclass('public.$TABLE') IS NULL THEN 'missing' ELSE 'ok' END")
   if [ "$EXISTS" != ok ]; then
@@ -187,7 +187,7 @@ for TABLE in $REQUIRED_TABLES; do
 done
 
 query_count() {
-  compose exec -T postgres psql \
+  compose exec -T postgres-tools psql \
     --username "$DB_USER" --dbname "$DRILL_DATABASE" --tuples-only --no-align \
     --command "SELECT COUNT(*) FROM $1"
 }
@@ -204,7 +204,7 @@ case "$MIGRATION_COUNT" in
     ;;
 esac
 
-compose exec -T postgres dropdb \
+compose exec -T postgres-tools dropdb \
   --username "$DB_USER" --if-exists --force "$DRILL_DATABASE"
 DRILL_DATABASE=''
 

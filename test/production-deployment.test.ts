@@ -42,8 +42,20 @@ describe('production deployment assets', () => {
     });
   });
 
-  it('isolates PostgreSQL and hardens the control runtime', () => {
+  it('isolates the HA database plane and hardens every control runtime', () => {
     const compose = repositoryFile('compose.production.yaml');
+    expect(compose).toContain('  etcd-1:');
+    expect(compose).toContain('  etcd-2:');
+    expect(compose).toContain('  etcd-3:');
+    expect(compose).toContain('  postgres-1:');
+    expect(compose).toContain('  postgres-2:');
+    expect(compose).toContain('  postgres-3:');
+    expect(compose).toContain('  postgres-router:');
+    expect(compose).toContain('dockerfile: deploy/postgres-ha/Dockerfile');
+    expect(compose).toContain('postgres_superuser_password');
+    expect(compose).toContain('postgres_replication_password');
+    expect(compose).toContain('pgbackrest_cipher_pass');
+    expect(compose).toContain('database:');
     expect(compose).toContain('internal: true');
     expect(compose).toContain('read_only: true');
     expect(compose).toContain('no-new-privileges:true');
@@ -56,19 +68,41 @@ describe('production deployment assets', () => {
     expect(compose).toContain('file: ./secrets/alert_webhook_secret');
     expect(compose).toContain('- audit_anchor_token');
     expect(compose).toContain('file: ./secrets/audit_anchor_token');
-    const postgresService = compose.slice(
-      compose.indexOf('  postgres:'),
-      compose.indexOf('  control:'),
-    );
-    const controlService = compose.slice(
-      compose.indexOf('  control:'),
-      compose.indexOf('  caddy:'),
-    );
-    expect(postgresService).not.toContain('alert_webhook_secret');
-    expect(postgresService).not.toContain('audit_anchor_token');
-    expect(controlService).toContain('- alert_webhook_secret');
-    expect(controlService).toContain('- audit_anchor_token');
+    const databasePlane = compose.slice(compose.indexOf('services:'), compose.indexOf('  control-a:'));
+    expect(databasePlane).not.toContain('alert_webhook_secret');
+    expect(databasePlane).not.toContain('audit_anchor_token');
+    expect(compose).toContain('  control-a:');
+    expect(compose).toContain('  control-b:');
+    expect(compose).toContain('  control-c:');
     expect(compose).not.toMatch(/POSTGRES_PASSWORD:\s*[^\n]/u);
+  });
+
+  it('routes only to the Patroni primary and removes unhealthy control instances', () => {
+    const haproxy = repositoryFile('deploy/postgres-ha/haproxy.cfg');
+    const caddy = repositoryFile('deploy/Caddyfile');
+    expect(haproxy).toContain('option httpchk GET /primary');
+    expect(haproxy).toContain('on-marked-down shutdown-sessions');
+    expect(haproxy.match(/server postgres-[123]/gu)).toHaveLength(3);
+    expect(caddy).toContain('control-a:7788 control-b:7788 control-c:7788');
+    expect(caddy).toContain('health_uri /health/ready');
+    expect(caddy).toContain('lb_policy least_conn');
+    expect(caddy).toContain('fail_duration 30s');
+  });
+
+  it('enables synchronous Patroni failover and encrypted continuous WAL archiving', () => {
+    const entrypoint = repositoryFile('deploy/postgres-ha/patroni-entrypoint.sh');
+    const pgbackrest = repositoryFile('deploy/postgres-ha/pgbackrest.conf');
+    expect(entrypoint).toContain('synchronous_mode: true');
+    expect(entrypoint).toContain('synchronous_node_count: 1');
+    expect(entrypoint).toContain('failsafe_mode: true');
+    expect(entrypoint).toContain('host replication replicator 0.0.0.0/0 scram-sha-256');
+    expect(entrypoint).toContain('password_encryption: scram-sha-256');
+    expect(entrypoint).toContain('archive_mode:');
+    expect(entrypoint).toContain('archive-push %p');
+    expect(entrypoint).toContain('archive-get %f %p');
+    expect(entrypoint).toContain('use_pg_rewind: true');
+    expect(pgbackrest).toContain('repo1-cipher-type=aes-256-cbc');
+    expect(pgbackrest).toContain('repo1-retention-full=4');
   });
 
   it('publishes only the TLS edge and runs the application image as non-root', () => {
@@ -93,7 +127,11 @@ describe('production deployment assets', () => {
     expect(backup).toContain('--report-directory');
     expect(backup).toContain('CONTROL_BACKUP_RETENTION_DAYS');
     expect(restore).toContain('--confirm=RESTORE_OTTO_CONTROL');
-    expect(restore.indexOf('backup-postgres.sh')).toBeLessThan(restore.indexOf('compose stop control'));
+    expect(restore.indexOf('backup-postgres.sh')).toBeLessThan(
+      restore.indexOf('compose stop control-a control-b control-c'),
+    );
+    expect(backup).toContain('compose exec -T postgres-tools pg_dump');
+    expect(restore).toContain('compose exec -T postgres-tools pg_restore');
     expect(restore).toContain('sha256sum --check');
     expect(restore).toContain('backup-crypto.mjs');
     expect(restore).toContain('/health/ready');
@@ -122,5 +160,31 @@ describe('production deployment assets', () => {
     expect(service).toContain('TimeoutStartSec=2h');
     expect(timer).toContain('OnCalendar=Sun');
     expect(timer).toContain('Persistent=true');
+  });
+
+  it('ships physical backup, PITR, and automatic failover drills', () => {
+    const backup = repositoryFile('deploy/backup-pitr-postgres.sh');
+    const pitr = repositoryFile('deploy/drill-pitr-postgres.sh');
+    const failover = repositoryFile('deploy/drill-postgres-failover.sh');
+    expect(backup).toContain('--type="$TYPE" backup');
+    expect(backup).toContain('otto-pgbackrest --stanza=otto-control check');
+    expect(pitr).toContain('postgres-pitr-drill');
+    expect(pitr).toContain('--type=time --target="$PITR_TARGET"');
+    expect(pitr).toContain('CONTROL_PITR_MAX_BACKUP_AGE_HOURS');
+    expect(pitr).toContain('backup_age_seconds');
+    expect(pitr).toContain('control_schema_migrations');
+    expect(failover).toContain('--confirm=FAILOVER_OTTO_CONTROL');
+    expect(failover).toContain('compose stop "$OLD_PRIMARY"');
+    expect(failover).toContain('CREATE TEMP TABLE otto_control_failover_probe');
+    expect(failover).toContain('former_primary_rejoined=true');
+    expect(repositoryFile('deploy/systemd/otto-control-pitr-full.timer')).toContain(
+      'Persistent=true',
+    );
+    expect(repositoryFile('deploy/systemd/otto-control-pitr-diff.timer')).toContain(
+      'OnCalendar=Mon..Sat',
+    );
+    expect(repositoryFile('deploy/systemd/otto-control-pitr-drill.timer')).toContain(
+      'OnCalendar=Sun',
+    );
   });
 });

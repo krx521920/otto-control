@@ -55,8 +55,9 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Centrally controlled per-module rates; private deployments report units, not prices
 - Request idempotency, original-charge refund limits, and automatic expired-hold release
 - Organization/module statements plus UTF-8 CSV transaction exports
-- Production Compose stack with isolated PostgreSQL, automatic HTTPS, persistent
-  volumes, read-only control runtime, and file-mounted secrets
+- Production Compose stack with a three-node Patroni/PostgreSQL cluster, etcd
+  quorum, automatic primary failover, a stable HAProxy write endpoint, three
+  Control instances, Caddy health-based load balancing, and file-mounted secrets
 - One-command Ed25519 key and random credential bootstrap that refuses to
   overwrite an existing production identity
 - AES-256-GCM encrypted PostgreSQL backups with atomic publication, integrity
@@ -137,14 +138,27 @@ docker compose -f compose.production.yaml --env-file .env.production ps
 curl https://control.example.com/health/ready
 ```
 
-The stack keeps PostgreSQL on an internal-only network. Only Caddy publishes
-ports 80 and 443; it obtains and renews the public TLS certificate. The control
-container runs without Linux capabilities, with a read-only root filesystem,
-and receives credentials through `/run/secrets` rather than image layers or
-plain environment values.
+The stack keeps etcd and every PostgreSQL instance on a database-only network.
+HAProxy publishes the current Patroni primary only to the internal application
+network. Three Control instances share the same PostgreSQL state and signing
+identity; Caddy checks `/health/ready`, removes failed instances, and sends new
+requests to the least-busy healthy instance. Only Caddy publishes ports 80 and
+443. Control containers run without Linux capabilities, with read-only root
+filesystems, and receive credentials through `/run/secrets` rather than image
+layers or plain environment values.
 
-Back up both the PostgreSQL volume and the `secrets/` directory. Never overwrite
-an existing private key. Add a new key to `control_signer_keyring.json`, restart
+This Compose topology provides **process-level high availability on one Linux
+host**. It tolerates a PostgreSQL or Control container/process failure, but it
+does not survive loss of that host, its Docker daemon, its storage, its network,
+or the single edge IP. Host-level production HA requires three PostgreSQL/etcd
+nodes on separate failure domains, at least two Control/edge hosts behind an
+external load balancer or floating IP, and the pgBackRest repository on encrypted
+off-host object or replicated storage. Do not market the single-host profile as
+datacenter or cross-region HA.
+
+Back up the pgBackRest repository, encrypted logical backups, and the `secrets/`
+directory under separate access controls. Never overwrite an existing private
+key. Add a new key to `control_signer_keyring.json`, restart
 the control service so it is registered as `standby`, distribute the signed
 public keyring, and only then activate it. The old key becomes `retired` and
 continues to verify historical License envelopes. Use `revoked` only for a
@@ -153,6 +167,42 @@ bootstrap command uses exclusive file creation and refuses to overwrite an
 existing identity.
 
 ### Backup and restore
+
+Patroni enables continuous WAL archiving through pgBackRest. The repository is
+encrypted with `secrets/pgbackrest_cipher_pass`; bootstrap creates the stanza and
+first full physical backup before admitting production work. Install the full,
+differential, and PITR drill schedules with the existing logical-backup units:
+
+```bash
+sudo install -m 0644 deploy/systemd/otto-control-pitr-* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now \
+  otto-control-pitr-full.timer \
+  otto-control-pitr-diff.timer \
+  otto-control-pitr-drill.timer
+```
+
+Run and verify the three HA/DR paths manually before go-live:
+
+```bash
+sh deploy/backup-pitr-postgres.sh full
+sh deploy/drill-pitr-postgres.sh
+sh deploy/drill-pitr-postgres.sh 2026-08-02T10:15:00+08:00
+sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL
+```
+
+The PITR drill restores physical files into the dedicated
+`postgres_pitr_drill_data` volume and never points a server at the production
+data directories. The failover drill stops the current primary, waits for
+Patroni to promote a standby, proves the stable endpoint accepts a rolled-back
+write, and then rejoins the former primary. Keep the existing AES-256-GCM logical
+backup because it provides a portable schema/data export independent of the
+physical PostgreSQL cluster.
+
+An existing single-PostgreSQL deployment must create and verify an encrypted
+logical backup **before** replacing its old Compose file. Start the new HA stack,
+then restore that archive through `deploy/restore-postgres.sh`; the old
+`postgres_data` volume is not silently attached to a Patroni member.
 
 Create an encrypted backup immediately:
 
@@ -327,6 +377,7 @@ a misleading success report.
 | `CONTROL_DATABASE_PASSWORD` | empty | PostgreSQL password; file-backed form is preferred |
 | `CONTROL_DATABASE_PASSWORD_FILE` | empty | Read-only file containing the PostgreSQL password |
 | `CONTROL_DATABASE_SSL` | production: `true` | Require verified TLS to PostgreSQL |
+| `ETCD_IMAGE` | `quay.io/coreos/etcd:v3.5.21` | Pinned etcd image used by the production HA Compose profile |
 | `CONTROL_ADMIN_TOKEN` | empty | 32-byte minimum emergency secret used only for first administrator bootstrap |
 | `CONTROL_ADMIN_TOKEN_FILE` | empty | Read-only file containing the bootstrap secret |
 | `CONTROL_TOKEN_SECRET` | empty | 32-byte minimum root secret used to derive scoped tokens |
@@ -366,6 +417,8 @@ a misleading success report.
 | `CONTROL_BACKUP_S3_TIMEOUT_MS` | `120000` | Per-request inactivity timeout for remote backup operations |
 | `CONTROL_DRILL_REPORT_RETENTION_DAYS` | `180` | Number of days successful restore-drill reports are retained |
 | `CONTROL_DRILL_MAX_BACKUP_AGE_HOURS` | `48` | Oldest encrypted backup accepted by a restore drill |
+| `CONTROL_PITR_REPORT_RETENTION_DAYS` | `180` | Days to retain physical-backup and PITR drill reports |
+| `CONTROL_PITR_MAX_BACKUP_AGE_HOURS` | `24` | Oldest physical backup accepted by a PITR drill |
 | `OTTO_CONTROL_BACKUP_KEY_FILE` | empty | File containing the backup encryption key |
 
 Multi-channel alert delivery is configured with a read-only JSON manifest such

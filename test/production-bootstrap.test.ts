@@ -24,6 +24,18 @@ describe('production bootstrap', () => {
         join(output, 'secrets', 'postgres_password'),
         'utf8',
       ).trim();
+      const superuserPassword = readFileSync(
+        join(output, 'secrets', 'postgres_superuser_password'),
+        'utf8',
+      ).trim();
+      const replicationPassword = readFileSync(
+        join(output, 'secrets', 'postgres_replication_password'),
+        'utf8',
+      ).trim();
+      const pgbackrestCipherPass = readFileSync(
+        join(output, 'secrets', 'pgbackrest_cipher_pass'),
+        'utf8',
+      ).trim();
       const backupKey = readFileSync(
         join(output, 'secrets', 'backup_encryption_key'),
         'utf8',
@@ -45,6 +57,8 @@ describe('production bootstrap', () => {
         'utf8',
       )) as { version: number; keys: Array<{ privateKeyFile: string }> };
       expect(environment).toContain('CONTROL_PUBLIC_BASE_URL=https://control.example.test');
+      expect(environment).toContain('CONTROL_DATABASE_HOST=postgres-router');
+      expect(environment).toContain('ETCD_IMAGE=quay.io/coreos/etcd:v3.5.21');
       expect(environment).toContain('CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token');
       expect(environment).toContain(
         'CONTROL_SIGNER_KEYRING_FILE=/run/otto-secrets/control_signer_keyring.json',
@@ -64,9 +78,14 @@ describe('production bootstrap', () => {
       );
       expect(environment).toContain('CONTROL_AUDIT_WITNESS_SOURCES_FILE=');
       expect(environment).toContain('CONTROL_BACKUP_S3_ADDRESSING_STYLE=path');
+      expect(environment).toContain('CONTROL_PITR_REPORT_RETENTION_DAYS=180');
+      expect(environment).toContain('CONTROL_PITR_MAX_BACKUP_AGE_HOURS=24');
       expect(environment).not.toMatch(/CONTROL_BACKUP_S3_SECRET_ACCESS_KEY=[^\n]+/u);
       expect(environment).not.toContain(adminToken);
       expect(environment).not.toContain(databasePassword);
+      expect(environment).not.toContain(superuserPassword);
+      expect(environment).not.toContain(replicationPassword);
+      expect(environment).not.toContain(pgbackrestCipherPass);
       expect(environment).not.toContain(backupKey);
       expect(environment).not.toContain(alertWebhookSecret);
       expect(environment).not.toContain(auditAnchorToken);

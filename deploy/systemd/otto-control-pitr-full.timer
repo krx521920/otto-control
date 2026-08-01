@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Otto Control full physical backup
+
+[Timer]
+OnCalendar=Sun *-*-* 01:10:00
+RandomizedDelaySec=20m
+Persistent=true
+Unit=otto-control-pitr-full.service
+
+[Install]
+WantedBy=timers.target

@@ -93,7 +93,7 @@ node "$ROOT/scripts/backup-crypto.mjs" decrypt \
   --output - \
   --key-file "$BACKUP_KEY_FILE" > "$VERIFY_PIPE" &
 VERIFY_PID=$!
-if ! compose exec -T postgres pg_restore --list < "$VERIFY_PIPE" >/dev/null; then
+if ! compose exec -T postgres-tools pg_restore --list < "$VERIFY_PIPE" >/dev/null; then
   kill "$VERIFY_PID" 2>/dev/null || true
   wait "$VERIFY_PID" 2>/dev/null || true
   VERIFY_PID=''
@@ -136,13 +136,13 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-compose stop control
-compose exec -T postgres dropdb \
+compose stop control-a control-b control-c
+compose exec -T postgres-tools dropdb \
   --username "$DB_USER" \
   --if-exists \
   --force \
   "$DB_NAME"
-compose exec -T postgres createdb \
+compose exec -T postgres-tools createdb \
   --username "$DB_USER" \
   --owner "$DB_USER" \
   "$DB_NAME"
@@ -153,7 +153,7 @@ node "$ROOT/scripts/backup-crypto.mjs" decrypt \
   --output - \
   --key-file "$BACKUP_KEY_FILE" > "$RESTORE_PIPE" &
 RESTORE_PID=$!
-if ! compose exec -T postgres pg_restore \
+if ! compose exec -T postgres-tools pg_restore \
   --username "$DB_USER" \
   --dbname "$DB_NAME" \
   --no-owner \
@@ -173,10 +173,10 @@ fi
 RESTORE_PID=''
 rm -f -- "$RESTORE_PIPE"
 RESTORE_PIPE=''
-compose start control
+compose start control-a control-b control-c
 
 ATTEMPT=0
-until compose exec -T control node -e \
+until compose exec -T control-a node -e \
   "fetch('http://127.0.0.1:7788/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 do
   ATTEMPT=$((ATTEMPT + 1))

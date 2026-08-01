@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly isolated Otto Control PITR drill
+
+[Timer]
+OnCalendar=Sun *-*-* 04:20:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=otto-control-pitr-drill.service
+
+[Install]
+WantedBy=timers.target

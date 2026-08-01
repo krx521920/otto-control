@@ -32,6 +32,9 @@ function main() {
     resolve(secretDirectory, 'control_admin_token'),
     resolve(secretDirectory, 'control_token_secret'),
     resolve(secretDirectory, 'postgres_password'),
+    resolve(secretDirectory, 'postgres_superuser_password'),
+    resolve(secretDirectory, 'postgres_replication_password'),
+    resolve(secretDirectory, 'pgbackrest_cipher_pass'),
     resolve(secretDirectory, 'backup_encryption_key'),
     resolve(secretDirectory, 'alert_webhook_secret'),
     resolve(secretDirectory, 'audit_anchor_token'),
@@ -62,6 +65,18 @@ function main() {
   writeSecret(resolve(secretDirectory, 'control_admin_token'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'control_token_secret'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'postgres_password'), randomBytes(48).toString('base64url'));
+  writeSecret(
+    resolve(secretDirectory, 'postgres_superuser_password'),
+    randomBytes(48).toString('base64url'),
+  );
+  writeSecret(
+    resolve(secretDirectory, 'postgres_replication_password'),
+    randomBytes(48).toString('base64url'),
+  );
+  writeSecret(
+    resolve(secretDirectory, 'pgbackrest_cipher_pass'),
+    randomBytes(48).toString('base64url'),
+  );
   writeSecret(resolve(secretDirectory, 'backup_encryption_key'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'alert_webhook_secret'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'audit_anchor_token'), randomBytes(48).toString('base64url'));
@@ -74,7 +89,7 @@ function main() {
     'CONTROL_TRUST_PROXY=true',
     `CONTROL_PUBLIC_BASE_URL=${publicUrl.origin}`,
     `CONTROL_DOMAIN=${publicUrl.hostname}`,
-    'CONTROL_DATABASE_HOST=postgres',
+    'CONTROL_DATABASE_HOST=postgres-router',
     'CONTROL_DATABASE_PORT=5432',
     'CONTROL_DATABASE_NAME=otto_control',
     'CONTROL_DATABASE_USER=otto_control',
@@ -115,9 +130,12 @@ function main() {
     'CONTROL_BACKUP_S3_TIMEOUT_MS=120000',
     'CONTROL_DRILL_REPORT_RETENTION_DAYS=180',
     'CONTROL_DRILL_MAX_BACKUP_AGE_HOURS=48',
+    'CONTROL_PITR_REPORT_RETENTION_DAYS=180',
+    'CONTROL_PITR_MAX_BACKUP_AGE_HOURS=24',
     'OTTO_CONTROL_BACKUP_KEY_FILE=./secrets/backup_encryption_key',
     'POSTGRES_DB=otto_control',
     'POSTGRES_USER=otto_control',
+    'ETCD_IMAGE=quay.io/coreos/etcd:v3.5.21',
     '',
   ].join('\n');
   writeFileSync(targets[0], environment, {

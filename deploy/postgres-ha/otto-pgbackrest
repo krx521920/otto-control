@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+CIPHER_FILE=${PGBACKREST_CIPHER_FILE:-/run/secrets/pgbackrest_cipher_pass}
+if [ ! -s "$CIPHER_FILE" ]; then
+  printf '%s\n' 'pgBackRest repository encryption secret is missing' >&2
+  exit 1
+fi
+
+exec pgbackrest \
+  --config=/etc/pgbackrest/pgbackrest.conf \
+  --repo1-cipher-pass="$(cat "$CIPHER_FILE")" \
+  "$@"

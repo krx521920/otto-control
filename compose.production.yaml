@@ -1,70 +1,243 @@
 name: otto-control
 
+x-postgres-common: &postgres-common
+  build:
+    context: .
+    dockerfile: deploy/postgres-ha/Dockerfile
+  restart: unless-stopped
+  depends_on:
+    etcd-1:
+      condition: service_healthy
+    etcd-2:
+      condition: service_healthy
+    etcd-3:
+      condition: service_healthy
+  secrets:
+    - postgres_password
+    - postgres_superuser_password
+    - postgres_replication_password
+    - pgbackrest_cipher_pass
+  expose:
+    - "5432"
+    - "8008"
+  healthcheck:
+    test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8008/readiness"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+    start_period: 30s
+  networks:
+    - database
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=32m
+    - /run/patroni:rw,noexec,nosuid,size=2m
+    - /var/run/postgresql:rw,noexec,nosuid,size=2m
+    - /var/log/pgbackrest:rw,noexec,nosuid,size=16m
+  security_opt:
+    - no-new-privileges:true
+
+x-control-common: &control-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  init: true
+  env_file:
+    - .env.production
+  depends_on:
+    postgres-tools:
+      condition: service_healthy
+  expose:
+    - "7788"
+  secrets:
+    - control_admin_token
+    - control_token_secret
+    - source: control_signer_private_key
+      target: control_signer_private_key.pem
+    - postgres_password
+    - alert_webhook_secret
+    - audit_anchor_token
+  volumes:
+    - ./secrets:/run/otto-secrets:ro
+    - ./backups/reports:/var/lib/otto-control/backup-reports:ro
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=32m
+  networks:
+    - backend
+    - edge
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 services:
-  postgres:
+  etcd-1:
+    image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.21}
+    restart: unless-stopped
+    environment:
+      ETCDCTL_API: "3"
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-1
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-1:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=otto-control-postgres
+    volumes:
+      - etcd_1_data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [database]
+    security_opt: [no-new-privileges:true]
+
+  etcd-2:
+    image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.21}
+    restart: unless-stopped
+    environment:
+      ETCDCTL_API: "3"
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-2
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-2:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-2:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=otto-control-postgres
+    volumes:
+      - etcd_2_data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [database]
+    security_opt: [no-new-privileges:true]
+
+  etcd-3:
+    image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.21}
+    restart: unless-stopped
+    environment:
+      ETCDCTL_API: "3"
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-3
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-3:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-3:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=otto-control-postgres
+    volumes:
+      - etcd_3_data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [database]
+    security_opt: [no-new-privileges:true]
+
+  postgres-1:
+    <<: *postgres-common
+    environment:
+      PATRONI_NAME: postgres-1
+    volumes:
+      - postgres_1_data:/var/lib/postgresql/data
+      - pgbackrest_repository:/var/lib/pgbackrest
+
+  postgres-2:
+    <<: *postgres-common
+    environment:
+      PATRONI_NAME: postgres-2
+    volumes:
+      - postgres_2_data:/var/lib/postgresql/data
+      - pgbackrest_repository:/var/lib/pgbackrest
+
+  postgres-3:
+    <<: *postgres-common
+    environment:
+      PATRONI_NAME: postgres-3
+    volumes:
+      - postgres_3_data:/var/lib/postgresql/data
+      - pgbackrest_repository:/var/lib/pgbackrest
+
+  postgres-router:
+    image: haproxy:3.1-alpine
+    restart: unless-stopped
+    depends_on:
+      postgres-1: { condition: service_started }
+      postgres-2: { condition: service_started }
+      postgres-3: { condition: service_started }
+    expose: ["5432"]
+    volumes:
+      - ./deploy/postgres-ha/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5432"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [database, backend]
+    security_opt: [no-new-privileges:true]
+
+  postgres-tools:
     image: postgres:17-alpine
     restart: unless-stopped
-    env_file:
-      - .env.production
-    environment:
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-    secrets:
-      - postgres_password
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - backend
-    security_opt:
-      - no-new-privileges:true
-
-  control:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    init: true
-    env_file:
-      - .env.production
     depends_on:
-      postgres:
+      postgres-router:
         condition: service_healthy
-    expose:
-      - "7788"
-    secrets:
-      - control_admin_token
-      - control_token_secret
-      - source: control_signer_private_key
-        target: control_signer_private_key.pem
-      - postgres_password
-      - alert_webhook_secret
-      - audit_anchor_token
-    volumes:
-      - ./secrets:/run/otto-secrets:ro
-      - ./backups/reports:/var/lib/otto-control/backup-reports:ro
-    read_only: true
+    environment:
+      PGDATABASE: ${POSTGRES_DB:-otto_control}
+      PGHOST: postgres-router
+      PGPASSFILE: /tmp/.pgpass
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-otto_control}
+    user: postgres
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        password="$$(cat /run/secrets/postgres_password)"
+        printf '%s:%s:%s:%s:%s\n' "$$PGHOST" "$$PGPORT" "$$PGDATABASE" "$$PGUSER" "$$password" > "$$PGPASSFILE"
+        chmod 0600 "$$PGPASSFILE"
+        exec tail -f /dev/null
+    secrets: [postgres_password]
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=32m
-    networks:
-      - backend
-      - edge
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
+      - /tmp:rw,noexec,nosuid,size=1m,mode=1777
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --host=$$PGHOST --port=$$PGPORT --username=$$PGUSER --dbname=$$PGDATABASE"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [backend]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  control-a:
+    <<: *control-common
+
+  control-b:
+    <<: *control-common
+
+  control-c:
+    <<: *control-common
 
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    env_file:
-      - .env.production
-    depends_on:
-      control:
-        condition: service_healthy
+    env_file: [.env.production]
     ports:
       - "80:80"
       - "443:443"
@@ -73,10 +246,30 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    networks:
-      - edge
-    security_opt:
-      - no-new-privileges:true
+    networks: [edge]
+    security_opt: [no-new-privileges:true]
+
+  postgres-pitr-drill:
+    profiles: [ops]
+    build:
+      context: .
+      dockerfile: deploy/postgres-ha/Dockerfile
+    entrypoint: [tail, -f, /dev/null]
+    user: postgres
+    read_only: true
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+    secrets: [pgbackrest_cipher_pass]
+    volumes:
+      - postgres_pitr_drill_data:/var/lib/postgresql/data
+      - pgbackrest_repository:/var/lib/pgbackrest:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /var/run/postgresql:rw,noexec,nosuid,size=2m,mode=1777
+      - /var/log/pgbackrest:rw,noexec,nosuid,size=16m,mode=1777
+    networks: [database]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
 
 secrets:
   control_admin_token:
@@ -87,17 +280,32 @@ secrets:
     file: ./secrets/control_signer_private_key.pem
   postgres_password:
     file: ./secrets/postgres_password
+  postgres_superuser_password:
+    file: ./secrets/postgres_superuser_password
+  postgres_replication_password:
+    file: ./secrets/postgres_replication_password
+  pgbackrest_cipher_pass:
+    file: ./secrets/pgbackrest_cipher_pass
   alert_webhook_secret:
     file: ./secrets/alert_webhook_secret
   audit_anchor_token:
     file: ./secrets/audit_anchor_token
 
 volumes:
-  postgres_data:
+  etcd_1_data:
+  etcd_2_data:
+  etcd_3_data:
+  postgres_1_data:
+  postgres_2_data:
+  postgres_3_data:
+  postgres_pitr_drill_data:
+  pgbackrest_repository:
   caddy_data:
   caddy_config:
 
 networks:
+  database:
+    internal: true
   backend:
     internal: true
   edge:

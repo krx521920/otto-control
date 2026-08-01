@@ -101,7 +101,7 @@ FINAL_FILE="$BACKUP_DIR/$BACKUP_NAME"
 DUMP_PIPE="$BACKUP_DIR/.dump-$$.pipe"
 mkfifo "$DUMP_PIPE"
 
-compose exec -T postgres pg_dump \
+compose exec -T postgres-tools pg_dump \
   --username "$DB_USER" \
   --dbname "$DB_NAME" \
   --format custom \
@@ -134,7 +134,7 @@ node "$ROOT/scripts/backup-crypto.mjs" decrypt \
   --output - \
   --key-file "$BACKUP_KEY_FILE" > "$DECRYPT_PIPE" &
 DECRYPT_PID=$!
-if ! compose exec -T postgres pg_restore --list < "$DECRYPT_PIPE" >/dev/null; then
+if ! compose exec -T postgres-tools pg_restore --list < "$DECRYPT_PIPE" >/dev/null; then
   kill "$DECRYPT_PID" 2>/dev/null || true
   wait "$DECRYPT_PID" 2>/dev/null || true
   DECRYPT_PID=''

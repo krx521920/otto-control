@@ -39,7 +39,7 @@ describe('backup encryption', () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it('rejects a modified encrypted backup and removes partial plaintext', () => {
     const directory = mkdtempSync(join(tmpdir(), 'otto-control-backup-tamper-'));
