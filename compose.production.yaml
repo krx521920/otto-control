@@ -74,6 +74,7 @@ x-control-common: &control-common
   cap_drop:
     - ALL
   cap_add:
+    - DAC_READ_SEARCH
     - SETGID
     - SETUID
 
@@ -230,7 +231,7 @@ services:
     networks: [backend]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
-    cap_add: [SETGID, SETUID]
+    cap_add: [DAC_READ_SEARCH, SETGID, SETUID]
 
   control-a:
     <<: *control-common
@@ -283,7 +284,7 @@ services:
     networks: [database]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
-    cap_add: [SETGID, SETUID]
+    cap_add: [DAC_READ_SEARCH, SETGID, SETUID]
 
 secrets:
   control_admin_token:

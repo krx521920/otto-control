@@ -7,7 +7,9 @@ if [ ! -s "$CIPHER_FILE" ]; then
   exit 1
 fi
 
+PGBACKREST_REPO1_CIPHER_PASS=$(cat "$CIPHER_FILE")
+export PGBACKREST_REPO1_CIPHER_PASS
+
 exec pgbackrest \
   --config=/etc/pgbackrest/pgbackrest.conf \
-  --repo1-cipher-pass="$(cat "$CIPHER_FILE")" \
   "$@"
