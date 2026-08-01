@@ -488,6 +488,46 @@ const MIGRATIONS: Migration[] = [
        ON CONFLICT DO NOTHING`,
     ],
   },
+  {
+    id: '009_release_artifacts',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_release_artifacts (
+        id TEXT PRIMARY KEY,
+        release_id TEXT NOT NULL REFERENCES control_update_releases(id) ON DELETE CASCADE,
+        distribution_id TEXT NOT NULL REFERENCES control_update_distributions(id),
+        release_version TEXT NOT NULL,
+        source_commit TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN (
+          'windows_installer', 'macos_dmg', 'linux_archive', 'enterprise_server',
+          'update_manifest', 'incremental_manifest', 'skills_component',
+          'renderer_patch', 'server_runtime'
+        )),
+        platform TEXT NOT NULL CHECK (platform IN (
+          'windows-x64', 'windows-arm64', 'macos-x64', 'macos-arm64',
+          'macos-universal', 'linux-x64', 'linux-arm64', 'any'
+        )),
+        url TEXT NOT NULL,
+        sha256 TEXT NOT NULL CHECK (sha256 ~ '^[a-f0-9]{64}$'),
+        size_bytes BIGINT NOT NULL CHECK (size_bytes > 0 AND size_bytes <= 9007199254740991),
+        signing_key_id TEXT NOT NULL REFERENCES control_signing_keys(key_id),
+        signature TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'revoked')),
+        revoked_at TIMESTAMPTZ,
+        revoked_by TEXT,
+        revocation_reason TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (release_id, kind, platform),
+        CHECK ((state = 'revoked') = (revoked_at IS NOT NULL)),
+        CHECK ((state = 'revoked') = (revoked_by IS NOT NULL)),
+        CHECK ((state = 'revoked') = (revocation_reason IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_release_artifacts_release
+       ON control_release_artifacts(release_id, state, kind, platform)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_release_artifacts_signing_key
+       ON control_release_artifacts(signing_key_id, state)`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

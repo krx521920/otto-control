@@ -1,3 +1,5 @@
+import type { SignedReleaseArtifactEnvelope } from './release-artifact.js';
+
 export const UPDATE_CHANNELS = ['canary', 'stable', 'required'] as const;
 export type UpdateChannel = (typeof UPDATE_CHANNELS)[number];
 
@@ -26,6 +28,7 @@ export interface OttoUpdatePolicyPayload {
     notes: string;
     fullManifest: UpdateManifestReference | null;
     incrementalManifest: UpdateManifestReference | null;
+    artifacts: SignedReleaseArtifactEnvelope[];
     publishedAt: string;
   } | null;
   issuedAtMs: number;

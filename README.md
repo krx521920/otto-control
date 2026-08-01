@@ -42,6 +42,10 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Independent update distributions for Otto, Otto Green, and future private editions
 - Draft, canary, stable, and required release policy with deterministic deployment cohorts
 - SHA-256-pinned full and incremental manifests with short-lived Ed25519 policy envelopes
+- Immutable release-artifact records binding distribution, release, source commit,
+  platform, URL, size, and SHA-256 into independently signed Ed25519 envelopes
+- Fail-closed activation and rollback gates requiring a signed installer plus every
+  referenced manifest; artifact revocation atomically pauses an active release
 - Audited activation, pause, and rollback to the previous release policy
 - Per-customer integer credit accounts with separate available and frozen balances
 - Immutable top-up, freeze, capture, release, consumption, and refund transactions
@@ -175,7 +179,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.9.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.10.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -401,14 +405,26 @@ control service is unavailable.
    `PUT /v1/admin/deployments/:deploymentId/update-distribution`.
 3. Register a draft release with HTTPS full and/or incremental manifest URLs.
    Every manifest reference requires its lowercase SHA-256 digest.
-4. Activate the release. A canary uses a stable 1-100 cohort derived from the
+4. Register every downloadable file with
+   `POST /v1/admin/update-releases/:releaseId/artifacts`. At least one platform
+   installer and signed artifact records matching every referenced manifest are
+   required. Artifact metadata is immutable after signing.
+5. Activate the release. A canary uses a stable 1-100 cohort derived from the
    distribution, release, and deployment IDs. Stable and required releases are
    always 100 percent; required responses set `mandatory: true`.
-5. Otto signs `POST /v1/update-policy/resolve` with its derived lease token,
+6. Otto signs `POST /v1/update-policy/resolve` with its derived lease token,
    timestamp, and one-time nonce. The returned policy is Ed25519 signed and
-   expires after five minutes by default.
-6. Pause immediately stops new decisions. Rollback withdraws the selected
+   expires after five minutes by default. It includes each active artifact's
+   independently verifiable signed envelope.
+7. Pause immediately stops new decisions. Rollback withdraws the selected
    policy and restores its previous active policy when available.
+
+Revoking an artifact requires dual approval and atomically pauses its active
+release. Policy resolution rechecks artifact signatures, signing-key state,
+installer presence, and manifest bindings, so a stale database state fails
+closed. These detached Ed25519 signatures protect Otto's release metadata and
+download integrity. They complement, but do not replace, Windows Authenticode,
+Apple Developer ID signing and notarization, or Linux package signing.
 
 Policy rollback does not claim to downgrade clients that already installed an
 artifact. Client-side component receipts and full-installer rollback remain
@@ -457,6 +473,9 @@ POST /v1/admin/update-distributions
 PUT  /v1/admin/deployments/:deploymentId/update-distribution
 POST /v1/admin/update-releases
 GET  /v1/admin/update-distributions/:distributionId/releases
+POST /v1/admin/update-releases/:releaseId/artifacts
+GET  /v1/admin/update-releases/:releaseId/artifacts
+POST /v1/admin/release-artifacts/:artifactId/revoke
 POST /v1/admin/update-releases/:releaseId/activate
 POST /v1/admin/update-releases/:releaseId/pause
 POST /v1/admin/update-releases/:releaseId/rollback
@@ -477,6 +496,7 @@ Traefik
        -> lease_revocation (implemented foundation)
        -> telemetry_health (implemented foundation)
        -> update_policy (implemented foundation)
+       -> release_artifacts (implemented foundation)
        -> audit
 ```
 

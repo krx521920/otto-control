@@ -17,6 +17,11 @@ import type {
 } from '../contracts/telemetry.js';
 import type { UpdateChannel, UpdateReleaseState } from '../contracts/update-policy.js';
 import type {
+  ReleaseArtifactKind,
+  ReleaseArtifactPlatform,
+  ReleaseArtifactState,
+} from '../contracts/release-artifact.js';
+import type {
   BillingRateRecord,
   CreditAccountRecord,
   CreditHoldMutationResult,
@@ -186,6 +191,37 @@ export interface UpdateReleaseTransition {
   fallback: UpdateReleaseRecord | null;
 }
 
+export interface ReleaseArtifactRecord {
+  id: string;
+  releaseId: string;
+  distributionId: string;
+  releaseVersion: string;
+  sourceCommit: string;
+  kind: ReleaseArtifactKind;
+  platform: ReleaseArtifactPlatform;
+  url: string;
+  sha256: string;
+  sizeBytes: number;
+  signingKeyId: string;
+  signature: string;
+  state: ReleaseArtifactState;
+  revokedAt: Date | null;
+  revokedBy: string | null;
+  revocationReason: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type CreateReleaseArtifactRecordInput = Omit<
+  ReleaseArtifactRecord,
+  'state' | 'revokedAt' | 'revokedBy' | 'revocationReason' | 'updatedAt'
+>;
+
+export interface ReleaseArtifactRevocationResult {
+  artifact: ReleaseArtifactRecord;
+  releasePaused: boolean;
+}
+
 export interface DeploymentUpdateAssignmentRecord {
   deploymentId: string;
   distributionId: string;
@@ -350,6 +386,15 @@ export interface ControlStore {
   pauseUpdateRelease(id: string, updatedAt: Date): Promise<UpdateReleaseRecord | null>;
   rollbackUpdateRelease(id: string, updatedAt: Date): Promise<UpdateReleaseTransition | null>;
   getActiveUpdateReleases(distributionId: string): Promise<UpdateReleaseRecord[]>;
+  createReleaseArtifact(input: CreateReleaseArtifactRecordInput): Promise<ReleaseArtifactRecord>;
+  getReleaseArtifact(id: string): Promise<ReleaseArtifactRecord | null>;
+  listReleaseArtifacts(releaseId: string): Promise<ReleaseArtifactRecord[]>;
+  revokeReleaseArtifact(input: {
+    id: string;
+    actorId: string;
+    reason: string;
+    revokedAt: Date;
+  }): Promise<ReleaseArtifactRevocationResult | null>;
   consumeUpdatePolicyNonce(input: {
     deploymentId: string;
     nonce: string;

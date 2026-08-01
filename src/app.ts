@@ -11,6 +11,7 @@ import { registerCommercialControlRoutes } from './routes/commercial-control.js'
 import { registerPlatformRoutes } from './routes/platform.js';
 import { registerUpdatePolicyRoutes } from './routes/update-policy.js';
 import { registerBillingRoutes } from './routes/billing.js';
+import { registerReleaseArtifactRoutes } from './routes/release-artifacts.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
@@ -122,6 +123,7 @@ export async function buildControlApp(
       'lease_revocation',
       'telemetry_health',
       'update_policy',
+      'signed_release_artifacts',
     );
     capabilities.push('admin_identity', 'admin_rbac', 'admin_mfa', 'dual_control_approval');
     await registerAdminIdentityRoutes(app, {
@@ -131,6 +133,10 @@ export async function buildControlApp(
     await registerCommercialControlRoutes(app, commercialControl);
     await registerUpdatePolicyRoutes(app, {
       service: commercialControl.updatePolicy,
+      identity: commercialControl.identity,
+    });
+    await registerReleaseArtifactRoutes(app, {
+      service: commercialControl.releaseArtifacts,
       identity: commercialControl.identity,
     });
     if (commercialControl.billing) {

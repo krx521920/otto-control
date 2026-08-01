@@ -6,6 +6,7 @@ import { ControlTokenIssuer } from './modules/commercial-control/token-issuer.js
 import { AdminIdentityService } from './modules/admin-identity/service.js';
 import { UpdatePolicyService } from './modules/update-policy/service.js';
 import { BillingService } from './modules/billing/service.js';
+import { ReleaseArtifactService } from './modules/release-artifacts/service.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 
 export interface CommercialControlRuntime {
@@ -14,6 +15,7 @@ export interface CommercialControlRuntime {
   updatePolicy: UpdatePolicyService;
   identity: AdminIdentityService;
   billing?: BillingService;
+  releaseArtifacts: ReleaseArtifactService;
 }
 
 function missingConfiguration(config: Readonly<ControlConfig>): string[] {
@@ -55,10 +57,12 @@ export async function createCommercialControlRuntime(
       store,
       controlSecret: config.tokenSecret!,
     });
+    const releaseArtifacts = new ReleaseArtifactService({ store, signer });
     return {
       adminToken: config.adminToken!,
       identity,
       billing: new BillingService({ store, tokenIssuer }),
+      releaseArtifacts,
       service: new CommercialControlService({
         store,
         signer,
@@ -72,6 +76,7 @@ export async function createCommercialControlRuntime(
         store,
         signer,
         tokenIssuer,
+        releaseArtifacts,
         policyDurationMs: config.updatePolicyDurationMs,
       }),
     };

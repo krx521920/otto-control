@@ -11,6 +11,7 @@ import { AdminIdentityService } from '../src/modules/admin-identity/service.js';
 import { CommercialControlService } from '../src/modules/commercial-control/service.js';
 import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
 import { UpdatePolicyService } from '../src/modules/update-policy/service.js';
+import { ReleaseArtifactService } from '../src/modules/release-artifacts/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
 const ADMIN_TOKEN = 'bootstrap-admin-token-that-is-at-least-32-bytes';
@@ -54,12 +55,14 @@ describe('administrator identity HTTP routes', () => {
     });
     const tokenIssuer = new ControlTokenIssuer(TOKEN_SECRET);
     const identity = new AdminIdentityService({ store, controlSecret: TOKEN_SECRET });
+    const releaseArtifacts = new ReleaseArtifactService({ store, signer });
     const app = await buildControlApp({
       config,
       logger: false,
       commercialControl: {
         adminToken: ADMIN_TOKEN,
         identity,
+        releaseArtifacts,
         service: new CommercialControlService({
           store,
           signer,
@@ -67,7 +70,12 @@ describe('administrator identity HTTP routes', () => {
           tokenIssuer,
           publicBaseUrl: config.publicBaseUrl!,
         }),
-        updatePolicy: new UpdatePolicyService({ store, signer, tokenIssuer }),
+        updatePolicy: new UpdatePolicyService({
+          store,
+          signer,
+          tokenIssuer,
+          releaseArtifacts,
+        }),
       },
     });
     apps.push(app);

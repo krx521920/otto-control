@@ -24,6 +24,7 @@ import type {
   AuditEventInput,
   ControlStore,
   CreateLicenseRecordInput,
+  CreateReleaseArtifactRecordInput,
   CreateUpdateReleaseRecordInput,
   CustomerRecord,
   DeploymentUpdateAssignmentRecord,
@@ -32,6 +33,8 @@ import type {
   LicenseRecord,
   LicenseSeatUsageRecord,
   RecordStatus,
+  ReleaseArtifactRecord,
+  ReleaseArtifactRevocationResult,
   SigningKeyProvider,
   SigningKeyRecord,
   SigningKeyState,
@@ -42,6 +45,11 @@ import type {
   UpdateReleaseTransition,
 } from './control-store.js';
 import type { UpdateChannel, UpdateReleaseState } from '../contracts/update-policy.js';
+import type {
+  ReleaseArtifactKind,
+  ReleaseArtifactPlatform,
+  ReleaseArtifactState,
+} from '../contracts/release-artifact.js';
 import type {
   BillingRateRecord,
   CreditAccountRecord,
@@ -287,6 +295,27 @@ interface DeploymentUpdateAssignmentRow {
   updated_at: Date;
 }
 
+interface ReleaseArtifactRow {
+  id: string;
+  release_id: string;
+  distribution_id: string;
+  release_version: string;
+  source_commit: string;
+  kind: ReleaseArtifactKind;
+  platform: ReleaseArtifactPlatform;
+  url: string;
+  sha256: string;
+  size_bytes: string;
+  signing_key_id: string;
+  signature: string;
+  state: ReleaseArtifactState;
+  revoked_at: Date | null;
+  revoked_by: string | null;
+  revocation_reason: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 function postgresCode(error: unknown): string | null {
   return error && typeof error === 'object' && 'code' in error
     ? String(error.code)
@@ -469,6 +498,29 @@ function updateReleaseFromRow(row: UpdateReleaseRow): UpdateReleaseRecord {
     incrementalManifestSha256: row.incremental_manifest_sha256,
     previousReleaseId: row.previous_release_id,
     publishedAt: row.published_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function releaseArtifactFromRow(row: ReleaseArtifactRow): ReleaseArtifactRecord {
+  return {
+    id: row.id,
+    releaseId: row.release_id,
+    distributionId: row.distribution_id,
+    releaseVersion: row.release_version,
+    sourceCommit: row.source_commit,
+    kind: row.kind,
+    platform: row.platform,
+    url: row.url,
+    sha256: row.sha256,
+    sizeBytes: Number(row.size_bytes),
+    signingKeyId: row.signing_key_id,
+    signature: row.signature,
+    state: row.state,
+    revokedAt: row.revoked_at,
+    revokedBy: row.revoked_by,
+    revocationReason: row.revocation_reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -2062,6 +2114,107 @@ export class PostgresControlStore implements ControlStore {
       [distributionId],
     );
     return result.rows.map(updateReleaseFromRow);
+  }
+
+  async createReleaseArtifact(
+    input: CreateReleaseArtifactRecordInput,
+  ): Promise<ReleaseArtifactRecord> {
+    try {
+      const result = await this.#pool.query<ReleaseArtifactRow>(
+        `INSERT INTO control_release_artifacts
+          (id, release_id, distribution_id, release_version, source_commit, kind, platform,
+           url, sha256, size_bytes, signing_key_id, signature, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)
+         RETURNING *`,
+        [
+          input.id,
+          input.releaseId,
+          input.distributionId,
+          input.releaseVersion,
+          input.sourceCommit,
+          input.kind,
+          input.platform,
+          input.url,
+          input.sha256,
+          input.sizeBytes,
+          input.signingKeyId,
+          input.signature,
+          input.createdAt,
+        ],
+      );
+      return releaseArtifactFromRow(result.rows[0]!);
+    } catch (error) {
+      if (postgresCode(error) === '23503') {
+        throw conflict('release, distribution, or signing key does not exist');
+      }
+      if (postgresCode(error) === '23505') {
+        throw conflict('release artifact already exists for this kind and platform');
+      }
+      throw error;
+    }
+  }
+
+  async getReleaseArtifact(id: string): Promise<ReleaseArtifactRecord | null> {
+    const result = await this.#pool.query<ReleaseArtifactRow>(
+      'SELECT * FROM control_release_artifacts WHERE id = $1',
+      [id],
+    );
+    return result.rows[0] ? releaseArtifactFromRow(result.rows[0]) : null;
+  }
+
+  async listReleaseArtifacts(releaseId: string): Promise<ReleaseArtifactRecord[]> {
+    const result = await this.#pool.query<ReleaseArtifactRow>(
+      `SELECT * FROM control_release_artifacts
+       WHERE release_id = $1
+       ORDER BY created_at ASC, id ASC`,
+      [releaseId],
+    );
+    return result.rows.map(releaseArtifactFromRow);
+  }
+
+  async revokeReleaseArtifact(input: {
+    id: string;
+    actorId: string;
+    reason: string;
+    revokedAt: Date;
+  }): Promise<ReleaseArtifactRevocationResult | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const selected = await client.query<ReleaseArtifactRow>(
+        'SELECT * FROM control_release_artifacts WHERE id = $1 FOR UPDATE',
+        [input.id],
+      );
+      const current = selected.rows[0];
+      if (!current || current.state !== 'active') {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const revoked = await client.query<ReleaseArtifactRow>(
+        `UPDATE control_release_artifacts
+         SET state = 'revoked', revoked_at = $2, revoked_by = $3,
+             revocation_reason = $4, updated_at = $2
+         WHERE id = $1
+         RETURNING *`,
+        [input.id, input.revokedAt, input.actorId, input.reason],
+      );
+      const paused = await client.query(
+        `UPDATE control_update_releases
+         SET state = 'paused', updated_at = $2
+         WHERE id = $1 AND state = 'active'`,
+        [current.release_id, input.revokedAt],
+      );
+      await client.query('COMMIT');
+      return {
+        artifact: releaseArtifactFromRow(revoked.rows[0]!),
+        releasePaused: paused.rowCount === 1,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async consumeUpdatePolicyNonce(input: {

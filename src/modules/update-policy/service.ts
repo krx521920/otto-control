@@ -18,6 +18,7 @@ import type {
   UpdateReleaseTransition,
 } from '../../storage/control-store.js';
 import type { ControlTokenIssuer } from '../commercial-control/token-issuer.js';
+import type { ReleaseArtifactService } from '../release-artifacts/service.js';
 
 const DISTRIBUTION_ID_PATTERN = /^[a-z0-9][a-z0-9_.-]{1,63}$/u;
 const DEPLOYMENT_ID_PATTERN = /^dep_[a-zA-Z0-9_-]{8,64}$/u;
@@ -46,6 +47,7 @@ export interface UpdatePolicyServiceOptions {
   store: ControlStore;
   signer: PayloadSigner;
   tokenIssuer: ControlTokenIssuer;
+  releaseArtifacts: ReleaseArtifactService;
   policyDurationMs?: number;
   now?: () => number;
 }
@@ -146,7 +148,10 @@ export function updateCohortPercent(
   return (digest.readUInt32BE(0) % 100) + 1;
 }
 
-function releasePayload(release: UpdateReleaseRecord): NonNullable<OttoUpdatePolicyPayload['release']> {
+function releasePayload(
+  release: UpdateReleaseRecord,
+  artifacts: NonNullable<OttoUpdatePolicyPayload['release']>['artifacts'],
+): NonNullable<OttoUpdatePolicyPayload['release']> {
   return {
     id: release.id,
     version: release.version,
@@ -163,6 +168,7 @@ function releasePayload(release: UpdateReleaseRecord): NonNullable<OttoUpdatePol
       url: release.incrementalManifestUrl,
       sha256: release.incrementalManifestSha256!,
     } : null,
+    artifacts,
     publishedAt: release.publishedAt!.toISOString(),
   };
 }
@@ -171,6 +177,7 @@ export class UpdatePolicyService {
   readonly #store: ControlStore;
   readonly #signer: PayloadSigner;
   readonly #tokens: ControlTokenIssuer;
+  readonly #releaseArtifacts: ReleaseArtifactService;
   readonly #policyDurationMs: number;
   readonly #now: () => number;
 
@@ -178,6 +185,7 @@ export class UpdatePolicyService {
     this.#store = options.store;
     this.#signer = options.signer;
     this.#tokens = options.tokenIssuer;
+    this.#releaseArtifacts = options.releaseArtifacts;
     this.#policyDurationMs = options.policyDurationMs ?? 5 * 60 * 1000;
     this.#now = options.now ?? Date.now;
     if (this.#policyDurationMs < 60_000 || this.#policyDurationMs > 60 * 60 * 1000) {
@@ -301,6 +309,7 @@ export class UpdatePolicyService {
     if (!current) throw notFound('update release not found');
     if (current.state === 'active') throw conflict('update release is already active');
     if (current.state === 'rolled_back') throw conflict('rolled-back release cannot be reactivated');
+    await this.#releaseArtifacts.assertReleaseReady(current);
     const transition = await this.#store.activateUpdateRelease(id, new Date(this.#now()));
     if (!transition) throw notFound('update release not found');
     await this.#store.appendAuditEvent({
@@ -334,6 +343,10 @@ export class UpdatePolicyService {
     if (!current) throw notFound('update release not found');
     if (current.state !== 'active' && current.state !== 'paused') {
       throw conflict('only an active or paused update release can be rolled back');
+    }
+    if (current.previousReleaseId) {
+      const fallback = await this.#store.getUpdateRelease(current.previousReleaseId);
+      if (fallback) await this.#releaseArtifacts.assertReleaseReady(fallback);
     }
     const transition = await this.#store.rollbackUpdateRelease(id, new Date(this.#now()));
     if (!transition) throw notFound('update release not found');
@@ -435,6 +448,7 @@ export class UpdatePolicyService {
     if (selected && !selected.publishedAt) {
       throw conflict('stored active update release is missing publishedAt');
     }
+    if (selected) await this.#releaseArtifacts.assertReleaseReady(selected);
     const reason = selected
       ? 'update_available'
       : releases.length === 0
@@ -442,6 +456,9 @@ export class UpdatePolicyService {
         : outsideRollout
           ? 'outside_rollout'
           : 'up_to_date';
+    const artifacts = selected
+      ? await this.#releaseArtifacts.activeEnvelopes(selected.id)
+      : [];
     const policy: OttoUpdatePolicyPayload = {
       version: 1,
       deploymentId,
@@ -449,7 +466,7 @@ export class UpdatePolicyService {
       currentVersion,
       decision: selected ? 'update' : 'none',
       reason,
-      release: selected ? releasePayload(selected) : null,
+      release: selected ? releasePayload(selected, artifacts) : null,
       issuedAtMs: now,
       expiresAtMs: now + this.#policyDurationMs,
     };

@@ -17,6 +17,7 @@ import { CommercialControlService } from '../src/modules/commercial-control/serv
 import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
 import { BillingService } from '../src/modules/billing/service.js';
 import { UpdatePolicyService } from '../src/modules/update-policy/service.js';
+import { ReleaseArtifactService } from '../src/modules/release-artifacts/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
 const ADMIN_TOKEN = 'test-admin-token-that-is-at-least-32-bytes';
@@ -99,15 +100,22 @@ describe('commercial control HTTP routes', () => {
       tokenIssuer,
       publicBaseUrl: config.publicBaseUrl!,
     });
+    const releaseArtifacts = new ReleaseArtifactService({ store, signer: keyring });
     app = await buildControlApp({
       config,
       logger: false,
       commercialControl: {
         adminToken: ADMIN_TOKEN,
         identity,
+        releaseArtifacts,
         service,
         billing: new BillingService({ store, tokenIssuer }),
-        updatePolicy: new UpdatePolicyService({ store, signer: keyring, tokenIssuer }),
+        updatePolicy: new UpdatePolicyService({
+          store,
+          signer: keyring,
+          tokenIssuer,
+          releaseArtifacts,
+        }),
       },
     });
   });
@@ -197,6 +205,7 @@ describe('commercial control HTTP routes', () => {
       'lease_revocation',
       'telemetry_health',
       'update_policy',
+      'signed_release_artifacts',
       'admin_identity',
       'admin_rbac',
       'admin_mfa',
@@ -663,6 +672,32 @@ describe('commercial control HTTP routes', () => {
     });
     expect(releaseResponse.statusCode).toBe(201);
     const releaseId = releaseResponse.json().release.id as string;
+    const manifestArtifact = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/update-releases/${releaseId}/artifacts`,
+      headers: authorization,
+      payload: {
+        kind: 'update_manifest',
+        platform: 'any',
+        url: 'https://updates.example.test/otto-green/latest.json',
+        sha256: 'e'.repeat(64),
+        sizeBytes: 4096,
+      },
+    });
+    expect(manifestArtifact.statusCode).toBe(201);
+    const installerArtifact = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/update-releases/${releaseId}/artifacts`,
+      headers: authorization,
+      payload: {
+        kind: 'windows_installer',
+        platform: 'windows-x64',
+        url: 'https://updates.example.test/otto-green/Otto-Green-Setup.exe',
+        sha256: 'f'.repeat(64),
+        sizeBytes: 120_000_000,
+      },
+    });
+    expect(installerArtifact.statusCode).toBe(201);
     const activationApproval = await approvedOperation(
       'update_release.activate',
       'update_release',
@@ -718,9 +753,37 @@ describe('commercial control HTTP routes', () => {
       policy: {
         decision: 'update',
         distributionId: 'otto-green',
-        release: { id: releaseId, version: '1.9.11' },
+        release: {
+          id: releaseId,
+          version: '1.9.11',
+          artifacts: expect.arrayContaining([
+            expect.objectContaining({
+              artifact: expect.objectContaining({ kind: 'windows_installer' }),
+            }),
+          ]),
+        },
       },
     });
     expect(resolved.json().signature).toMatch(/^ed25519:/u);
+
+    const installerId = installerArtifact.json().artifact.artifact.id as string;
+    const revocationRequest = { reason: 'Package integrity incident confirmed by release team' };
+    const revocationApproval = await approvedOperation(
+      'release_artifact.revoke',
+      'release_artifact',
+      installerId,
+      revocationRequest,
+    );
+    const revoked = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/release-artifacts/${installerId}/revoke`,
+      headers: { ...authorization, 'x-otto-approval-id': revocationApproval },
+      payload: revocationRequest,
+    });
+    expect(revoked.statusCode).toBe(200);
+    expect(revoked.json()).toMatchObject({
+      releasePaused: true,
+      artifact: { state: 'revoked' },
+    });
   });
 });

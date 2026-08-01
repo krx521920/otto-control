@@ -2,6 +2,7 @@ import type {
   AuditEventInput,
   ControlStore,
   CreateLicenseRecordInput,
+  CreateReleaseArtifactRecordInput,
   CreateUpdateReleaseRecordInput,
   CustomerRecord,
   DeploymentUpdateAssignmentRecord,
@@ -9,6 +10,8 @@ import type {
   LicenseLifecycleEventRecord,
   LicenseRecord,
   LicenseSeatUsageRecord,
+  ReleaseArtifactRecord,
+  ReleaseArtifactRevocationResult,
   SigningKeyProvider,
   SigningKeyRecord,
   SigningKeyTransition,
@@ -78,6 +81,7 @@ export class MemoryControlStore implements ControlStore {
   readonly telemetryNonces = new Set<string>();
   readonly updateDistributions = new Map<string, UpdateDistributionRecord>();
   readonly updateReleases = new Map<string, UpdateReleaseRecord>();
+  readonly releaseArtifacts = new Map<string, ReleaseArtifactRecord>();
   readonly updateAssignments = new Map<string, DeploymentUpdateAssignmentRecord>();
   readonly updatePolicyNonces = new Set<string>();
   readonly adminAccounts = new Map<string, AdminAccountRecord>();
@@ -912,6 +916,68 @@ export class MemoryControlStore implements ControlStore {
     return [...this.updateReleases.values()]
       .filter((release) => release.distributionId === distributionId && release.state === 'active')
       .sort((left, right) => priority[left.channel] - priority[right.channel]);
+  }
+
+  async createReleaseArtifact(
+    input: CreateReleaseArtifactRecordInput,
+  ): Promise<ReleaseArtifactRecord> {
+    if (!this.updateReleases.has(input.releaseId)) throw conflict('release does not exist');
+    if (this.releaseArtifacts.has(input.id)) throw conflict('release artifact already exists');
+    const duplicate = [...this.releaseArtifacts.values()].some((artifact) => (
+      artifact.releaseId === input.releaseId
+      && artifact.kind === input.kind
+      && artifact.platform === input.platform
+    ));
+    if (duplicate) throw conflict('release artifact already exists for this kind and platform');
+    const artifact: ReleaseArtifactRecord = {
+      ...input,
+      state: 'active',
+      revokedAt: null,
+      revokedBy: null,
+      revocationReason: null,
+      updatedAt: input.createdAt,
+    };
+    this.releaseArtifacts.set(artifact.id, artifact);
+    return artifact;
+  }
+
+  async getReleaseArtifact(id: string): Promise<ReleaseArtifactRecord | null> {
+    return this.releaseArtifacts.get(id) ?? null;
+  }
+
+  async listReleaseArtifacts(releaseId: string): Promise<ReleaseArtifactRecord[]> {
+    return [...this.releaseArtifacts.values()]
+      .filter((artifact) => artifact.releaseId === releaseId)
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+  }
+
+  async revokeReleaseArtifact(input: {
+    id: string;
+    actorId: string;
+    reason: string;
+    revokedAt: Date;
+  }): Promise<ReleaseArtifactRevocationResult | null> {
+    const existing = this.releaseArtifacts.get(input.id);
+    if (!existing || existing.state !== 'active') return null;
+    const artifact: ReleaseArtifactRecord = {
+      ...existing,
+      state: 'revoked',
+      revokedAt: input.revokedAt,
+      revokedBy: input.actorId,
+      revocationReason: input.reason,
+      updatedAt: input.revokedAt,
+    };
+    this.releaseArtifacts.set(input.id, artifact);
+    const release = this.updateReleases.get(artifact.releaseId);
+    const releasePaused = release?.state === 'active';
+    if (releasePaused) {
+      this.updateReleases.set(release.id, {
+        ...release,
+        state: 'paused',
+        updatedAt: input.revokedAt,
+      });
+    }
+    return { artifact, releasePaused };
   }
 
   async consumeUpdatePolicyNonce(input: {
