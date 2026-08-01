@@ -15,6 +15,7 @@ import { registerReleaseArtifactRoutes } from './routes/release-artifacts.js';
 import { registerBackupStatusRoutes } from './routes/backup-status.js';
 import { registerAlertDeliveryRoutes } from './routes/alert-delivery.js';
 import { registerOperatorConsoleRoutes } from './routes/operator-console.js';
+import { registerAuditRoutes } from './routes/audit.js';
 
 export interface BuildControlAppOptions {
   config?: Readonly<ControlConfig>;
@@ -153,6 +154,13 @@ export async function buildControlApp(
       service: commercialControl.alerts,
       identity: commercialControl.identity,
     });
+    if (commercialControl.audit) {
+      capabilities.push('tamper_evident_audit');
+      await registerAuditRoutes(app, {
+        service: commercialControl.audit,
+        identity: commercialControl.identity,
+      });
+    }
     await registerOperatorConsoleRoutes(app);
     if (commercialControl.billing) {
       capabilities.push('credit_billing', 'billing_statement_export');

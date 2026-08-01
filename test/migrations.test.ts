@@ -56,6 +56,10 @@ describe('PostgreSQL migrations', () => {
     expect(statements.some((statement) => (
       statement.includes('idx_control_alert_deliveries_fingerprint_channel')
     ))).toBe(true);
+    expect(statements.some((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_audit_chain_state')
+    ))).toBe(true);
+    expect(statements.some((statement) => statement.includes("('audit.read')"))).toBe(true);
   });
 
   it('rolls back a failed migration and always releases the lock', async () => {

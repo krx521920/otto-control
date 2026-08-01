@@ -37,6 +37,11 @@ import type {
   AlertDeliveryStatus,
   AlertSeverity,
 } from '../contracts/alert-delivery.js';
+import type {
+  AuditChainState,
+  AuditEventQuery,
+  AuditEventRecord,
+} from '../contracts/audit.js';
 
 export type RecordStatus = 'active' | 'suspended';
 
@@ -562,5 +567,13 @@ export interface ControlStore {
   }): Promise<AlertDeliveryRecord | null>;
   listAlertDeliveries(limit: number): Promise<AlertDeliveryRecord[]>;
   pruneAlertDeliveries(before: Date): Promise<number>;
+  listAuditEvents(input: AuditEventQuery): Promise<AuditEventRecord[]>;
+  listChainedAuditEvents(input: {
+    afterSequence: number;
+    throughSequence: number;
+    limit: number;
+  }): Promise<AuditEventRecord[]>;
+  getAuditChainState(): Promise<AuditChainState>;
+  countLegacyAuditEvents(): Promise<number>;
   appendAuditEvent(input: AuditEventInput): Promise<void>;
 }

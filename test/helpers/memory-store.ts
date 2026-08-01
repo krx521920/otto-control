@@ -51,6 +51,12 @@ import type {
   AlertDeliveryStatus,
   AlertSeverity,
 } from '../../src/contracts/alert-delivery.js';
+import type {
+  AuditChainState,
+  AuditEventQuery,
+  AuditEventRecord,
+} from '../../src/contracts/audit.js';
+import { AUDIT_GENESIS_HASH, auditEventHash } from '../../src/audit-chain.js';
 import { conflict } from '../../src/errors.js';
 
 const role = (
@@ -70,6 +76,7 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'update_release.publish', 'identity.read', 'identity.manage', 'approval.request',
   'approval.read', 'approval.decide',
   'billing.read', 'billing.topup', 'billing.manage', 'billing.refund',
+  'audit.read', 'audit.export', 'audit.verify',
 ];
 
 interface StoredTelemetryEvent extends OttoTelemetryEvent {
@@ -87,6 +94,7 @@ export class MemoryControlStore implements ControlStore {
   readonly signingKeys = new Map<string, SigningKeyRecord>();
   readonly nonces = new Set<string>();
   readonly audits: AuditEventInput[] = [];
+  readonly auditRecords: AuditEventRecord[] = [];
   readonly telemetryEvents = new Map<string, StoredTelemetryEvent>();
   readonly telemetryNonces = new Set<string>();
   readonly updateDistributions = new Map<string, UpdateDistributionRecord>();
@@ -106,12 +114,14 @@ export class MemoryControlStore implements ControlStore {
   readonly creditHolds = new Map<string, CreditHoldRecord>();
   readonly creditTransactions = new Map<string, CreditTransactionRecord>();
   readonly alertDeliveries = new Map<string, AlertDeliveryRecord>();
+  #auditHeadHash = AUDIT_GENESIS_HASH;
   readonly adminRoles = new Map<string, AdminRoleRecord>([
     ['super_admin', role('super_admin', 'Super administrator', ALL_PERMISSIONS)],
     ['security_admin', role('security_admin', 'Security administrator', [
       'signing_key.read', 'signing_key.manage', 'identity.read', 'identity.manage',
       'approval.request', 'approval.read', 'approval.decide', 'backup.read',
       'alert.read', 'alert.manage',
+      'audit.read', 'audit.export', 'audit.verify',
     ])],
     ['license_admin', role('license_admin', 'License administrator', [
       'commercial.read', 'customer.create', 'deployment.create', 'license.issue', 'license.read',
@@ -130,6 +140,7 @@ export class MemoryControlStore implements ControlStore {
       'identity.read', 'approval.read', 'backup.read',
       'alert.read',
       'billing.read',
+      'audit.read', 'audit.export', 'audit.verify',
     ])],
   ]);
 
@@ -1605,7 +1616,7 @@ export class MemoryControlStore implements ControlStore {
       updatedAt: input.createdAt,
     };
     this.alertDeliveries.set(record.id, record);
-    this.audits.push(audit);
+    this.#recordAudit(audit);
     return { record, created: true };
   }
 
@@ -1660,7 +1671,7 @@ export class MemoryControlStore implements ControlStore {
       leaseUntil: null,
     };
     this.alertDeliveries.set(finished.id, finished);
-    if (audit) this.audits.push(audit);
+    if (audit) this.#recordAudit(audit);
     return finished;
   }
 
@@ -1695,7 +1706,7 @@ export class MemoryControlStore implements ControlStore {
       updatedAt: input.retriedAt,
     };
     this.alertDeliveries.set(retried.id, retried);
-    this.audits.push(input.audit);
+    this.#recordAudit(input.audit);
     return retried;
   }
 
@@ -1710,7 +1721,76 @@ export class MemoryControlStore implements ControlStore {
     return deleted;
   }
 
+  async listAuditEvents(input: AuditEventQuery): Promise<AuditEventRecord[]> {
+    return this.auditRecords
+      .filter((event) => (
+        (input.actorId === undefined || event.actorId === input.actorId)
+        && (input.action === undefined || event.action === input.action)
+        && (input.targetType === undefined || event.targetType === input.targetType)
+        && (input.targetId === undefined || event.targetId === input.targetId)
+        && (input.from === undefined || event.createdAt >= input.from)
+        && (input.to === undefined || event.createdAt <= input.to)
+        && (input.beforeId === undefined || event.id < input.beforeId)
+      ))
+      .sort((left, right) => right.id - left.id)
+      .slice(0, input.limit);
+  }
+
+  async listChainedAuditEvents(input: {
+    afterSequence: number;
+    throughSequence: number;
+    limit: number;
+  }): Promise<AuditEventRecord[]> {
+    return this.auditRecords
+      .filter((event) => (event.chainSequence ?? 0) > input.afterSequence
+        && (event.chainSequence ?? 0) <= input.throughSequence)
+      .sort((left, right) => (left.chainSequence ?? 0) - (right.chainSequence ?? 0))
+      .slice(0, input.limit);
+  }
+
+  async getAuditChainState(): Promise<AuditChainState> {
+    return {
+      lastSequence: this.auditRecords.length,
+      headHash: this.#auditHeadHash,
+      updatedAt: this.auditRecords.at(-1)?.createdAt ?? new Date(0),
+    };
+  }
+
+  async countLegacyAuditEvents(): Promise<number> {
+    return 0;
+  }
+
   async appendAuditEvent(input: AuditEventInput): Promise<void> {
+    this.#recordAudit(input);
+  }
+
+  #recordAudit(input: AuditEventInput): void {
+    const sequence = this.auditRecords.length + 1;
+    const createdAt = new Date();
+    const previousHash = this.#auditHeadHash;
+    const eventHash = auditEventHash({
+      sequence,
+      previousHash,
+      actorId: input.actorId,
+      action: input.action,
+      targetType: input.targetType,
+      targetId: input.targetId,
+      detail: input.detail,
+      createdAt,
+    });
     this.audits.push(input);
+    this.auditRecords.push({
+      id: sequence,
+      actorId: input.actorId,
+      action: input.action,
+      targetType: input.targetType,
+      targetId: input.targetId,
+      detail: input.detail,
+      chainSequence: sequence,
+      previousHash,
+      eventHash,
+      createdAt,
+    });
+    this.#auditHeadHash = eventHash;
   }
 }

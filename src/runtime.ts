@@ -9,6 +9,7 @@ import { BillingService } from './modules/billing/service.js';
 import { ReleaseArtifactService } from './modules/release-artifacts/service.js';
 import { BackupStatusService } from './modules/backup-status/service.js';
 import { AlertDeliveryService } from './modules/alert-delivery/service.js';
+import { AuditService } from './modules/audit/service.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 
 export interface CommercialControlRuntime {
@@ -20,6 +21,7 @@ export interface CommercialControlRuntime {
   releaseArtifacts: ReleaseArtifactService;
   backupStatus: BackupStatusService;
   alerts: AlertDeliveryService;
+  audit?: AuditService;
 }
 
 function missingConfiguration(config: Readonly<ControlConfig>): string[] {
@@ -84,6 +86,7 @@ export async function createCommercialControlRuntime(
       releaseArtifacts,
       backupStatus,
       alerts,
+      audit: new AuditService({ store, signer }),
       service: new CommercialControlService({
         store,
         signer,

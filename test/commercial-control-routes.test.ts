@@ -20,6 +20,7 @@ import { UpdatePolicyService } from '../src/modules/update-policy/service.js';
 import { ReleaseArtifactService } from '../src/modules/release-artifacts/service.js';
 import { BackupStatusService } from '../src/modules/backup-status/service.js';
 import { AlertDeliveryService } from '../src/modules/alert-delivery/service.js';
+import { AuditService } from '../src/modules/audit/service.js';
 import { MemoryControlStore } from './helpers/memory-store.js';
 
 const ADMIN_TOKEN = 'test-admin-token-that-is-at-least-32-bytes';
@@ -140,6 +141,7 @@ describe('commercial control HTTP routes', () => {
         releaseArtifacts,
         backupStatus,
         alerts,
+        audit: new AuditService({ store, signer: keyring }),
         service,
         billing: new BillingService({ store, tokenIssuer }),
         updatePolicy: new UpdatePolicyService({
@@ -245,6 +247,7 @@ describe('commercial control HTTP routes', () => {
       'admin_rbac',
       'admin_mfa',
       'dual_control_approval',
+      'tamper_evident_audit',
       'credit_billing',
       'billing_statement_export',
     ]);
@@ -272,6 +275,30 @@ describe('commercial control HTTP routes', () => {
     });
     expect(alertPoll.statusCode).toBe(200);
     expect(alertPoll.json()).toMatchObject({ enabled: false, enqueuedCount: 0, processed: 0 });
+
+    const auditEvents = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/audit/events?limit=5',
+      headers: { authorization: `Bearer ${auditorSessionToken}` },
+    });
+    expect(auditEvents.statusCode).toBe(200);
+    expect(auditEvents.json().events.length).toBeGreaterThan(0);
+
+    const auditIntegrity = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/audit/verify',
+      headers: { authorization: `Bearer ${auditorSessionToken}` },
+    });
+    expect(auditIntegrity.statusCode).toBe(200);
+    expect(auditIntegrity.json()).toMatchObject({ receipt: { valid: true } });
+
+    const auditExport = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/audit/export.csv',
+      headers: { authorization: `Bearer ${auditorSessionToken}` },
+    });
+    expect(auditExport.statusCode).toBe(200);
+    expect(auditExport.headers['content-type']).toContain('text/csv');
 
     const operatorPage = await app.inject({ method: 'GET', url: '/admin' });
     expect(operatorPage.statusCode).toBe(200);

@@ -628,6 +628,50 @@ const MIGRATIONS: Migration[] = [
        ON control_alert_deliveries(channel_id, created_at DESC)`,
     ],
   },
+  {
+    id: '016_tamper_evident_audit',
+    statements: [
+      `ALTER TABLE control_audit_events
+       ADD COLUMN IF NOT EXISTS chain_sequence BIGINT,
+       ADD COLUMN IF NOT EXISTS previous_hash TEXT,
+       ADD COLUMN IF NOT EXISTS event_hash TEXT`,
+      `ALTER TABLE control_audit_events
+       ADD CONSTRAINT control_audit_events_chain_fields_check CHECK (
+         (chain_sequence IS NULL AND previous_hash IS NULL AND event_hash IS NULL)
+         OR (chain_sequence > 0
+           AND previous_hash ~ '^[a-f0-9]{64}$'
+           AND event_hash ~ '^[a-f0-9]{64}$')
+       ) NOT VALID`,
+      `ALTER TABLE control_audit_events
+       VALIDATE CONSTRAINT control_audit_events_chain_fields_check`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_audit_chain_sequence
+       ON control_audit_events(chain_sequence) WHERE chain_sequence IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_control_audit_actor_created
+       ON control_audit_events(actor_id, created_at DESC, id DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_audit_action_created
+       ON control_audit_events(action, created_at DESC, id DESC)`,
+      `CREATE TABLE IF NOT EXISTS control_audit_chain_state (
+        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+        last_sequence BIGINT NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
+        head_hash TEXT NOT NULL DEFAULT repeat('0', 64)
+          CHECK (head_hash ~ '^[a-f0-9]{64}$'),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `INSERT INTO control_audit_chain_state (singleton) VALUES (TRUE)
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_permissions (id)
+       VALUES ('audit.read'), ('audit.export'), ('audit.verify')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT role_id, permission_id
+       FROM (VALUES
+         ('super_admin', 'audit.read'), ('super_admin', 'audit.export'), ('super_admin', 'audit.verify'),
+         ('security_admin', 'audit.read'), ('security_admin', 'audit.export'), ('security_admin', 'audit.verify'),
+         ('auditor', 'audit.read'), ('auditor', 'audit.export'), ('auditor', 'audit.verify')
+       ) AS assignments(role_id, permission_id)
+       ON CONFLICT DO NOTHING`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

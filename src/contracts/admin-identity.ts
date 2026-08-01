@@ -28,6 +28,9 @@ export const ADMIN_PERMISSIONS = [
   'billing.topup',
   'billing.manage',
   'billing.refund',
+  'audit.read',
+  'audit.export',
+  'audit.verify',
 ] as const;
 
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];

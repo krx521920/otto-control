@@ -93,6 +93,29 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
           <div id="alert-list" class="alert-list"></div>
         </div>
       </section>
+
+      <section id="audit-center" class="section-block hidden">
+        <div class="section-heading">
+          <div><p class="section-label">AUDIT EVIDENCE</p><h2>审计记录</h2></div>
+          <div class="audit-actions"><button id="verify-audit" class="secondary" type="button">校验完整性</button><button id="export-audit" class="secondary" type="button">导出 CSV</button></div>
+        </div>
+        <form id="audit-filter-form" class="audit-filters">
+          <label>操作者<input id="audit-actor" maxlength="160"></label>
+          <label>动作<input id="audit-action" maxlength="160"></label>
+          <label>目标类型<input id="audit-target-type" maxlength="160"></label>
+          <label>目标 ID<input id="audit-target-id" maxlength="160"></label>
+          <button class="primary compact" type="submit">筛选</button>
+        </form>
+        <div class="audit-integrity">
+          <div><span>完整性</span><strong id="audit-integrity-state" class="status-pill neutral">尚未校验</strong></div>
+          <div><span>已校验事件</span><strong id="audit-checked-count">-</strong></div>
+          <div><span>链头</span><strong id="audit-chain-head">-</strong></div>
+          <div><span>签名密钥</span><strong id="audit-signing-key">-</strong></div>
+          <div><span>迁移前记录</span><strong id="audit-legacy-count">-</strong></div>
+        </div>
+        <div class="table-panel"><table class="audit-table"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>详情</th><th>链序号</th></tr></thead><tbody id="audit-body"></tbody></table></div>
+        <div class="audit-pagination"><button id="audit-load-more" class="secondary hidden" type="button">加载更多</button></div>
+      </section>
     </section>
   </main>
 
@@ -506,6 +529,7 @@ async function refreshDashboard() {
       const list = byId('alert-list'); list.textContent = message;
     }),
     refreshApprovals(),
+    refreshAudit(true),
   ]);
   if (state.token) setStatus(byId('service-state'), '已连接', 'good');
 }

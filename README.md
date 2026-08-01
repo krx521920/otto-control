@@ -64,6 +64,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   and required-failure states plus recovery alerts and bounded history parsing
 - PostgreSQL-backed outbound alert outbox with HMAC-signed HTTPS webhooks,
   fingerprint deduplication, leased workers, bounded retries, and delivery audit
+- Tamper-evident audit chain with exact filters, cursor pagination, sensitive-field
+  redaction, CSV evidence export, and Ed25519-signed integrity receipts
 - Same-origin operator console with MFA login, RBAC-filtered commercial inventory,
   customer/deployment/License onboarding, renewal, seat management, immutable
   lifecycle history, dual-control review and execution, backup readiness, alert
@@ -199,6 +201,27 @@ failed delivery. Delivered and terminally failed rows are retained for
 `CONTROL_ALERT_RETENTION_DAYS` and then pruned; pending work is never removed by
 retention cleanup.
 
+### Audit evidence
+
+Migration `016_tamper_evident_audit` starts a SHA-256 chain for every new audit
+event. Each event binds its sequence, previous hash, actor, action, target,
+detail, and timestamp. The chain writer is serialized inside the same PostgreSQL
+transaction as operations that already write audit records transactionally.
+Records created before this migration remain available and are explicitly
+reported as legacy, rather than being assigned unverifiable hashes later.
+
+Administrators with `audit.read` can query exact actor, action, target, and time
+filters with cursor pagination. `audit.export` permits a bounded UTF-8 CSV export.
+API and CSV responses recursively redact password, secret, token, credential,
+signature, ciphertext, and private-key fields. `audit.verify` recalculates the
+chain in bounded batches, compares the persisted chain head, and signs the
+resulting receipt with the currently active Ed25519 control key.
+
+Store signed receipts outside the control database to create independent
+checkpoints. A database superuser who can rewrite both all events and the chain
+head is outside the protection boundary until a prior signed receipt is compared;
+the feature is tamper-evident, not a substitute for off-site evidence retention.
+
 Restore requires the exact confirmation phrase:
 
 ```bash
@@ -237,7 +260,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.18.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.19.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -612,6 +635,9 @@ GET  /v1/admin/backups/status?limit=20
 GET  /v1/admin/alerts/deliveries?limit=50
 POST /v1/admin/alerts/poll
 POST /v1/admin/alerts/deliveries/:deliveryId/retry
+GET  /v1/admin/audit/events
+GET  /v1/admin/audit/export.csv
+POST /v1/admin/audit/verify
 POST /v1/admin/update-distributions
 PUT  /v1/admin/deployments/:deploymentId/update-distribution
 POST /v1/admin/update-releases
@@ -643,10 +669,10 @@ Traefik
        -> backup_status (implemented foundation)
        -> alert_delivery (implemented foundation)
        -> operator_console (implemented onboarding, License lifecycle, and dual control)
-       -> audit
+       -> audit (implemented query, export, and signed integrity verification)
 ```
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are multi-channel alert routing, vendor-specific signer-broker
-deployment recipes, and eventually the separate federation gateway.
+next phases are vendor-specific signer-broker deployment recipes, external
+audit-receipt anchoring, and eventually the separate federation gateway.

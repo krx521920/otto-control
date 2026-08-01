@@ -1,4 +1,6 @@
-import pg from 'pg';
+import pg, { type PoolClient } from 'pg';
+
+import { AUDIT_GENESIS_HASH, auditEventHash } from '../audit-chain.js';
 
 import type {
   OttoLicenseCapability,
@@ -68,6 +70,11 @@ import type {
   AlertDeliveryStatus,
   AlertSeverity,
 } from '../contracts/alert-delivery.js';
+import type {
+  AuditChainState,
+  AuditEventQuery,
+  AuditEventRecord,
+} from '../contracts/audit.js';
 import { runMigrations } from './migrations.js';
 
 const { Pool } = pg;
@@ -342,6 +349,25 @@ interface AlertDeliveryRow {
   updated_at: Date;
 }
 
+interface AuditEventRow {
+  id: string;
+  actor_id: string;
+  action: string;
+  target_type: string;
+  target_id: string;
+  detail: Record<string, unknown>;
+  chain_sequence: string | null;
+  previous_hash: string | null;
+  event_hash: string | null;
+  created_at: Date;
+}
+
+interface AuditChainStateRow {
+  last_sequence: string;
+  head_hash: string;
+  updated_at: Date;
+}
+
 interface CommercialInventoryCountRow {
   customer_total: string;
   customer_active: string;
@@ -586,6 +612,72 @@ function alertDeliveryFromRow(row: AlertDeliveryRow): AlertDeliveryRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function auditEventFromRow(row: AuditEventRow): AuditEventRecord {
+  return {
+    id: Number(row.id),
+    actorId: row.actor_id,
+    action: row.action,
+    targetType: row.target_type,
+    targetId: row.target_id,
+    detail: row.detail,
+    chainSequence: row.chain_sequence === null ? null : Number(row.chain_sequence),
+    previousHash: row.previous_hash,
+    eventHash: row.event_hash,
+    createdAt: row.created_at,
+  };
+}
+
+async function appendChainedAuditEvent(
+  client: PoolClient,
+  input: AuditEventInput,
+): Promise<AuditEventRecord> {
+  await client.query("SELECT pg_advisory_xact_lock(hashtext('otto_control_audit_chain'))");
+  const stateResult = await client.query<AuditChainStateRow>(
+    `SELECT last_sequence, head_hash, updated_at
+     FROM control_audit_chain_state WHERE singleton = TRUE FOR UPDATE`,
+  );
+  const state = stateResult.rows[0];
+  if (!state) throw new Error('audit chain state is unavailable');
+  const sequence = Number(state.last_sequence) + 1;
+  const createdAt = new Date();
+  const previousHash = state.head_hash || AUDIT_GENESIS_HASH;
+  const eventHash = auditEventHash({
+    sequence,
+    previousHash,
+    actorId: input.actorId,
+    action: input.action,
+    targetType: input.targetType,
+    targetId: input.targetId,
+    detail: input.detail,
+    createdAt,
+  });
+  const inserted = await client.query<AuditEventRow>(
+    `INSERT INTO control_audit_events
+      (actor_id, action, target_type, target_id, detail, chain_sequence,
+       previous_hash, event_hash, created_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
+     RETURNING *`,
+    [
+      input.actorId,
+      input.action,
+      input.targetType,
+      input.targetId,
+      JSON.stringify(input.detail),
+      sequence,
+      previousHash,
+      eventHash,
+      createdAt,
+    ],
+  );
+  await client.query(
+    `UPDATE control_audit_chain_state
+     SET last_sequence = $1, head_hash = $2, updated_at = $3
+     WHERE singleton = TRUE`,
+    [sequence, eventHash, createdAt],
+  );
+  return auditEventFromRow(inserted.rows[0]!);
 }
 
 function creditAccountFromRow(row: CreditAccountRow): CreditAccountRecord {
@@ -3184,18 +3276,7 @@ export class PostgresControlStore implements ControlStore {
         ],
       );
       if (inserted.rows[0]) {
-        await client.query(
-          `INSERT INTO control_audit_events
-           (actor_id, action, target_type, target_id, detail)
-           VALUES ($1, $2, $3, $4, $5::jsonb)`,
-          [
-            input.audit.actorId,
-            input.audit.action,
-            input.audit.targetType,
-            input.audit.targetId,
-            JSON.stringify(input.audit.detail),
-          ],
-        );
+        await appendChainedAuditEvent(client, input.audit);
         await client.query('COMMIT');
         return { record: alertDeliveryFromRow(inserted.rows[0]), created: true };
       }
@@ -3270,18 +3351,7 @@ export class PostgresControlStore implements ControlStore {
         ],
       );
       if (result.rows[0] && input.audit) {
-        await client.query(
-          `INSERT INTO control_audit_events
-           (actor_id, action, target_type, target_id, detail)
-           VALUES ($1, $2, $3, $4, $5::jsonb)`,
-          [
-            input.audit.actorId,
-            input.audit.action,
-            input.audit.targetType,
-            input.audit.targetId,
-            JSON.stringify(input.audit.detail),
-          ],
-        );
+        await appendChainedAuditEvent(client, input.audit);
       }
       await client.query('COMMIT');
       return result.rows[0] ? alertDeliveryFromRow(result.rows[0]) : null;
@@ -3328,18 +3398,7 @@ export class PostgresControlStore implements ControlStore {
         [input.id, input.retriedAt],
       );
       if (result.rows[0]) {
-        await client.query(
-          `INSERT INTO control_audit_events
-           (actor_id, action, target_type, target_id, detail)
-           VALUES ($1, $2, $3, $4, $5::jsonb)`,
-          [
-            input.audit.actorId,
-            input.audit.action,
-            input.audit.targetType,
-            input.audit.targetId,
-            JSON.stringify(input.audit.detail),
-          ],
-        );
+        await appendChainedAuditEvent(client, input.audit);
       }
       await client.query('COMMIT');
       return result.rows[0] ? alertDeliveryFromRow(result.rows[0]) : null;
@@ -3360,12 +3419,77 @@ export class PostgresControlStore implements ControlStore {
     return result.rowCount ?? 0;
   }
 
-  async appendAuditEvent(input: AuditEventInput): Promise<void> {
-    await this.#pool.query(
-      `INSERT INTO control_audit_events
-       (actor_id, action, target_type, target_id, detail)
-       VALUES ($1, $2, $3, $4, $5::jsonb)`,
-      [input.actorId, input.action, input.targetType, input.targetId, JSON.stringify(input.detail)],
+  async listAuditEvents(input: AuditEventQuery): Promise<AuditEventRecord[]> {
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+    const equal = (column: string, value: string | number | Date | undefined, operator = '='): void => {
+      if (value === undefined) return;
+      values.push(value);
+      conditions.push(`${column} ${operator} $${values.length}`);
+    };
+    equal('actor_id', input.actorId);
+    equal('action', input.action);
+    equal('target_type', input.targetType);
+    equal('target_id', input.targetId);
+    equal('created_at', input.from, '>=');
+    equal('created_at', input.to, '<=');
+    equal('id', input.beforeId, '<');
+    values.push(input.limit);
+    const result = await this.#pool.query<AuditEventRow>(
+      `SELECT * FROM control_audit_events
+       ${conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''}
+       ORDER BY id DESC LIMIT $${values.length}`,
+      values,
     );
+    return result.rows.map(auditEventFromRow);
+  }
+
+  async listChainedAuditEvents(input: {
+    afterSequence: number;
+    throughSequence: number;
+    limit: number;
+  }): Promise<AuditEventRecord[]> {
+    const result = await this.#pool.query<AuditEventRow>(
+      `SELECT * FROM control_audit_events
+       WHERE chain_sequence > $1 AND chain_sequence <= $2
+       ORDER BY chain_sequence ASC LIMIT $3`,
+      [input.afterSequence, input.throughSequence, input.limit],
+    );
+    return result.rows.map(auditEventFromRow);
+  }
+
+  async getAuditChainState(): Promise<AuditChainState> {
+    const result = await this.#pool.query<AuditChainStateRow>(
+      `SELECT last_sequence, head_hash, updated_at
+       FROM control_audit_chain_state WHERE singleton = TRUE`,
+    );
+    const state = result.rows[0];
+    if (!state) throw new Error('audit chain state is unavailable');
+    return {
+      lastSequence: Number(state.last_sequence),
+      headHash: state.head_hash,
+      updatedAt: state.updated_at,
+    };
+  }
+
+  async countLegacyAuditEvents(): Promise<number> {
+    const result = await this.#pool.query<{ count: string }>(
+      'SELECT COUNT(*) AS count FROM control_audit_events WHERE chain_sequence IS NULL',
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }
+
+  async appendAuditEvent(input: AuditEventInput): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await appendChainedAuditEvent(client, input);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
