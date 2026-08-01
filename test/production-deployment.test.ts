@@ -135,6 +135,8 @@ describe('production deployment assets', () => {
     expect(compose).toContain('exec gosu postgres tail -f /dev/null');
     expect(compose).toContain('DAC_READ_SEARCH');
     expect(pitr).toContain('--user postgres postgres-pitr-drill');
+    expect(pitr).toContain('otto-pgbackrest --stanza=otto-control check');
+    expect(pitr).toContain('isolated PITR restore failed:');
     const physicalBackup = repositoryFile('deploy/backup-pitr-postgres.sh');
     expect(physicalBackup).toContain(
       'compose exec -T --user postgres "$PRIMARY" otto-pgbackrest',

@@ -54,6 +54,18 @@ compose() {
   fi
 }
 
+find_primary() {
+  for candidate in postgres-1 postgres-2 postgres-3; do
+    if compose exec -T "$candidate" curl --fail --silent \
+      http://127.0.0.1:8008/primary >/dev/null 2>&1
+    then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 mkdir -p "$REPORT_DIR"
 LOCK_DIR="$ROOT/backups/.operation.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -68,6 +80,15 @@ cleanup() {
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
+
+PRIMARY=$(find_primary) || {
+  printf '%s\n' 'cannot validate PITR without a healthy Patroni primary' >&2
+  exit 1
+}
+# After a failover, force an archive check on the new timeline before restoring.
+# This waits until the required history and WAL are durable in pgBackRest.
+compose exec -T --user postgres "$PRIMARY" \
+  otto-pgbackrest --stanza=otto-control check
 
 compose --profile ops up --detach postgres-pitr-drill
 DRILL_STARTED=true
@@ -86,7 +107,7 @@ if [ "$BACKUP_AGE_SECONDS" -lt 0 ] || [ "$BACKUP_AGE_SECONDS" -gt "$MAX_BACKUP_A
   exit 1
 fi
 
-DRILL_OUTPUT=$(compose --profile ops exec -T --user postgres -e PITR_TARGET="$TARGET" postgres-pitr-drill \
+if DRILL_OUTPUT=$(compose --profile ops exec -T --user postgres -e PITR_TARGET="$TARGET" postgres-pitr-drill \
   sh -ec '
     pg_ctl -D "$PGDATA" -m immediate stop >/dev/null 2>&1 || true
     find "$PGDATA" -mindepth 1 -delete
@@ -117,7 +138,14 @@ DRILL_OUTPUT=$(compose --profile ops exec -T --user postgres -e PITR_TARGET="$TA
       --command="SELECT pg_is_in_recovery()")
     printf "schema_migrations=%s\n" "$migration_count"
     printf "still_in_recovery=%s\n" "$recovery_state"
-  ')
+  ' 2>&1)
+then
+  :
+else
+  DRILL_STATUS=$?
+  printf 'isolated PITR restore failed:\n%s\n' "$DRILL_OUTPUT" >&2
+  exit "$DRILL_STATUS"
+fi
 
 DURATION_SECONDS=$(($(date '+%s') - STARTED_SECONDS))
 REPORT_FILE="$REPORT_DIR/pitr-drill-$(date -u '+%Y%m%dT%H%M%SZ').txt"
