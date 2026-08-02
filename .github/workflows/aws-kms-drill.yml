@@ -1,0 +1,55 @@
+name: AWS KMS production drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_role_arn:
+        description: IAM role trusted for this repository's GitHub OIDC identity
+        required: true
+        type: string
+      aws_region:
+        description: Region used for the OIDC STS session
+        required: true
+        default: ap-southeast-1
+        type: string
+      kms_key_arns:
+        description: One ARN or comma-separated replicas of one Ed25519 MRK
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: aws-kms-production-drill
+  cancel-in-progress: false
+
+jobs:
+  live-kms-signing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production-signing
+    steps:
+      - name: Check out source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22.23.1
+          cache: npm
+      - name: Exchange GitHub OIDC identity for a short AWS session
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: otto-control-kms-drill
+          role-duration-seconds: 900
+          mask-aws-account-id: true
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Validate the real AWS KMS replica set and exercise signing
+        env:
+          CONTROL_REQUIRE_AWS_KMS_TEST: "true"
+          CONTROL_TEST_AWS_KMS_KEY_ARNS: ${{ inputs.kms_key_arns }}
+        run: npm test -- --run test/aws-kms-live.test.ts
