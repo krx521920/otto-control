@@ -1,6 +1,6 @@
 {
   "name": "otto-control",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "private": true,
   "description": "Commercial control plane for Otto private deployments",
   "type": "module",
@@ -13,6 +13,7 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run lint && npm run typecheck && npm test && npm run build",
     "dev": "tsx watch src/server.ts",
+    "dev:federation": "tsx watch src/federation-server.ts",
     "drill:restore:production": "sh deploy/drill-restore-postgres.sh",
     "drill:failover:production": "sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL",
     "drill:pitr:production": "sh deploy/drill-pitr-postgres.sh",
@@ -21,6 +22,7 @@
     "drill:audit:worm": "node scripts/drill-audit-worm.mjs",
     "lint": "eslint .",
     "start": "node dist/server.js",
+    "start:federation": "node dist/federation-server.js",
     "restore:production": "sh deploy/restore-postgres.sh",
     "backup:pitr:production": "sh deploy/backup-pitr-postgres.sh diff",
     "attest:release": "node scripts/attest-release-artifact.mjs",

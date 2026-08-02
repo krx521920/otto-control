@@ -898,6 +898,127 @@ const MIGRATIONS: Migration[] = [
        ON CONFLICT DO NOTHING`,
     ],
   },
+  {
+    id: '023_federation_gateway',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_federation_deployments (
+        id TEXT PRIMARY KEY CHECK (id ~ '^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$'),
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 160),
+        origin TEXT NOT NULL UNIQUE CHECK (origin ~ '^https://'),
+        status TEXT NOT NULL DEFAULT 'active'
+          CHECK (status IN ('active', 'blocked', 'disabled')),
+        capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+        max_pending_messages INTEGER NOT NULL DEFAULT 10000
+          CHECK (max_pending_messages BETWEEN 100 AND 1000000),
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        CHECK (jsonb_typeof(capabilities) = 'array')
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_federation_deployments_status
+       ON control_federation_deployments(status, updated_at DESC)`,
+      `CREATE TABLE IF NOT EXISTS control_federation_keys (
+        deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id) ON DELETE CASCADE,
+        key_id TEXT NOT NULL CHECK (key_id ~ '^[a-f0-9]{16}$'),
+        public_key_pem TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+        not_before TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (deployment_id, key_id),
+        CHECK (expires_at IS NULL OR expires_at > not_before),
+        CHECK ((status = 'revoked') = (revoked_at IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_federation_keys_active
+       ON control_federation_keys(deployment_id, not_before, expires_at)
+       WHERE status = 'active'`,
+      `CREATE TABLE IF NOT EXISTS control_federation_nonces (
+        deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id) ON DELETE CASCADE,
+        nonce TEXT NOT NULL CHECK (nonce ~ '^[A-Za-z0-9_-]{16,128}$'),
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (deployment_id, nonce)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_federation_nonces_expiry
+       ON control_federation_nonces(expires_at)`,
+      `CREATE TABLE IF NOT EXISTS control_federation_blocks (
+        blocker_deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id) ON DELETE CASCADE,
+        blocked_deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id) ON DELETE CASCADE,
+        reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 500),
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (blocker_deployment_id, blocked_deployment_id),
+        CHECK (blocker_deployment_id <> blocked_deployment_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_federation_a2a_grants (
+        id TEXT PRIMARY KEY CHECK (id ~ '^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$'),
+        owner_deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id),
+        requester_deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id),
+        owner_principal_id TEXT NOT NULL,
+        requester_principal_id TEXT NOT NULL,
+        scopes JSONB NOT NULL,
+        max_uses INTEGER NOT NULL DEFAULT 1 CHECK (max_uses BETWEEN 1 AND 10),
+        used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count BETWEEN 0 AND 10),
+        expires_at TIMESTAMPTZ NOT NULL,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        CHECK (owner_deployment_id <> requester_deployment_id),
+        CHECK (used_count <= max_uses),
+        CHECK (jsonb_typeof(scopes) = 'array')
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_federation_grants_active
+       ON control_federation_a2a_grants(owner_deployment_id, requester_deployment_id, expires_at)
+       WHERE revoked_at IS NULL`,
+      `CREATE TABLE IF NOT EXISTS control_federation_messages (
+        message_id TEXT PRIMARY KEY CHECK (message_id ~ '^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$'),
+        version SMALLINT NOT NULL CHECK (version = 1),
+        message_type TEXT NOT NULL CHECK (message_type IN (
+          'chat.message', 'chat.receipt', 'a2a.request', 'a2a.response'
+        )),
+        sender_deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id),
+        recipient_deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id),
+        issued_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        nonce TEXT NOT NULL,
+        content_type TEXT NOT NULL CHECK (content_type = 'application/otto-e2ee+json'),
+        ciphertext TEXT NOT NULL,
+        ciphertext_sha256 TEXT NOT NULL CHECK (ciphertext_sha256 ~ '^[a-f0-9]{64}$'),
+        size_bytes INTEGER NOT NULL CHECK (size_bytes BETWEEN 1 AND 10485760),
+        routing JSONB NOT NULL,
+        signing_key_id TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'claimed', 'delivered', 'expired')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 1000),
+        claimed_until TIMESTAMPTZ,
+        claim_token_hash TEXT CHECK (claim_token_hash IS NULL OR claim_token_hash ~ '^[a-f0-9]{64}$'),
+        delivered_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (sender_deployment_id, nonce),
+        CHECK (sender_deployment_id <> recipient_deployment_id),
+        CHECK (jsonb_typeof(routing) = 'object'),
+        CHECK ((status = 'claimed') = (claimed_until IS NOT NULL AND claim_token_hash IS NOT NULL)),
+        CHECK ((status = 'delivered') = (delivered_at IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_federation_messages_inbox
+       ON control_federation_messages(recipient_deployment_id, status, created_at)
+       WHERE status IN ('pending', 'claimed')`,
+      `CREATE INDEX IF NOT EXISTS idx_control_federation_messages_expiry
+       ON control_federation_messages(expires_at)
+       WHERE status IN ('pending', 'claimed')`,
+      `CREATE TABLE IF NOT EXISTS control_federation_audit_events (
+        id BIGSERIAL PRIMARY KEY,
+        actor_deployment_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        details JSONB NOT NULL,
+        occurred_at TIMESTAMPTZ NOT NULL,
+        CHECK (jsonb_typeof(details) = 'object')
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_federation_audit_events_time
+       ON control_federation_audit_events(occurred_at DESC, id DESC)`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

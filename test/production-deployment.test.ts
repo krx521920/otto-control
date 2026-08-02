@@ -125,6 +125,11 @@ describe('production deployment assets', () => {
     expect(compose).toContain('  control-a:');
     expect(compose).toContain('  control-b:');
     expect(compose).toContain('  control-c:');
+    expect(compose).toContain('  federation-a:');
+    expect(compose).toContain('  federation-b:');
+    expect(compose).toContain('  federation-c:');
+    expect(compose).toContain('FEDERATION_ADMIN_TOKEN_FILE: /run/secrets/federation_admin_token');
+    expect(compose).toContain('command: ["node", "dist/federation-server.js"]');
     expect(compose).not.toMatch(/POSTGRES_PASSWORD:\s*[^\n]/u);
   });
 
@@ -135,10 +140,13 @@ describe('production deployment assets', () => {
     expect(haproxy).toContain('on-marked-down shutdown-sessions');
     expect(haproxy.match(/server postgres-[123]/gu)).toHaveLength(3);
     expect(caddy).toContain('control-a:7788 control-b:7788 control-c:7788');
+    expect(caddy).toContain('federation-a:7790 federation-b:7790 federation-c:7790');
     expect(caddy).toContain('health_uri /health/ready');
     expect(caddy).toContain('lb_policy least_conn');
     expect(caddy).toContain('fail_duration 30s');
     expect(caddy).toContain('respond @internal_metrics 404');
+    expect(caddy).toContain('@federation_admin path /v1/admin/federation/*');
+    expect(caddy).toContain('respond @federation_admin 404');
   });
 
   it('ships an authenticated internal Prometheus profile with SLO and capacity rules', () => {
@@ -149,9 +157,12 @@ describe('production deployment assets', () => {
     expect(compose).toContain('profiles: [observability]');
     expect(compose).toContain('"127.0.0.1:9090:9090"');
     expect(compose).toContain('control_metrics_token');
+    expect(compose).toContain('federation_metrics_token');
     expect(compose).toMatch(/monitoring:\n\s+internal: true/u);
     expect(prometheus).toContain('credentials_file: /run/secrets/control_metrics_token');
     expect(prometheus.match(/control-[abc]:7788/gu)).toHaveLength(3);
+    expect(prometheus.match(/federation-[abc]:7790/gu)).toHaveLength(3);
+    expect(prometheus).toContain('credentials_file: /run/secrets/federation_metrics_token');
     expect(rules).toContain('otto_control:slo_availability:ratio_5m');
     expect(rules).toContain('OttoControlAvailabilityErrorBudgetBurnHigh');
     expect(rules).toContain('OttoControlPostgresPoolSaturated');
@@ -201,6 +212,8 @@ describe('production deployment assets', () => {
     );
     expect(control).toContain('CONTROL_DATABASE_PASSWORD_FILE');
     expect(control).toContain('CONTROL_SIGNER_KEYRING_FILE');
+    expect(control).toContain('FEDERATION_ADMIN_TOKEN_FILE');
+    expect(control).toContain('FEDERATION_DATABASE_PASSWORD_FILE');
     expect(compose).toContain('exec gosu postgres tail -f /dev/null');
     expect(compose).toContain('DAC_READ_SEARCH');
     expect(pitr).toContain('--user postgres postgres-pitr-drill');

@@ -80,6 +80,60 @@ x-control-common: &control-common
     - SETGID
     - SETUID
 
+x-federation-common: &federation-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  command: ["node", "dist/federation-server.js"]
+  restart: unless-stopped
+  init: true
+  env_file:
+    - .env.production
+  environment:
+    FEDERATION_HOST: 0.0.0.0
+    FEDERATION_PORT: "7790"
+    FEDERATION_PUBLIC_BASE_URL: https://${FEDERATION_DOMAIN}
+    FEDERATION_DATABASE_HOST: postgres-router
+    FEDERATION_DATABASE_PORT: "5432"
+    FEDERATION_DATABASE_NAME: ${POSTGRES_DB:-otto_control}
+    FEDERATION_DATABASE_USER: ${POSTGRES_USER:-otto_control}
+    FEDERATION_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+    FEDERATION_ADMIN_TOKEN_FILE: /run/secrets/federation_admin_token
+    FEDERATION_METRICS_TOKEN_FILE: /run/secrets/federation_metrics_token
+  depends_on:
+    postgres-tools:
+      condition: service_healthy
+  expose:
+    - "7790"
+  secrets:
+    - federation_admin_token
+    - federation_metrics_token
+    - postgres_password
+  volumes:
+    - ./secrets:/run/otto-secrets:ro
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=32m
+    - /run/otto-runtime-secrets:rw,noexec,nosuid,size=1m,uid=1000,gid=1000,mode=0700
+  networks:
+    - backend
+    - edge
+    - monitoring
+  healthcheck:
+    test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7790/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+    interval: 30s
+    timeout: 5s
+    start_period: 10s
+    retries: 3
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  cap_add:
+    - DAC_READ_SEARCH
+    - SETGID
+    - SETUID
+
 services:
   etcd-1:
     image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.21}
@@ -244,6 +298,15 @@ services:
   control-c:
     <<: *control-common
 
+  federation-a:
+    <<: *federation-common
+
+  federation-b:
+    <<: *federation-common
+
+  federation-c:
+    <<: *federation-common
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -269,7 +332,7 @@ services:
       - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
     ports:
       - "127.0.0.1:9090:9090"
-    secrets: [control_metrics_token]
+    secrets: [control_metrics_token, federation_metrics_token]
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/prometheus/rules:/etc/prometheus/rules:ro
@@ -317,6 +380,10 @@ secrets:
     file: ./secrets/control_token_secret
   control_metrics_token:
     file: ./secrets/control_metrics_token
+  federation_admin_token:
+    file: ./secrets/federation_admin_token
+  federation_metrics_token:
+    file: ./secrets/federation_metrics_token
   control_signer_private_key:
     file: ./secrets/control_signer_private_key.pem
   postgres_password:

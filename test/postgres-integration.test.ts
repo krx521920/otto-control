@@ -9,6 +9,8 @@ import { AuditService } from '../src/modules/audit/service.js';
 import { BillingService } from '../src/modules/billing/service.js';
 import { CommercialControlService } from '../src/modules/commercial-control/service.js';
 import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
+import { PostgresFederationStore } from '../src/modules/federation/postgres-store.js';
+import { FederationService } from '../src/modules/federation/service.js';
 import { PostgresControlStore } from '../src/storage/postgres-store.js';
 
 const { Pool } = pg;
@@ -111,7 +113,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       const migrations = await pool.query<{ id: string }>(
         'SELECT id FROM control_schema_migrations ORDER BY id',
       );
-      expect(migrations.rows.at(-1)?.id).toBe('021_audit_witness_worm_evidence');
+      expect(migrations.rows.at(-1)?.id).toBe('023_federation_gateway');
       expect(new Set(migrations.rows.map((row) => row.id)).size).toBe(migrations.rows.length);
       const billingPolicyColumn = await pool.query<{
         column_name: string;
@@ -466,6 +468,97 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       expect(count.rows[0]?.count).toBe('1');
     } finally {
       await raw.end();
+    }
+  });
+
+  it('atomically consumes a federation A2A grant under concurrent delivery', async () => {
+    await resetDatabase(DATABASE_URL!);
+    const store = await PostgresFederationStore.connect({
+      connectionString: DATABASE_URL!,
+      ssl: false,
+    });
+    try {
+      const federation = new FederationService({ store, now: () => NOW });
+      const sender = signer();
+      const recipient = signer();
+      for (const [id, origin, key] of [
+        ['deployment_federation_a', 'https://federation-a.test', sender],
+        ['deployment_federation_b', 'https://federation-b.test', recipient],
+      ] as const) {
+        await federation.registerDeployment({
+          id,
+          displayName: id,
+          origin,
+          capabilities: ['federation.v1', 'a2a.e2ee'],
+        });
+        await federation.registerKey(id, { publicKeyPem: key.publicKeyPem });
+      }
+      const grantRequest = {
+        version: 1 as const,
+        deploymentId: 'deployment_federation_b',
+        issuedAt: new Date(NOW).toISOString(),
+        expiresAt: new Date(NOW + 60_000).toISOString(),
+        nonce: 'nonce_grant_postgres_2026',
+        grantId: 'fgrant_postgres_concurrency',
+        requesterDeploymentId: 'deployment_federation_a',
+        ownerPrincipalId: 'account_recipient',
+        requesterPrincipalId: 'account_sender',
+        scopes: ['worklog.read'],
+        maxUses: 1,
+        grantExpiresAt: new Date(NOW + 10 * 60_000).toISOString(),
+      };
+      await federation.createA2aGrant({
+        request: grantRequest,
+        signingKeyId: recipient.keyId,
+        signature: await recipient.sign(grantRequest),
+      });
+      const envelopes = await Promise.all([1, 2].map(async (index) => {
+        const envelope = {
+          version: 1 as const,
+          messageId: `fmsg_postgres_concurrent_${index}`,
+          type: 'a2a.request' as const,
+          senderDeploymentId: 'deployment_federation_a',
+          recipientDeploymentId: 'deployment_federation_b',
+          issuedAt: new Date(NOW).toISOString(),
+          expiresAt: new Date(NOW + 60_000).toISOString(),
+          nonce: `nonce_message_postgres_${index}_2026`,
+          contentType: 'application/otto-e2ee+json' as const,
+          ciphertext: `Y2lwaGVydGV4dF8${index}`,
+          routing: {
+            conversationId: 'conversation_postgres',
+            senderPrincipalId: 'account_sender',
+            recipientPrincipalId: 'account_recipient',
+            a2aGrantId: 'fgrant_postgres_concurrency',
+            a2aScope: 'worklog.read',
+          },
+        };
+        return {
+          envelope,
+          signingKeyId: sender.keyId,
+          signature: await sender.sign(envelope),
+        };
+      }));
+      const results = await Promise.allSettled(envelopes.map((envelope) => federation.enqueue(envelope)));
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+
+      const raw = new Pool({ connectionString: DATABASE_URL!, ssl: false, max: 1 });
+      try {
+        const grant = await raw.query<{ used_count: number }>(
+          'SELECT used_count FROM control_federation_a2a_grants WHERE id = $1',
+          ['fgrant_postgres_concurrency'],
+        );
+        const messages = await raw.query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count FROM control_federation_messages
+           WHERE message_type = 'a2a.request'`,
+        );
+        expect(grant.rows[0]?.used_count).toBe(1);
+        expect(messages.rows[0]?.count).toBe('1');
+      } finally {
+        await raw.end();
+      }
+    } finally {
+      await store.close();
     }
   });
 });

@@ -17,3 +17,13 @@ scrape_configs:
           - control-a:7788
           - control-b:7788
           - control-c:7788
+  - job_name: otto-federation
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/federation_metrics_token
+    static_configs:
+      - targets:
+          - federation-a:7790
+          - federation-b:7790
+          - federation-c:7790

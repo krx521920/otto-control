@@ -20,3 +20,30 @@
     -Server
   }
 }
+
+{$FEDERATION_DOMAIN} {
+  encode zstd gzip
+
+  @internal_metrics path /metrics
+  respond @internal_metrics 404
+
+  # Federation administration is only reachable on the private service network.
+  @federation_admin path /v1/admin/federation/*
+  respond @federation_admin 404
+
+  reverse_proxy federation-a:7790 federation-b:7790 federation-c:7790 {
+    lb_policy least_conn
+    health_uri /health/ready
+    health_interval 10s
+    health_timeout 3s
+    fail_duration 30s
+    max_fails 2
+    lb_try_duration 5s
+    lb_try_interval 250ms
+  }
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    -Server
+  }
+}

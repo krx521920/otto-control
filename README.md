@@ -96,6 +96,29 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   customer/deployment/License onboarding, renewal, seat management, immutable
   lifecycle history, dual-control review and execution, backup readiness, alert
   retry, strict CSP, and tab-scoped sessions
+- Independently deployable Fastify (MIT) federation gateway with a signed
+  deployment directory, rotating Ed25519 public keys, replay-resistant E2EE
+  envelopes, durable offline inbox leases, delivery acknowledgements, bilateral
+  deployment blocks, bounded queues, and atomic scoped A2A grant consumption
+- Three-instance federation production topology behind Caddy, authenticated
+  Prometheus metrics, ciphertext-only payload storage, and a documented Otto
+  private-server adapter contract
+
+## Federation gateway
+
+Run the cross-private-deployment gateway independently from Control:
+
+```bash
+npm run dev:federation
+# production: npm run start:federation
+```
+
+The gateway uses Fastify as its MIT-licensed HTTP engine, but the federation
+identity, signing, replay prevention, authorization, and delivery protocol are
+Otto-specific. It accepts only E2EE ciphertext and never receives chat, file,
+or A2A context decryption keys. See
+[`docs/federation-protocol.zh-CN.md`](docs/federation-protocol.zh-CN.md) and
+[`docs/otto-private-server-federation-adapter.zh-CN.md`](docs/otto-private-server-federation-adapter.zh-CN.md).
 
 ## Managed release artifact distribution
 
@@ -238,7 +261,9 @@ and secrets locally on that server:
 
 ```bash
 npm ci
-npm run bootstrap:production -- --public-url https://control.example.com
+npm run bootstrap:production -- \
+  --public-url https://control.example.com \
+  --federation-public-url https://federation.example.com
 docker compose -f compose.production.yaml --env-file .env.production config
 docker compose -f compose.production.yaml --env-file .env.production up -d --build
 docker compose -f compose.production.yaml --env-file .env.production ps
@@ -560,7 +585,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.25.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.26.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -1088,6 +1113,19 @@ POST /v1/admin/update-releases/:releaseId/rollback
 POST /v1/licenses/:licenseId/lease
 POST /v1/telemetry/ingest
 POST /v1/update-policy/resolve
+
+# Separate Otto Federation process (port 7790)
+GET  /v1/federation/status
+GET  /v1/federation/directory/:deploymentId
+GET  /v1/federation/directory/:deploymentId/keys/:keyId
+POST /v1/federation/envelopes
+POST /v1/federation/inbox/claim
+POST /v1/federation/inbox/ack
+POST /v1/federation/a2a/grants
+POST /v1/federation/a2a/grants/revoke
+GET  /v1/admin/federation/deployments
+POST /v1/admin/federation/deployments
+PATCH /v1/admin/federation/deployments/:deploymentId/status
 ```
 
 ## Planned module boundaries
@@ -1110,6 +1148,13 @@ Traefik
        -> audit_anchor (implemented durable external evidence delivery)
        -> audit_witness (implemented independent verification and receipt retention)
        -> data_governance (implemented residency, privacy notice, export, erasure, legal hold, and forensics)
+
+Otto Federation Fastify edge (independently deployable, implemented v1)
+  -> deployment_directory
+  -> ed25519_request_auth_and_replay_guard
+  -> ciphertext_relay_and_offline_inbox
+  -> delivery_receipts_and_bilateral_blocks
+  -> scoped_one_time_a2a_grants
 ```
 
 The Otto private server and desktop adapter now consume this signed policy and
@@ -1117,5 +1162,6 @@ map it onto the existing `latest.json` and incremental manifest engines. The
 Data-governance operating rules are documented in
 `docs/data-governance-policy.zh-CN.md`, the customer-facing notice template in
 `docs/privacy-notice.template.zh-CN.md`, and evidence handling in
-`docs/forensic-evidence-procedure.zh-CN.md`. The next phases include
-vendor-specific signer-broker deployment recipes and the separate federation gateway.
+`docs/forensic-evidence-procedure.zh-CN.md`. Federation v1 and its private-server
+adapter contract are now implemented in this repository; the remaining integration
+step is wiring that adapter into each Otto Server release after its E2EE module is enabled.

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { loadControlConfig } from '../src/config.js';
+import { loadFederationConfig } from '../src/federation-config.js';
 
 describe('control configuration', () => {
   it('uses a loopback-only development default', () => {
@@ -272,5 +273,60 @@ describe('control configuration', () => {
     })).toThrow(
       'CONTROL_SIGNER_PRIVATE_KEY_FILE and CONTROL_SIGNER_KEYRING_FILE cannot both be set',
     );
+  });
+});
+
+describe('federation configuration', () => {
+  it('uses a separate loopback development port and bounded protocol limits', () => {
+    expect(loadFederationConfig({})).toMatchObject({
+      environment: 'development',
+      host: '127.0.0.1',
+      port: 7790,
+      databaseUrl: null,
+      maximumCiphertextBytes: 1024 * 1024,
+      maximumEnvelopeTtlMs: 7 * 24 * 60 * 60_000,
+      maximumClockSkewMs: 5 * 60_000,
+      claimTtlMs: 60_000,
+      deliveredRetentionMs: 7 * 24 * 60 * 60_000,
+    });
+  });
+
+  it('fails closed for incomplete production identity and insecure public URLs', () => {
+    expect(() => loadFederationConfig({
+      NODE_ENV: 'production',
+      FEDERATION_PUBLIC_BASE_URL: 'http://federation.example.test',
+    })).toThrow('FEDERATION_PUBLIC_BASE_URL must use HTTPS');
+    expect(() => loadFederationConfig({
+      NODE_ENV: 'production',
+      FEDERATION_PUBLIC_BASE_URL: 'https://federation.example.test',
+    })).toThrow('federation configuration is incomplete');
+  });
+
+  it('loads database and gateway credentials from mounted files', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'otto-federation-config-'));
+    try {
+      const databasePasswordFile = join(directory, 'database-password');
+      const adminTokenFile = join(directory, 'admin-token');
+      const metricsTokenFile = join(directory, 'metrics-token');
+      writeFileSync(databasePasswordFile, 'p'.repeat(48));
+      writeFileSync(adminTokenFile, 'a'.repeat(48));
+      writeFileSync(metricsTokenFile, 'm'.repeat(48));
+      const config = loadFederationConfig({
+        NODE_ENV: 'production',
+        FEDERATION_PUBLIC_BASE_URL: 'https://federation.example.test',
+        FEDERATION_DATABASE_HOST: 'postgres-router',
+        FEDERATION_DATABASE_NAME: 'otto_control',
+        FEDERATION_DATABASE_USER: 'otto_control',
+        FEDERATION_DATABASE_PASSWORD_FILE: databasePasswordFile,
+        FEDERATION_DATABASE_SSL: 'false',
+        FEDERATION_ADMIN_TOKEN_FILE: adminTokenFile,
+        FEDERATION_METRICS_TOKEN_FILE: metricsTokenFile,
+      });
+      expect(config.databaseUrl).toContain('postgres-router');
+      expect(config.adminToken).toBe('a'.repeat(48));
+      expect(config.metricsToken).toBe('m'.repeat(48));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

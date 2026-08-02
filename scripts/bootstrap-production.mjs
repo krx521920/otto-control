@@ -17,12 +17,22 @@ function requiredPublicUrl() {
   return url;
 }
 
+function federationPublicUrl(controlUrl) {
+  const raw = option('--federation-public-url');
+  const url = raw ? new URL(raw) : new URL(`https://federation.${controlUrl.hostname}`);
+  if (url.protocol !== 'https:' || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('--federation-public-url must be an HTTPS origin without a path, query, or fragment');
+  }
+  return url;
+}
+
 function writeSecret(path, value) {
   writeFileSync(path, `${value}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
 }
 
 function main() {
   const publicUrl = requiredPublicUrl();
+  const federationUrl = federationPublicUrl(publicUrl);
   const root = resolve(option('--output') ?? '.');
   const secretDirectory = resolve(root, 'secrets');
   const targets = [
@@ -32,6 +42,8 @@ function main() {
     resolve(secretDirectory, 'control_admin_token'),
     resolve(secretDirectory, 'control_token_secret'),
     resolve(secretDirectory, 'control_metrics_token'),
+    resolve(secretDirectory, 'federation_admin_token'),
+    resolve(secretDirectory, 'federation_metrics_token'),
     resolve(secretDirectory, 'postgres_password'),
     resolve(secretDirectory, 'postgres_superuser_password'),
     resolve(secretDirectory, 'postgres_replication_password'),
@@ -66,6 +78,8 @@ function main() {
   writeSecret(resolve(secretDirectory, 'control_admin_token'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'control_token_secret'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'control_metrics_token'), randomBytes(48).toString('base64url'));
+  writeSecret(resolve(secretDirectory, 'federation_admin_token'), randomBytes(48).toString('base64url'));
+  writeSecret(resolve(secretDirectory, 'federation_metrics_token'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'postgres_password'), randomBytes(48).toString('base64url'));
   writeSecret(
     resolve(secretDirectory, 'postgres_superuser_password'),
@@ -85,13 +99,33 @@ function main() {
 
   const environment = [
     'NODE_ENV=production',
-    'OTTO_CONTROL_VERSION=0.25.0',
+    'OTTO_CONTROL_VERSION=0.26.0',
     'CONTROL_HOST=0.0.0.0',
     'CONTROL_PORT=7788',
     'CONTROL_LOG_LEVEL=info',
     'CONTROL_TRUST_PROXY=true',
     `CONTROL_PUBLIC_BASE_URL=${publicUrl.origin}`,
     `CONTROL_DOMAIN=${publicUrl.hostname}`,
+    `FEDERATION_DOMAIN=${federationUrl.hostname}`,
+    `FEDERATION_PUBLIC_BASE_URL=${federationUrl.origin}`,
+    'FEDERATION_HOST=0.0.0.0',
+    'FEDERATION_PORT=7790',
+    'FEDERATION_LOG_LEVEL=info',
+    'FEDERATION_TRUST_PROXY=true',
+    'FEDERATION_DATABASE_HOST=postgres-router',
+    'FEDERATION_DATABASE_PORT=5432',
+    'FEDERATION_DATABASE_NAME=otto_control',
+    'FEDERATION_DATABASE_USER=otto_control',
+    'FEDERATION_DATABASE_PASSWORD_FILE=/run/secrets/postgres_password',
+    'FEDERATION_DATABASE_SSL=false',
+    'FEDERATION_ADMIN_TOKEN_FILE=/run/secrets/federation_admin_token',
+    'FEDERATION_METRICS_TOKEN_FILE=/run/secrets/federation_metrics_token',
+    'FEDERATION_MAX_CIPHERTEXT_BYTES=1048576',
+    'FEDERATION_MAX_ENVELOPE_TTL_MS=604800000',
+    'FEDERATION_MAX_CLOCK_SKEW_MS=300000',
+    'FEDERATION_CLAIM_TTL_MS=60000',
+    'FEDERATION_CLEANUP_INTERVAL_MS=60000',
+    'FEDERATION_DELIVERED_RETENTION_MS=604800000',
     'CONTROL_DATABASE_HOST=postgres-router',
     'CONTROL_DATABASE_PORT=5432',
     'CONTROL_DATABASE_NAME=otto_control',
