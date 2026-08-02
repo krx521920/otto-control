@@ -133,7 +133,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
         licenses: string;
         billing: string;
         witness: string;
-        artifactEvidence: string;
+        artifact_evidence: string;
       }>(
         `SELECT
           to_regclass('public.control_licenses')::text AS licenses,
@@ -145,7 +145,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
         licenses: 'control_licenses',
         billing: 'control_credit_transactions',
         witness: 'control_audit_witness_receipts',
-        artifactEvidence: 'control_release_artifact_evidence',
+        artifact_evidence: 'control_release_artifact_evidence',
       });
     } finally {
       await pool.end();
@@ -169,8 +169,8 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       channel: 'stable',
       rolloutPercent: 100,
       notes: 'PostgreSQL managed artifact fixture',
-      fullManifestUrl: null,
-      fullManifestSha256: null,
+      fullManifestUrl: 'https://control.integration.test/v1/release-artifacts/art_postgresmanaged001/download',
+      fullManifestSha256: 'e'.repeat(64),
       incrementalManifestUrl: null,
       incrementalManifestSha256: null,
     });
