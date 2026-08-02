@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { loadControlConfig } from '../src/config.js';
 import { loadSigningProviders } from '../src/crypto/signing-provider-config.js';
@@ -92,6 +92,44 @@ describe('signing provider configuration', () => {
       await expect(loadSigningProviders(loadControlConfig({
         CONTROL_SIGNER_KEYRING_FILE: manifestPath,
       }))).rejects.toThrow('requires bearerTokenFile or mTLS');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('loads a native AWS KMS provider without local or broker credentials', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'otto-aws-kms-keyring-'));
+    try {
+      const manifestPath = join(directory, 'keyring.json');
+      const keyArns = [
+        `arn:aws:kms:ap-southeast-1:111122223333:key/mrk-${'a'.repeat(32)}`,
+        `arn:aws:kms:ap-northeast-1:111122223333:key/mrk-${'a'.repeat(32)}`,
+      ];
+      writeFileSync(manifestPath, JSON.stringify({
+        version: 1,
+        keys: [{
+          provider: 'kms',
+          backend: 'aws_kms',
+          keyArns,
+          timeoutMs: 4_000,
+          validateSignPermission: true,
+        }],
+      }));
+      const signer = new (await import('../src/crypto/signed-envelope.js')).LocalEd25519Signer(
+        generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+      );
+      const factory = vi.fn(async () => signer);
+
+      const loaded = await loadSigningProviders(loadControlConfig({
+        CONTROL_SIGNER_KEYRING_FILE: manifestPath,
+      }), { awsKmsSignerFactory: factory });
+
+      expect(factory).toHaveBeenCalledWith({
+        keyArns,
+        timeoutMs: 4_000,
+        validateSignPermission: true,
+      });
+      expect(loaded.providers).toEqual([{ provider: 'kms', signer }]);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

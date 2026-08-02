@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "keys": [
+    {
+      "provider": "kms",
+      "backend": "aws_kms",
+      "keyArns": [
+        "arn:aws:kms:ap-southeast-1:111122223333:key/mrk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "arn:aws:kms:ap-northeast-1:111122223333:key/mrk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "timeoutMs": 5000,
+      "validateSignPermission": true
+    }
+  ]
+}

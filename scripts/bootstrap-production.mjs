@@ -85,6 +85,7 @@ function main() {
 
   const environment = [
     'NODE_ENV=production',
+    'OTTO_CONTROL_VERSION=0.23.0',
     'CONTROL_HOST=0.0.0.0',
     'CONTROL_PORT=7788',
     'CONTROL_LOG_LEVEL=info',

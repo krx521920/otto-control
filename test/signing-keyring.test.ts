@@ -87,6 +87,31 @@ describe('managed signing keyring', () => {
     expect(current.signingKeyId).toBe(second.keyId);
   });
 
+  it('requires an independently verified live signature before activating a provider', async () => {
+    const store = new MemoryControlStore();
+    const active = localSigner();
+    const target = localSigner();
+    const invalidTarget = {
+      keyId: target.keyId,
+      publicKeyPem: target.publicKeyPem,
+      async sign() {
+        return 'ed25519:AA';
+      },
+    };
+    const keyring = await ManagedSigningKeyring.create({
+      store,
+      providers: [
+        { signer: active, provider: 'local' },
+        { signer: invalidTarget, provider: 'hsm' },
+      ],
+    });
+
+    await expect(keyring.probe(target.keyId)).rejects.toThrow('probe verification failed');
+    await expect(keyring.activate(target.keyId)).rejects.toThrow('probe verification failed');
+    expect((await store.getSigningKey(active.keyId))?.state).toBe('active');
+    expect((await store.getSigningKey(target.keyId))?.state).toBe('standby');
+  });
+
   it('revokes a compromised key and atomically switches an active key to its replacement', async () => {
     const store = new MemoryControlStore();
     const first = localSigner();

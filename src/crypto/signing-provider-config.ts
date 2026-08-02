@@ -3,10 +3,14 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 
 import type { ControlConfig } from '../config.js';
 import {
+  AwsKmsEd25519Signer,
+  type AwsKmsEd25519SignerOptions,
+} from './aws-kms-ed25519-signer.js';
+import {
   HttpsRemoteSigningTransport,
   RemoteEd25519Signer,
 } from './remote-ed25519-signer.js';
-import { LocalEd25519Signer } from './signed-envelope.js';
+import { LocalEd25519Signer, type PayloadSigner } from './signed-envelope.js';
 import type { SigningProviderHandle } from './signing-keyring.js';
 
 interface LocalKeyEntry {
@@ -16,6 +20,7 @@ interface LocalKeyEntry {
 
 interface RemoteKeyEntry {
   provider: 'kms' | 'hsm';
+  backend?: 'remote';
   endpoint: string;
   keyRef: string;
   publicKeyFile: string;
@@ -26,10 +31,22 @@ interface RemoteKeyEntry {
   timeoutMs?: number;
 }
 
+interface AwsKmsKeyEntry {
+  provider: 'kms';
+  backend: 'aws_kms';
+  keyArns: string[];
+  timeoutMs?: number;
+  validateSignPermission?: boolean;
+}
+
 interface KeyringManifest {
   version: 1;
   activeKeyId?: string;
-  keys: Array<LocalKeyEntry | RemoteKeyEntry>;
+  keys: Array<LocalKeyEntry | RemoteKeyEntry | AwsKmsKeyEntry>;
+}
+
+export interface SigningProviderLoaderDependencies {
+  awsKmsSignerFactory?: (options: AwsKmsEd25519SignerOptions) => Promise<PayloadSigner>;
 }
 
 function nonEmptyString(value: unknown): value is string {
@@ -39,6 +56,7 @@ function nonEmptyString(value: unknown): value is string {
 function validateRemoteEntry(entry: Record<string, unknown>): void {
   if (
     (entry.provider !== 'kms' && entry.provider !== 'hsm')
+    || (entry.backend !== undefined && entry.backend !== 'remote')
     || !nonEmptyString(entry.endpoint)
     || !nonEmptyString(entry.keyRef)
     || !nonEmptyString(entry.publicKeyFile)
@@ -71,6 +89,28 @@ function validateRemoteEntry(entry: Record<string, unknown>): void {
   }
 }
 
+function validateAwsKmsEntry(entry: Record<string, unknown>): void {
+  if (entry.provider !== 'kms'
+    || entry.backend !== 'aws_kms'
+    || !Array.isArray(entry.keyArns)
+    || entry.keyArns.length < 1
+    || entry.keyArns.length > 3
+    || !entry.keyArns.every(nonEmptyString)) {
+    throw new Error('signing keyring manifest contains an invalid AWS KMS provider');
+  }
+  if (entry.validateSignPermission !== undefined
+    && typeof entry.validateSignPermission !== 'boolean') {
+    throw new Error('signing keyring AWS KMS validateSignPermission must be boolean');
+  }
+  if (entry.timeoutMs !== undefined && (
+    !Number.isInteger(entry.timeoutMs)
+    || Number(entry.timeoutMs) < 500
+    || Number(entry.timeoutMs) > 30_000
+  )) {
+    throw new Error('signing keyring AWS KMS timeoutMs must be between 500 and 30000');
+  }
+}
+
 function parseManifest(raw: string): KeyringManifest {
   let value: unknown;
   try {
@@ -94,6 +134,8 @@ function parseManifest(raw: string): KeyringManifest {
       if (!nonEmptyString(entry.privateKeyFile)) {
         throw new Error('signing keyring manifest contains an invalid local provider');
       }
+    } else if (entry.provider === 'kms' && entry.backend === 'aws_kms') {
+      validateAwsKmsEntry(entry);
     } else {
       validateRemoteEntry(entry);
     }
@@ -127,7 +169,10 @@ async function optionalFile(
     : undefined;
 }
 
-export async function loadSigningProviders(config: Readonly<ControlConfig>): Promise<{
+export async function loadSigningProviders(
+  config: Readonly<ControlConfig>,
+  dependencies: SigningProviderLoaderDependencies = {},
+): Promise<{
   providers: SigningProviderHandle[];
   preferredActiveKeyId: string | null;
 }> {
@@ -143,6 +188,17 @@ export async function loadSigningProviders(config: Readonly<ControlConfig>): Pro
             filePath(manifestPath, entry.privateKeyFile.trim()),
             'utf8',
           )),
+        });
+        continue;
+      }
+      if (entry.provider === 'kms' && entry.backend === 'aws_kms') {
+        providers.push({
+          provider: 'kms',
+          signer: await (dependencies.awsKmsSignerFactory ?? AwsKmsEd25519Signer.create)({
+            keyArns: entry.keyArns,
+            timeoutMs: entry.timeoutMs,
+            validateSignPermission: entry.validateSignPermission,
+          }),
         });
         continue;
       }

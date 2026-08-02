@@ -218,6 +218,17 @@ describe('commercial control HTTP routes', () => {
       authorization: `Bearer ${adminSessionToken}`,
       'x-otto-actor': 'security-operator',
     };
+    const probed = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/signing-keys/${standbyKeyId}/probe`,
+      headers,
+    });
+    expect(probed.statusCode).toBe(200);
+    expect(probed.json().probe).toMatchObject({
+      keyId: standbyKeyId,
+      verified: true,
+      providerHealth: { state: 'available' },
+    });
     const activationApproval = await approvedOperation(
       'signing_key.activate',
       'signing_key',

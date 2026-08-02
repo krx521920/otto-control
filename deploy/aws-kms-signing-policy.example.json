@@ -1,0 +1,32 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadExactOttoSigningKeyMetadata",
+      "Effect": "Allow",
+      "Action": [
+        "kms:DescribeKey",
+        "kms:GetPublicKey"
+      ],
+      "Resource": [
+        "arn:aws:kms:ap-southeast-1:111122223333:key/mrk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "arn:aws:kms:ap-northeast-1:111122223333:key/mrk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    {
+      "Sid": "SignExactOttoPayloadsOnly",
+      "Effect": "Allow",
+      "Action": "kms:Sign",
+      "Resource": [
+        "arn:aws:kms:ap-southeast-1:111122223333:key/mrk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "arn:aws:kms:ap-northeast-1:111122223333:key/mrk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "kms:SigningAlgorithm": "ED25519_SHA_512",
+          "kms:MessageType": "RAW"
+        }
+      }
+    }
+  ]
+}

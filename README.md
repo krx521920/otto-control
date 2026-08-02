@@ -523,7 +523,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.22.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.23.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -773,9 +773,96 @@ removed within the 10-minute lease window. Offline Licenses cannot receive live
 revocation and must use short, explicit expiry periods appropriate to the
 customer contract.
 
-### Remote KMS/HSM signing
+### Native AWS KMS Ed25519 signing
 
-The keyring manifest accepts `provider: "kms"` and `provider: "hsm"` entries.
+AWS KMS can be used directly with `provider: "kms"` and
+`backend: "aws_kms"`. The complete manifest is
+`deploy/control_signer_keyring.aws-kms.example.json`; replace both example ARNs
+with replicas of one customer-managed `ECC_NIST_EDWARDS25519` multi-Region key.
+Only immutable key ARNs are accepted. At startup Control calls `DescribeKey` and
+`GetPublicKey`, requires an enabled `SIGN_VERIFY` customer key with
+`ED25519_SHA_512`, validates `kms:Sign` with `DryRun`, and verifies that every
+configured replica exposes the same Ed25519 public key. See the AWS
+[asymmetric key specifications](https://docs.aws.amazon.com/kms/latest/developerguide/symm-asymm-choose-key-spec.html),
+[`Sign` API](https://docs.aws.amazon.com/kms/latest/APIReference/API_Sign.html),
+and [multi-Region key behavior](https://docs.aws.amazon.com/kms/latest/developerguide/mrk-how-it-works.html).
+
+The Control container never receives the private key. Long-lived access-key
+pairs are rejected; credentials must come from EKS/OIDC Web Identity, an ECS
+task role, an EC2 instance role, or a short-lived STS session that includes
+`AWS_SESSION_TOKEN` (for example, GitHub Actions OIDC). Attach the narrow policy in
+`deploy/aws-kms-signing-policy.example.json` to that workload role. It grants
+only `DescribeKey`, `GetPublicKey`, and `Sign` for the exact ARNs, and constrains
+signing to `MessageType=RAW` and `ED25519_SHA_512`. The role must not receive
+key creation, policy mutation, disable, schedule-deletion, decrypt, or grant
+management permissions. AWS documents the relevant
+[KMS condition keys](https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html).
+
+Raw AWS KMS messages are capped at 4096 bytes. Control signs only compact
+canonical License, lease, update-policy, audit, and keyring envelopes. Every
+returned signature is verified locally before use. Multiple regions are tried
+only when their ARNs identify the same MRK material; there is no fallback to a
+different, retired, local, or standby key. Three complete provider failures
+open a 30-second circuit.
+
+Before activation, `POST /v1/admin/signing-keys/:keyId/probe` performs a real
+sign operation with a random challenge and independently verifies it. The
+activation endpoint repeats this probe before changing database state. Probe
+audit records contain only the key ID, backend health, and active region, never
+the challenge or signature.
+
+Use two separate MFA administrator sessions for a production rotation:
+
+```bash
+npm run drill:signing:rotation -- \
+  --control-url https://control.example.com \
+  --requester-token-file ./secrets/requester-session \
+  --approver-token-file ./secrets/security-session \
+  --target-key-id 0123456789abcdef \
+  --output ./backups/drills/signing-rotation.json \
+  --confirm=ROTATE_OTTO_SIGNING_KEY
+```
+
+The command probes the standby key, creates a request-bound approval, has the
+second administrator approve it, activates the key, verifies that the previous
+key is retired, and writes a `0600` report without tokens or signatures. First
+distribute and verify the signed public keyring on Otto deployments. Keep the
+old key available for the full License/update overlap period, then remove its
+signing provider while retaining the retired public database record.
+
+For a regional disaster-recovery drill, temporarily deny `kms:Sign` for the
+primary region at the test workload policy/SCP boundary, then run:
+
+```bash
+npm run drill:signing:provider -- \
+  --control-url https://control.example.com \
+  --token-file ./secrets/requester-session \
+  --key-id 0123456789abcdef \
+  --expect-location ap-northeast-1 \
+  --minimum-failovers 1 \
+  --output ./backups/drills/signing-provider-dr.json \
+  --confirm=PROBE_OTTO_SIGNING_PROVIDER
+```
+
+Restore primary-region permission immediately after the drill. A passing report
+must show a verified signature from the expected replica and an increased
+failover counter. If every region is unavailable, License issuance and other
+signed mutations fail closed; operators must restore KMS or perform a separately
+approved key rotation. Do not add a local emergency private key to the AWS KMS
+manifest. After migration, delete the old local private-key file from the host
+and from every Control secret mount.
+
+The manually dispatched `.github/workflows/aws-kms-drill.yml` exchanges GitHub
+OIDC identity for a 15-minute AWS session and runs the opt-in live integration
+test. Configure the repository's OIDC subject on a dedicated IAM role, then
+provide only that role ARN, the region, and the KMS key ARNs when dispatching the
+workflow. No AWS access key is stored in GitHub. A local or ordinary CI test run
+skips the live test unless `CONTROL_TEST_AWS_KMS_KEY_ARNS` is explicitly set.
+
+### Isolated remote KMS/HSM broker
+
+The keyring manifest also accepts remote `provider: "kms"` and
+`provider: "hsm"` entries.
 Otto Control stores only the Ed25519 public key and a non-secret remote `keyRef`;
 the private key stays inside the managed KMS, HSM, or its isolated signing
 broker. See `deploy/control_signer_keyring.remote.example.json` for the complete
@@ -811,9 +898,9 @@ fallback to a retired or standby key. Remote provider health starts as
 `unchecked`, becomes `available` only after a verified signature, and is exposed
 by the administrator signing-key API without leaking endpoint credentials.
 
-The backend must support Ed25519 signing of the raw canonical message. A cloud
-KMS that exposes only RSA/ECDSA or pre-hashed signing is not compatible with the
-current Otto License contract; place a narrowly scoped Ed25519 HSM signer behind
+The backend must support Ed25519 signing of the raw canonical message. A KMS or
+HSM that exposes only RSA/ECDSA or pre-hashed signing is not compatible with the
+current Otto License contract; place a narrowly scoped Ed25519 signer behind
 this protocol instead of changing verification semantics during a rotation.
 
 To migrate, keep the current local entry and add the KMS/HSM entry, restart to
@@ -899,6 +986,7 @@ GET  /v1/admin/licenses/:licenseId/seats
 POST /v1/admin/licenses/:licenseId/revoke
 GET  /v1/admin/signing-key
 GET  /v1/admin/signing-keys
+POST /v1/admin/signing-keys/:keyId/probe
 POST /v1/admin/signing-keys/:keyId/activate
 POST /v1/admin/signing-keys/:keyId/retire
 POST /v1/admin/signing-keys/:keyId/revoke

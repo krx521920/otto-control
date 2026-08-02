@@ -50,6 +50,18 @@ export async function registerCommercialControlRoutes(
     });
 
     admin.post<{ Params: { keyId: string } }>(
+      '/signing-keys/:keyId/probe',
+      { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'signing_key.manage');
+        return { probe: await options.service.probeSigningKey(
+          request.params.keyId,
+          auth.actorId,
+        ) };
+      },
+    );
+
+    admin.post<{ Params: { keyId: string } }>(
       '/signing-keys/:keyId/activate',
       async (request) => {
         const auth = await authenticateAdmin(request, options, 'signing_key.manage');

@@ -42,6 +42,57 @@ describe('production deployment assets', () => {
     });
   });
 
+  it('ships least-privilege native AWS KMS signing and production drills', () => {
+    const manifest = JSON.parse(
+      repositoryFile('deploy/control_signer_keyring.aws-kms.example.json'),
+    );
+    expect(manifest).toMatchObject({
+      version: 1,
+      keys: [{ provider: 'kms', backend: 'aws_kms', validateSignPermission: true }],
+    });
+    expect(manifest.keys[0].keyArns).toHaveLength(2);
+    const policy = JSON.parse(repositoryFile('deploy/aws-kms-signing-policy.example.json'));
+    expect(policy.Statement).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Action: ['kms:DescribeKey', 'kms:GetPublicKey'],
+      }),
+      expect.objectContaining({
+        Action: 'kms:Sign',
+        Condition: {
+          StringEquals: {
+            'kms:SigningAlgorithm': 'ED25519_SHA_512',
+            'kms:MessageType': 'RAW',
+          },
+        },
+      }),
+    ]));
+    const serializedPolicy = JSON.stringify(policy);
+    expect(serializedPolicy).not.toMatch(/kms:(Create|Disable|ScheduleKeyDeletion|PutKeyPolicy|Decrypt)/u);
+    const signer = repositoryFile('src/crypto/aws-kms-ed25519-signer.ts');
+    expect(signer).toContain('forbids static credentials');
+    expect(signer).toContain("KeySpec !== 'ECC_NIST_EDWARDS25519'");
+    expect(signer).toContain("SigningAlgorithm: 'ED25519_SHA_512'");
+    expect(signer).toContain('failed in every configured Region');
+    const rotation = repositoryFile('scripts/drill-signing-rotation.mjs');
+    expect(rotation).toContain('ROTATE_OTTO_SIGNING_KEY');
+    expect(rotation).toContain("operation: 'signing_key.activate'");
+    expect(rotation).toContain("'x-otto-approval-id': approvalId");
+    const provider = repositoryFile('scripts/drill-signing-provider.mjs');
+    expect(provider).toContain('PROBE_OTTO_SIGNING_PROVIDER');
+    expect(provider).toContain('expected active location');
+    expect(provider).toContain('minimumFailovers');
+    const workflow = repositoryFile('.github/workflows/aws-kms-drill.yml');
+    expect(workflow).toContain('id-token: write');
+    expect(workflow).toContain('CONTROL_REQUIRE_AWS_KMS_TEST: "true"');
+    expect(workflow).toContain('CONTROL_TEST_AWS_KMS_KEY_ARNS: ${{ inputs.kms_key_arns }}');
+    expect(workflow).toContain(
+      'aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885',
+    );
+    expect(workflow).toContain('role-duration-seconds: 900');
+    expect(workflow).not.toContain('AWS_SECRET_ACCESS_KEY:');
+    expect(workflow).not.toContain('secrets.AWS_');
+  });
+
   it('isolates the HA database plane and hardens every control runtime', () => {
     const compose = repositoryFile('compose.production.yaml');
     expect(compose).toContain('  etcd-1:');

@@ -52,6 +52,9 @@ export interface SignerHealth {
   state: 'unchecked' | 'available' | 'degraded' | 'circuit_open';
   consecutiveFailures: number;
   circuitOpenUntil: string | null;
+  backend?: 'aws_kms' | 'remote';
+  activeLocation?: string | null;
+  failoversTotal?: number;
 }
 
 export interface SignedPayload {

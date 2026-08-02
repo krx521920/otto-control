@@ -1,4 +1,12 @@
-import type { PayloadSigner, SignedPayload, SignerHealth } from './signed-envelope.js';
+import { createPublicKey, randomBytes, verify } from 'node:crypto';
+
+import {
+  canonicalJson,
+  ED25519_SIGNATURE_PREFIX,
+  type PayloadSigner,
+  type SignedPayload,
+  type SignerHealth,
+} from './signed-envelope.js';
 import { conflict, notFound, unauthorized } from '../errors.js';
 import type {
   ControlStore,
@@ -15,6 +23,13 @@ export interface SigningProviderHandle {
 export interface PublicSigningKey extends SigningKeyRecord {
   canSign: boolean;
   providerHealth: SignerHealth | null;
+}
+
+export interface SigningKeyProbeResult {
+  keyId: string;
+  verified: true;
+  probedAt: string;
+  providerHealth: SignerHealth;
 }
 
 export interface SignedKeyringPayload {
@@ -131,11 +146,56 @@ export class ManagedSigningKeyring implements PayloadSigner {
   }
 
   async activate(keyId: string): Promise<SigningKeyTransition> {
-    this.#requireProvider(keyId);
+    await this.probe(keyId);
     const transition = await this.#store.activateSigningKey(keyId, new Date());
     if (!transition) throw notFound('signing key not found');
     this.#activeKeyId = transition.activeKey!.keyId;
     return transition;
+  }
+
+  async probe(keyId: string): Promise<SigningKeyProbeResult> {
+    const key = await this.#store.getSigningKey(keyId);
+    if (!key) throw notFound('signing key not found');
+    if (key.state === 'revoked') throw conflict('revoked signing key cannot be probed');
+    const provider = this.#requireProvider(keyId);
+    const configuredPublicKey = createPublicKey(provider.signer.publicKeyPem);
+    const storedPublicKey = createPublicKey(key.publicKeyPem);
+    if (!Buffer.from(configuredPublicKey.export({ format: 'der', type: 'spki' })).equals(
+      Buffer.from(storedPublicKey.export({ format: 'der', type: 'spki' })),
+    )) {
+      throw conflict(`signing provider public key does not match registered key ${keyId}`);
+    }
+    const probedAt = new Date().toISOString();
+    const payload = {
+      version: 1,
+      purpose: 'otto-control-signing-key-probe',
+      keyId,
+      challenge: randomBytes(32).toString('base64url'),
+      probedAt,
+    };
+    const signature = await provider.signer.sign(payload);
+    if (!signature.startsWith(ED25519_SIGNATURE_PREFIX)) {
+      throw conflict(`signing provider returned an unsupported signature for key ${keyId}`);
+    }
+    const signatureBytes = Buffer.from(signature.slice(ED25519_SIGNATURE_PREFIX.length), 'base64url');
+    if (signatureBytes.length !== 64 || !verify(
+      null,
+      Buffer.from(canonicalJson(payload)),
+      configuredPublicKey,
+      signatureBytes,
+    )) {
+      throw conflict(`signing provider probe verification failed for key ${keyId}`);
+    }
+    return {
+      keyId,
+      verified: true,
+      probedAt,
+      providerHealth: provider.signer.health?.() ?? {
+        state: 'available',
+        consecutiveFailures: 0,
+        circuitOpenUntil: null,
+      },
+    };
   }
 
   async retire(keyId: string): Promise<SigningKeyTransition> {

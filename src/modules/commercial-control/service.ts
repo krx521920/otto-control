@@ -32,6 +32,7 @@ import { signPayload, type PayloadSigner } from '../../crypto/signed-envelope.js
 import type {
   ManagedSigningKeyring,
   PublicSigningKey,
+  SigningKeyProbeResult,
   SignedKeyringEnvelope,
 } from '../../crypto/signing-keyring.js';
 import { conflict, invalidRequest, notFound, unauthorized } from '../../errors.js';
@@ -410,6 +411,25 @@ export class CommercialControlService {
       detail: { previousActiveKeyId: transition.previousActiveKey?.keyId ?? null },
     });
     return this.#keyring.list();
+  }
+
+  async probeSigningKey(keyId: string, actorId: string): Promise<SigningKeyProbeResult> {
+    if (!this.#keyring) throw conflict('managed signing keyring is not configured');
+    if (!SIGNING_KEY_ID_PATTERN.test(keyId)) throw invalidRequest('signing key id is invalid');
+    const result = await this.#keyring.probe(keyId);
+    await this.#store.appendAuditEvent({
+      actorId,
+      action: 'signing_key.probed',
+      targetType: 'signing_key',
+      targetId: keyId,
+      detail: {
+        verified: result.verified,
+        backend: result.providerHealth.backend ?? null,
+        activeLocation: result.providerHealth.activeLocation ?? null,
+        state: result.providerHealth.state,
+      },
+    });
+    return result;
   }
 
   async retireSigningKey(keyId: string, actorId: string): Promise<PublicSigningKey[]> {

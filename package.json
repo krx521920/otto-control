@@ -1,6 +1,6 @@
 {
   "name": "otto-control",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "private": true,
   "description": "Commercial control plane for Otto private deployments",
   "type": "module",
@@ -16,6 +16,8 @@
     "drill:restore:production": "sh deploy/drill-restore-postgres.sh",
     "drill:failover:production": "sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL",
     "drill:pitr:production": "sh deploy/drill-pitr-postgres.sh",
+    "drill:signing:provider": "node scripts/drill-signing-provider.mjs",
+    "drill:signing:rotation": "node scripts/drill-signing-rotation.mjs",
     "lint": "eslint .",
     "start": "node dist/server.js",
     "restore:production": "sh deploy/restore-postgres.sh",
@@ -27,7 +29,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.1101.0",
     "@aws-sdk/client-s3": "^3.1101.0",
+    "@aws-sdk/credential-provider-http": "^3.972.67",
+    "@aws-sdk/credential-provider-web-identity": "^3.972.71",
     "@aws-sdk/s3-request-presigner": "^3.1101.0",
     "@fastify/otel": "^0.20.1",
     "@fastify/rate-limit": "^11.2.0",
@@ -38,6 +43,7 @@
     "@opentelemetry/instrumentation-pg": "^0.73.0",
     "@opentelemetry/resources": "^2.10.0",
     "@opentelemetry/sdk-trace-node": "^2.10.0",
+    "@smithy/credential-provider-imds": "^4.4.16",
     "fastify": "^5.8.5",
     "pg": "^8.16.3",
     "prom-client": "^15.1.3"
