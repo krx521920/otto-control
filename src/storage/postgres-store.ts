@@ -93,6 +93,18 @@ import type {
   DatabaseObservabilitySource,
   DatabasePoolSnapshot,
 } from '../observability/contracts.js';
+import type {
+  CustomerDataExportSnapshot,
+  CustomerErasureResult,
+  DataGovernanceRequestRecord,
+  DataGovernanceRequestStatus,
+  DataGovernanceRequestType,
+  DataGovernanceStateRecord,
+  LegalHoldRecord,
+  PrivacyAcceptanceRecord,
+  RetentionRunResult,
+} from '../contracts/data-governance.js';
+import type { DataGovernanceStore } from '../modules/data-governance/store.js';
 import { runMigrations } from './migrations.js';
 
 const { Pool } = pg;
@@ -108,6 +120,49 @@ interface CustomerRow {
   id: string;
   name: string;
   status: RecordStatus;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface DataGovernanceStateRow {
+  data_region: string;
+  allowed_regions: string[];
+  cross_border_enabled: boolean;
+  cross_border_assessment_id: string | null;
+  policy_version: string;
+  policy_sha256: string;
+  policy_effective_at: Date;
+  controller_name: string;
+  privacy_contact: string;
+  initialized_at: Date;
+  updated_at: Date;
+}
+
+interface DataGovernanceRequestRow {
+  id: string;
+  customer_id: string;
+  type: DataGovernanceRequestType;
+  status: DataGovernanceRequestStatus;
+  reason: string;
+  requested_by: string;
+  earliest_execution_at: Date | null;
+  manifest_sha256: string | null;
+  result: Record<string, unknown> | null;
+  completed_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface LegalHoldRow {
+  id: string;
+  customer_id: string;
+  scope: string[];
+  reason: string;
+  created_by: string;
+  expires_at: Date | null;
+  released_at: Date | null;
+  released_by: string | null;
+  release_reason: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -477,6 +532,55 @@ function customerFromRow(row: CustomerRow): CustomerRecord {
     id: row.id,
     name: row.name,
     status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function dataGovernanceStateFromRow(row: DataGovernanceStateRow): DataGovernanceStateRecord {
+  return {
+    dataRegion: row.data_region,
+    allowedRegions: row.allowed_regions,
+    crossBorderEnabled: row.cross_border_enabled,
+    crossBorderAssessmentId: row.cross_border_assessment_id,
+    policyVersion: row.policy_version,
+    policySha256: row.policy_sha256,
+    policyEffectiveAt: row.policy_effective_at,
+    controllerName: row.controller_name,
+    privacyContact: row.privacy_contact,
+    initializedAt: row.initialized_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function dataGovernanceRequestFromRow(row: DataGovernanceRequestRow): DataGovernanceRequestRecord {
+  return {
+    id: row.id,
+    customerId: row.customer_id,
+    type: row.type,
+    status: row.status,
+    reason: row.reason,
+    requestedBy: row.requested_by,
+    earliestExecutionAt: row.earliest_execution_at,
+    manifestSha256: row.manifest_sha256,
+    result: row.result,
+    completedAt: row.completed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function legalHoldFromRow(row: LegalHoldRow): LegalHoldRecord {
+  return {
+    id: row.id,
+    customerId: row.customer_id,
+    scope: row.scope,
+    reason: row.reason,
+    createdBy: row.created_by,
+    expiresAt: row.expires_at,
+    releasedAt: row.released_at,
+    releasedBy: row.released_by,
+    releaseReason: row.release_reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -901,7 +1005,7 @@ function creditTransactionFromRow(row: CreditTransactionRow): CreditTransactionR
   };
 }
 
-export class PostgresControlStore implements ControlStore, DatabaseObservabilitySource {
+export class PostgresControlStore implements ControlStore, DatabaseObservabilitySource, DataGovernanceStore {
   readonly #pool: InstanceType<typeof Pool>;
   readonly #poolState: { errorsTotal: number };
 
@@ -1001,8 +1105,12 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
   async createCustomer(input: { id: string; name: string }): Promise<CustomerRecord> {
     try {
       const result = await this.#pool.query<CustomerRow>(
-        `INSERT INTO control_customers (id, name)
-         VALUES ($1, $2)
+        `INSERT INTO control_customers (id, name, data_region)
+         VALUES (
+           $1,
+           $2,
+           COALESCE((SELECT data_region FROM control_data_governance_state WHERE singleton = 1), 'CN-BJ')
+         )
          RETURNING *`,
         [input.id, input.name],
       );
@@ -4321,6 +4429,611 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       oldestPendingAt: row.oldest_pending_at,
       latestVerifiedAt: row.latest_verified_at,
     };
+  }
+
+  async initializeDataGovernanceState(
+    input: Omit<DataGovernanceStateRecord, 'initializedAt' | 'updatedAt'>,
+  ): Promise<DataGovernanceStateRecord> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const existing = await client.query<DataGovernanceStateRow>(
+        'SELECT * FROM control_data_governance_state WHERE singleton = 1 FOR UPDATE',
+      );
+      if (existing.rowCount && existing.rows[0]!.data_region !== input.dataRegion) {
+        throw conflict(
+          `data residency is already bound to ${existing.rows[0]!.data_region}; migration requires an approved export/import procedure`,
+        );
+      }
+      const now = new Date();
+      const result = await client.query<DataGovernanceStateRow>(
+        `INSERT INTO control_data_governance_state
+          (singleton, data_region, allowed_regions, cross_border_enabled,
+           cross_border_assessment_id, policy_version, policy_sha256, policy_effective_at,
+           controller_name, privacy_contact, initialized_at, updated_at)
+         VALUES (1, $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+         ON CONFLICT (singleton) DO UPDATE SET
+           allowed_regions = EXCLUDED.allowed_regions,
+           cross_border_enabled = EXCLUDED.cross_border_enabled,
+           cross_border_assessment_id = EXCLUDED.cross_border_assessment_id,
+           policy_version = EXCLUDED.policy_version,
+           policy_sha256 = EXCLUDED.policy_sha256,
+           policy_effective_at = EXCLUDED.policy_effective_at,
+           controller_name = EXCLUDED.controller_name,
+           privacy_contact = EXCLUDED.privacy_contact,
+           updated_at = EXCLUDED.updated_at
+         RETURNING *`,
+        [
+          input.dataRegion,
+          JSON.stringify(input.allowedRegions),
+          input.crossBorderEnabled,
+          input.crossBorderAssessmentId,
+          input.policyVersion,
+          input.policySha256,
+          input.policyEffectiveAt,
+          input.controllerName,
+          input.privacyContact,
+          now,
+        ],
+      );
+      if (!existing.rowCount) {
+        await client.query('UPDATE control_customers SET data_region = $1', [input.dataRegion]);
+      }
+      await client.query('COMMIT');
+      return dataGovernanceStateFromRow(result.rows[0]!);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getDataGovernanceState(): Promise<DataGovernanceStateRecord | null> {
+    const result = await this.#pool.query<DataGovernanceStateRow>(
+      'SELECT * FROM control_data_governance_state WHERE singleton = 1',
+    );
+    return result.rowCount ? dataGovernanceStateFromRow(result.rows[0]!) : null;
+  }
+
+  async createDataGovernanceRequest(input: {
+    id: string;
+    customerId: string;
+    type: DataGovernanceRequestType;
+    reason: string;
+    requestedBy: string;
+    earliestExecutionAt: Date | null;
+    createdAt: Date;
+  }): Promise<DataGovernanceRequestRecord> {
+    try {
+      const result = await this.#pool.query<DataGovernanceRequestRow>(
+        `INSERT INTO control_data_governance_requests
+          (id, customer_id, type, status, reason, requested_by, earliest_execution_at,
+           created_at, updated_at)
+         VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $7)
+         RETURNING *`,
+        [input.id, input.customerId, input.type, input.reason, input.requestedBy,
+          input.earliestExecutionAt, input.createdAt],
+      );
+      return dataGovernanceRequestFromRow(result.rows[0]!);
+    } catch (error) {
+      if (postgresCode(error) === '23503') throw conflict('customer does not exist');
+      if (postgresCode(error) === '23505') {
+        throw conflict('a pending customer erasure request already exists');
+      }
+      throw error;
+    }
+  }
+
+  async getDataGovernanceRequest(id: string): Promise<DataGovernanceRequestRecord | null> {
+    const result = await this.#pool.query<DataGovernanceRequestRow>(
+      'SELECT * FROM control_data_governance_requests WHERE id = $1',
+      [id],
+    );
+    return result.rowCount ? dataGovernanceRequestFromRow(result.rows[0]!) : null;
+  }
+
+  async completeDataGovernanceRequest(input: {
+    id: string;
+    status: 'completed' | 'blocked' | 'failed';
+    manifestSha256: string | null;
+    result: Record<string, unknown>;
+    completedAt: Date;
+  }): Promise<DataGovernanceRequestRecord | null> {
+    const result = await this.#pool.query<DataGovernanceRequestRow>(
+      `UPDATE control_data_governance_requests
+       SET status = $2, manifest_sha256 = $3, result = $4::jsonb,
+           completed_at = COALESCE(completed_at, $5), updated_at = $5
+       WHERE id = $1
+         AND (status = 'pending' OR (status = $2 AND manifest_sha256 IS NULL))
+       RETURNING *`,
+      [input.id, input.status, input.manifestSha256, JSON.stringify(input.result), input.completedAt],
+    );
+    return result.rowCount ? dataGovernanceRequestFromRow(result.rows[0]!) : null;
+  }
+
+  async exportCustomerGovernanceData(customerId: string): Promise<CustomerDataExportSnapshot | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const customerResult = await client.query<{
+        id: string; name: string; status: string; data_region: string; erased_at: Date | null;
+        created_at: Date; updated_at: Date;
+      }>('SELECT id, name, status, data_region, erased_at, created_at, updated_at FROM control_customers WHERE id = $1', [customerId]);
+      if (!customerResult.rowCount) {
+        await client.query('COMMIT');
+        return null;
+      }
+      const deployments = await client.query<{
+        id: string; organization_id: string; machine_fingerprint: string; name: string;
+        status: string; created_at: Date; updated_at: Date;
+      }>(
+        `SELECT id, organization_id, machine_fingerprint, name, status, created_at, updated_at
+         FROM control_deployments WHERE customer_id = $1 ORDER BY created_at, id`,
+        [customerId],
+      );
+      const licenses = await client.query<{
+        id: string; deployment_id: string; plan: string; issued_at_ms: string; expires_at_ms: string;
+        seat_limit: number; modules: string[]; offline: boolean; telemetry_allowed: boolean;
+        revoked_at_ms: string | null; created_at: Date; updated_at: Date;
+      }>(
+        `SELECT licenses.id, licenses.deployment_id, licenses.plan, licenses.issued_at_ms,
+                licenses.expires_at_ms, licenses.seat_limit, licenses.modules, licenses.offline,
+                licenses.telemetry_allowed, licenses.revoked_at_ms, licenses.created_at,
+                licenses.updated_at
+         FROM control_licenses AS licenses
+         JOIN control_deployments AS deployments ON deployments.id = licenses.deployment_id
+         WHERE deployments.customer_id = $1 ORDER BY licenses.created_at, licenses.id`,
+        [customerId],
+      );
+      const account = await client.query<Record<string, unknown>>(
+        `SELECT available_balance::text AS "availableBalance",
+                frozen_balance::text AS "frozenBalance",
+                total_topped_up::text AS "totalToppedUp",
+                total_consumed::text AS "totalConsumed",
+                total_refunded::text AS "totalRefunded", version,
+                created_at AS "createdAt", updated_at AS "updatedAt"
+         FROM control_credit_accounts WHERE customer_id = $1`,
+        [customerId],
+      );
+      const rates = await client.query<Record<string, unknown>>(
+        `SELECT module, unit_size::text AS "unitSize", credits_per_unit::text AS "creditsPerUnit",
+                created_at AS "createdAt", updated_at AS "updatedAt"
+         FROM control_billing_rates WHERE customer_id = $1 ORDER BY module`,
+        [customerId],
+      );
+      const transactions = await client.query<Record<string, unknown>>(
+        `SELECT id, organization_id AS "organizationId", deployment_id AS "deploymentId",
+                module, type, available_delta::text AS "availableDelta",
+                frozen_delta::text AS "frozenDelta", billed_amount::text AS "billedAmount",
+                reference_id AS "referenceId", related_transaction_id AS "relatedTransactionId",
+                description, metadata, occurred_at AS "occurredAt", created_at AS "createdAt"
+         FROM control_credit_transactions WHERE customer_id = $1
+         ORDER BY occurred_at, id`,
+        [customerId],
+      );
+      const telemetry = await client.query<{
+        event_type: string; event_count: string; first_received_at: Date; last_received_at: Date;
+      }>(
+        `SELECT events.event_type, count(*)::text AS event_count,
+                min(events.received_at) AS first_received_at,
+                max(events.received_at) AS last_received_at
+         FROM control_telemetry_events AS events
+         JOIN control_deployments AS deployments ON deployments.id = events.deployment_id
+         WHERE deployments.customer_id = $1 GROUP BY events.event_type ORDER BY events.event_type`,
+        [customerId],
+      );
+      const acceptances = await client.query<{
+        id: string; customer_id: string; policy_version: string; policy_sha256: string;
+        accepted_by: string; accepted_at: Date;
+      }>(
+        `SELECT * FROM control_privacy_acceptances
+         WHERE customer_id = $1 ORDER BY accepted_at, id`,
+        [customerId],
+      );
+      await client.query('COMMIT');
+      const customer = customerResult.rows[0]!;
+      const first = telemetry.rows.reduce<Date | null>((value, row) =>
+        !value || row.first_received_at < value ? row.first_received_at : value, null);
+      const last = telemetry.rows.reduce<Date | null>((value, row) =>
+        !value || row.last_received_at > value ? row.last_received_at : value, null);
+      return {
+        customer: {
+          id: customer.id,
+          name: customer.name,
+          status: customer.status,
+          dataRegion: customer.data_region,
+          erasedAt: customer.erased_at?.toISOString() ?? null,
+          createdAt: customer.created_at.toISOString(),
+          updatedAt: customer.updated_at.toISOString(),
+        },
+        deployments: deployments.rows.map((row) => ({
+          id: row.id,
+          organizationId: row.organization_id,
+          machineFingerprint: row.machine_fingerprint,
+          name: row.name,
+          status: row.status,
+          createdAt: row.created_at.toISOString(),
+          updatedAt: row.updated_at.toISOString(),
+        })),
+        licenses: licenses.rows.map((row) => ({
+          id: row.id,
+          deploymentId: row.deployment_id,
+          plan: row.plan,
+          issuedAtMs: Number(row.issued_at_ms),
+          expiresAtMs: Number(row.expires_at_ms),
+          seatLimit: row.seat_limit,
+          modules: row.modules,
+          offline: row.offline,
+          telemetryAllowed: row.telemetry_allowed,
+          revokedAtMs: row.revoked_at_ms === null ? null : Number(row.revoked_at_ms),
+          createdAt: row.created_at.toISOString(),
+          updatedAt: row.updated_at.toISOString(),
+        })),
+        billing: { account: account.rows[0] ?? null, rates: rates.rows, transactions: transactions.rows },
+        telemetry: {
+          totalEvents: telemetry.rows.reduce((sum, row) => sum + Number(row.event_count), 0),
+          byType: Object.fromEntries(telemetry.rows.map((row) => [row.event_type, Number(row.event_count)])),
+          firstReceivedAt: first?.toISOString() ?? null,
+          lastReceivedAt: last?.toISOString() ?? null,
+        },
+        privacyAcceptances: acceptances.rows.map((row) => ({
+          id: row.id,
+          customerId: row.customer_id,
+          policyVersion: row.policy_version,
+          policySha256: row.policy_sha256,
+          acceptedBy: row.accepted_by,
+          acceptedAt: row.accepted_at,
+        })),
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async createLegalHold(input: {
+    id: string;
+    customerId: string;
+    scope: string[];
+    reason: string;
+    createdBy: string;
+    expiresAt: Date | null;
+    createdAt: Date;
+  }): Promise<LegalHoldRecord> {
+    try {
+      const result = await this.#pool.query<LegalHoldRow>(
+        `INSERT INTO control_legal_holds
+          (id, customer_id, scope, reason, created_by, expires_at, created_at, updated_at)
+         VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $7) RETURNING *`,
+        [input.id, input.customerId, JSON.stringify(input.scope), input.reason, input.createdBy,
+          input.expiresAt, input.createdAt],
+      );
+      return legalHoldFromRow(result.rows[0]!);
+    } catch (error) {
+      if (postgresCode(error) === '23503') throw conflict('customer does not exist');
+      throw error;
+    }
+  }
+
+  async getLegalHold(id: string): Promise<LegalHoldRecord | null> {
+    const result = await this.#pool.query<LegalHoldRow>(
+      'SELECT * FROM control_legal_holds WHERE id = $1',
+      [id],
+    );
+    return result.rowCount ? legalHoldFromRow(result.rows[0]!) : null;
+  }
+
+  async listActiveLegalHolds(customerId: string, at: Date): Promise<LegalHoldRecord[]> {
+    const result = await this.#pool.query<LegalHoldRow>(
+      `SELECT * FROM control_legal_holds
+       WHERE customer_id = $1 AND released_at IS NULL
+         AND (expires_at IS NULL OR expires_at > $2)
+       ORDER BY created_at, id`,
+      [customerId, at],
+    );
+    return result.rows.map(legalHoldFromRow);
+  }
+
+  async releaseLegalHold(input: {
+    id: string;
+    releasedBy: string;
+    releaseReason: string;
+    releasedAt: Date;
+  }): Promise<LegalHoldRecord | null> {
+    const result = await this.#pool.query<LegalHoldRow>(
+      `UPDATE control_legal_holds
+       SET released_at = $2, released_by = $3, release_reason = $4, updated_at = $2
+       WHERE id = $1 AND released_at IS NULL RETURNING *`,
+      [input.id, input.releasedAt, input.releasedBy, input.releaseReason],
+    );
+    return result.rowCount ? legalHoldFromRow(result.rows[0]!) : null;
+  }
+
+  async recordPrivacyAcceptance(input: PrivacyAcceptanceRecord): Promise<PrivacyAcceptanceRecord> {
+    const result = await this.#pool.query<{
+      id: string; customer_id: string; policy_version: string; policy_sha256: string;
+      accepted_by: string; accepted_at: Date;
+    }>(
+      `INSERT INTO control_privacy_acceptances
+        (id, customer_id, policy_version, policy_sha256, accepted_by, accepted_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (customer_id, policy_version, accepted_by) DO UPDATE
+       SET policy_sha256 = EXCLUDED.policy_sha256, accepted_at = EXCLUDED.accepted_at
+       RETURNING *`,
+      [input.id, input.customerId, input.policyVersion, input.policySha256,
+        input.acceptedBy, input.acceptedAt],
+    );
+    const row = result.rows[0]!;
+    return {
+      id: row.id,
+      customerId: row.customer_id,
+      policyVersion: row.policy_version,
+      policySha256: row.policy_sha256,
+      acceptedBy: row.accepted_by,
+      acceptedAt: row.accepted_at,
+    };
+  }
+
+  async executeCustomerErasure(input: {
+    requestId: string;
+    pseudonymSeed: string;
+    billingRetainUntil: Date;
+    auditRetainUntil: Date;
+    completedAt: Date;
+  }): Promise<CustomerErasureResult | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const requestResult = await client.query<DataGovernanceRequestRow>(
+        `SELECT * FROM control_data_governance_requests
+         WHERE id = $1 AND type = 'customer_erasure' FOR UPDATE`,
+        [input.requestId],
+      );
+      const request = requestResult.rows[0];
+      if (!request || request.status !== 'pending'
+        || (request.earliest_execution_at && request.earliest_execution_at > input.completedAt)) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const blocked = await client.query<{ blocked: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM control_legal_holds
+           WHERE customer_id = $1 AND released_at IS NULL
+             AND (expires_at IS NULL OR expires_at > $2)
+         ) OR EXISTS (
+           SELECT 1 FROM control_credit_holds
+           WHERE customer_id = $1 AND status = 'active'
+         ) AS blocked`,
+        [request.customer_id, input.completedAt],
+      );
+      if (blocked.rows[0]!.blocked) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const deploymentCount = await client.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM control_deployments WHERE customer_id = $1',
+        [request.customer_id],
+      );
+      const licenseCount = await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM control_licenses AS licenses
+         JOIN control_deployments AS deployments ON deployments.id = licenses.deployment_id
+         WHERE deployments.customer_id = $1`,
+        [request.customer_id],
+      );
+      const billingCount = await client.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM control_credit_transactions WHERE customer_id = $1',
+        [request.customer_id],
+      );
+      const auditCount = await client.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM control_audit_events WHERE target_id = $1',
+        [request.customer_id],
+      );
+      const telemetry = await client.query(
+        `DELETE FROM control_telemetry_events AS events
+         USING control_deployments AS deployments
+         WHERE deployments.id = events.deployment_id AND deployments.customer_id = $1`,
+        [request.customer_id],
+      );
+      let nonceCount = 0;
+      for (const table of ['control_lease_nonces', 'control_telemetry_nonces', 'control_update_policy_nonces']) {
+        const deleted = await client.query(
+          `DELETE FROM ${table} AS nonces USING control_deployments AS deployments
+           WHERE deployments.id = nonces.deployment_id AND deployments.customer_id = $1`,
+          [request.customer_id],
+        );
+        nonceCount += deleted.rowCount ?? 0;
+      }
+      const assignments = await client.query(
+        `DELETE FROM control_deployment_update_assignments AS assignments
+         USING control_deployments AS deployments
+         WHERE deployments.id = assignments.deployment_id AND deployments.customer_id = $1`,
+        [request.customer_id],
+      );
+      const seats = await client.query(
+        `DELETE FROM control_license_seat_usage AS seats
+         USING control_deployments AS deployments
+         WHERE deployments.id = seats.deployment_id AND deployments.customer_id = $1`,
+        [request.customer_id],
+      );
+      await client.query(
+        `UPDATE control_deployments
+         SET organization_id = 'erased:' || md5($2 || ':org:' || id),
+             machine_fingerprint = 'erased:' || md5($2 || ':machine:' || id),
+             name = 'Erased deployment ' || substr(md5($2 || ':name:' || id), 1, 12),
+             status = 'suspended', updated_at = $3
+         WHERE customer_id = $1`,
+        [request.customer_id, input.pseudonymSeed, input.completedAt],
+      );
+      await client.query(
+        `UPDATE control_licenses AS licenses
+         SET customer_name = 'Erased customer',
+             organization_id = deployments.organization_id,
+             machine_fingerprint = deployments.machine_fingerprint,
+             revoked_at_ms = COALESCE(licenses.revoked_at_ms, $2),
+             token_version = licenses.token_version + 1,
+             updated_at = $3
+         FROM control_deployments AS deployments
+         WHERE deployments.id = licenses.deployment_id AND deployments.customer_id = $1`,
+        [request.customer_id, input.completedAt.getTime(), input.completedAt],
+      );
+      await client.query(
+        `UPDATE control_license_lifecycle_events AS events
+         SET detail = '{"redacted":true}'::jsonb, actor_id = 'erased'
+         FROM control_licenses AS licenses, control_deployments AS deployments
+         WHERE events.license_id = licenses.id AND licenses.deployment_id = deployments.id
+           AND deployments.customer_id = $1`,
+        [request.customer_id],
+      );
+      await client.query(
+        `UPDATE control_credit_holds
+         SET organization_id = 'erased', deployment_id = 'erased', updated_at = $2
+         WHERE customer_id = $1`,
+        [request.customer_id, input.completedAt],
+      );
+      await client.query(
+        `UPDATE control_credit_transactions
+         SET organization_id = NULL, deployment_id = NULL,
+             reference_id = CASE WHEN reference_id IS NULL THEN NULL
+               ELSE 'erased:' || md5($2 || ':reference:' || id) END,
+             description = 'Retained minimum financial ledger',
+             metadata = '{"restricted":true}'::jsonb
+         WHERE customer_id = $1`,
+        [request.customer_id, input.pseudonymSeed],
+      );
+      const acceptanceCount = await client.query(
+        `UPDATE control_privacy_acceptances
+         SET accepted_by = 'erased:' || substr(md5($2 || ':acceptance:' || id), 1, 16)
+         WHERE customer_id = $1 AND accepted_by NOT LIKE 'erased:%'`,
+        [request.customer_id, input.pseudonymSeed],
+      );
+      await client.query(
+        `UPDATE control_legal_holds
+         SET reason = 'Restricted legal hold record',
+             release_reason = CASE WHEN release_reason IS NULL THEN NULL
+               ELSE 'Restricted legal hold release record' END,
+             updated_at = $2
+         WHERE customer_id = $1 AND released_at IS NOT NULL`,
+        [request.customer_id, input.completedAt],
+      );
+      await client.query(
+        `UPDATE control_data_governance_requests AS requests
+         SET reason = 'Restricted governance request', updated_at = $2
+         WHERE customer_id = $1`,
+        [request.customer_id, input.completedAt],
+      );
+      await client.query(
+        `UPDATE control_customers
+         SET name = 'Erased customer ' || substr(md5($2 || ':customer:' || id), 1, 12),
+             status = 'suspended', erased_at = $3, updated_at = $3
+         WHERE id = $1`,
+        [request.customer_id, input.pseudonymSeed, input.completedAt],
+      );
+      const result: CustomerErasureResult = {
+        requestId: request.id,
+        customerId: request.customer_id,
+        completedAt: input.completedAt.toISOString(),
+        dispositions: [
+          { dataClass: 'customer_identity', disposition: 'anonymized', records: 1,
+            reason: 'service relationship ended; stable pseudonymous ID retained for ledger integrity', retainUntil: null },
+          { dataClass: 'deployment_identity', disposition: 'anonymized',
+            records: Number(deploymentCount.rows[0]!.count) + Number(licenseCount.rows[0]!.count),
+            reason: 'organization names and machine fingerprints replaced; licenses revoked', retainUntil: null },
+          { dataClass: 'health_telemetry', disposition: 'deleted', records: telemetry.rowCount ?? 0,
+            reason: 'health telemetry is not required after customer erasure', retainUntil: null },
+          { dataClass: 'ephemeral_security_state', disposition: 'deleted',
+            records: nonceCount + (assignments.rowCount ?? 0) + (seats.rowCount ?? 0),
+            reason: 'nonces, update assignments and live seat state are no longer required', retainUntil: null },
+          { dataClass: 'privacy_acceptance_identity', disposition: 'anonymized',
+            records: acceptanceCount.rowCount ?? 0, reason: 'acceptance proof retained without accepter identity',
+            retainUntil: input.auditRetainUntil.toISOString() },
+          { dataClass: 'billing_ledger', disposition: 'restricted',
+            records: Number(billingCount.rows[0]!.count),
+            reason: 'minimum financial ledger retained for accounting, dispute and fraud controls',
+            retainUntil: input.billingRetainUntil.toISOString() },
+          { dataClass: 'security_audit', disposition: 'restricted',
+            records: Number(auditCount.rows[0]!.count),
+            reason: 'tamper-evident audit records cannot be silently rewritten; access is restricted',
+            retainUntil: input.auditRetainUntil.toISOString() },
+        ],
+      };
+      await client.query(
+        `UPDATE control_data_governance_requests
+         SET status = 'completed', result = $2::jsonb, completed_at = $3, updated_at = $3
+         WHERE id = $1`,
+        [request.id, JSON.stringify(result), input.completedAt],
+      );
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async runDataRetention(input: {
+    telemetryBefore: Date;
+    exportPayloadBefore: Date;
+    now: Date;
+  }): Promise<RetentionRunResult> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const telemetry = await client.query(
+        `DELETE FROM control_telemetry_events AS events
+         USING control_deployments AS deployments
+         WHERE events.deployment_id = deployments.id AND events.received_at < $1
+           AND NOT EXISTS (
+             SELECT 1 FROM control_legal_holds AS holds
+             WHERE holds.customer_id = deployments.customer_id
+               AND holds.released_at IS NULL
+               AND (holds.expires_at IS NULL OR holds.expires_at > $2)
+               AND (holds.scope ? 'all' OR holds.scope ? 'health_telemetry')
+           )`,
+        [input.telemetryBefore, input.now],
+      );
+      let nonces = 0;
+      for (const table of ['control_lease_nonces', 'control_telemetry_nonces', 'control_update_policy_nonces']) {
+        const result = await client.query(`DELETE FROM ${table} WHERE expires_at_ms < $1`, [input.now.getTime()]);
+        nonces += result.rowCount ?? 0;
+      }
+      const restricted = await client.query(
+        `UPDATE control_data_governance_requests
+         SET result = jsonb_build_object(
+               'restricted', true,
+               'reason', 'export delivery payload retention expired',
+               'restrictedAt', $2::text
+             ),
+             reason = 'Restricted export request',
+             updated_at = $2
+         WHERE requests.type IN ('customer_export', 'forensic_export')
+           AND requests.status = 'completed' AND requests.completed_at < $1
+           AND requests.result IS NOT NULL AND NOT (requests.result ? 'restricted')
+           AND NOT EXISTS (
+             SELECT 1 FROM control_legal_holds AS holds
+             WHERE holds.customer_id = requests.customer_id
+               AND holds.released_at IS NULL
+               AND (holds.expires_at IS NULL OR holds.expires_at > $2)
+               AND (holds.scope ? 'all' OR holds.scope ? 'data_governance')
+           )`,
+        [input.exportPayloadBefore, input.now],
+      );
+      await client.query('COMMIT');
+      return {
+        telemetryEventsDeleted: telemetry.rowCount ?? 0,
+        expiredNoncesDeleted: nonces,
+        expiredExportPayloadsRestricted: restricted.rowCount ?? 0,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

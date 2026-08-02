@@ -18,6 +18,7 @@ import { registerOperatorConsoleRoutes } from './routes/operator-console.js';
 import { registerAuditRoutes } from './routes/audit.js';
 import { registerAuditAnchorRoutes } from './routes/audit-anchor.js';
 import { registerAuditWitnessRoutes } from './routes/audit-witness.js';
+import { registerDataGovernanceRoutes } from './routes/data-governance.js';
 import { ControlMetrics } from './observability/metrics.js';
 import { traceLogContext } from './observability/tracing.js';
 
@@ -193,6 +194,21 @@ export async function buildControlApp(
       });
     }
     await registerOperatorConsoleRoutes(app);
+    if (commercialControl.dataGovernance) {
+      capabilities.push(
+        'data_governance',
+        'customer_data_export',
+        'customer_erasure',
+        'data_residency_enforcement',
+        'privacy_notice',
+        'forensic_evidence_manifest',
+      );
+      await registerDataGovernanceRoutes(app, {
+        service: commercialControl.dataGovernance,
+        identity: commercialControl.identity,
+        telemetryRetentionDays: config.telemetryRetentionDays,
+      });
+    }
     if (commercialControl.billing) {
       capabilities.push('credit_billing', 'billing_statement_export');
       await registerBillingRoutes(app, {
@@ -210,8 +226,12 @@ export async function buildControlApp(
       commercialControl.auditWitness?.start((error) => {
         app.log.error({ err: error }, 'audit WORM evidence poll failed');
       });
+      commercialControl.dataGovernance?.start((error) => {
+        app.log.error({ err: error }, 'data retention poll failed');
+      });
     });
     app.addHook('onClose', async () => {
+      commercialControl.dataGovernance?.close();
       try {
         await Promise.all([
           commercialControl.alerts.close(),

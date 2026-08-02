@@ -799,6 +799,105 @@ const MIGRATIONS: Migration[] = [
        ON control_audit_witness_evidence(status, updated_at DESC)`,
     ],
   },
+  {
+    id: '022_data_governance',
+    statements: [
+      `ALTER TABLE control_customers
+       ADD COLUMN IF NOT EXISTS data_region TEXT NOT NULL DEFAULT 'CN-BJ'`,
+      `ALTER TABLE control_customers
+       ADD COLUMN IF NOT EXISTS erased_at TIMESTAMPTZ`,
+      `CREATE TABLE IF NOT EXISTS control_data_governance_state (
+        singleton SMALLINT PRIMARY KEY DEFAULT 1 CHECK (singleton = 1),
+        data_region TEXT NOT NULL,
+        allowed_regions JSONB NOT NULL,
+        cross_border_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        cross_border_assessment_id TEXT,
+        policy_version TEXT NOT NULL,
+        policy_sha256 TEXT NOT NULL CHECK (policy_sha256 ~ '^[a-f0-9]{64}$'),
+        policy_effective_at TIMESTAMPTZ NOT NULL,
+        controller_name TEXT NOT NULL,
+        privacy_contact TEXT NOT NULL,
+        initialized_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        CHECK (jsonb_typeof(allowed_regions) = 'array'),
+        CHECK (NOT cross_border_enabled OR cross_border_assessment_id IS NOT NULL)
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_data_governance_requests (
+        id TEXT PRIMARY KEY,
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        type TEXT NOT NULL CHECK (type IN (
+          'customer_export', 'customer_erasure', 'forensic_export'
+        )),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'completed', 'blocked', 'failed')),
+        reason TEXT NOT NULL,
+        requested_by TEXT NOT NULL,
+        earliest_execution_at TIMESTAMPTZ,
+        manifest_sha256 TEXT CHECK (
+          manifest_sha256 IS NULL OR manifest_sha256 ~ '^[a-f0-9]{64}$'
+        ),
+        result JSONB,
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        CHECK ((status = 'pending') = (completed_at IS NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_governance_requests_customer
+       ON control_data_governance_requests(customer_id, created_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_governance_requests_pending
+       ON control_data_governance_requests(earliest_execution_at, created_at)
+       WHERE status = 'pending'`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_customer_pending_erasure
+       ON control_data_governance_requests(customer_id)
+       WHERE type = 'customer_erasure' AND status = 'pending'`,
+      `CREATE TABLE IF NOT EXISTS control_legal_holds (
+        id TEXT PRIMARY KEY,
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        scope JSONB NOT NULL,
+        reason TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        expires_at TIMESTAMPTZ,
+        released_at TIMESTAMPTZ,
+        released_by TEXT,
+        release_reason TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        CHECK (jsonb_typeof(scope) = 'array'),
+        CHECK ((released_at IS NULL) = (released_by IS NULL)),
+        CHECK ((released_at IS NULL) = (release_reason IS NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_legal_holds_active
+       ON control_legal_holds(customer_id, expires_at)
+       WHERE released_at IS NULL`,
+      `CREATE TABLE IF NOT EXISTS control_privacy_acceptances (
+        id TEXT PRIMARY KEY,
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        policy_version TEXT NOT NULL,
+        policy_sha256 TEXT NOT NULL CHECK (policy_sha256 ~ '^[a-f0-9]{64}$'),
+        accepted_by TEXT NOT NULL,
+        accepted_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (customer_id, policy_version, accepted_by)
+      )`,
+      `INSERT INTO control_admin_permissions (id) VALUES
+        ('data_governance.read'), ('data_governance.manage'), ('data_export.create'),
+        ('customer_erasure.manage'), ('legal_hold.manage'), ('forensic_export.create')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'super_admin', id FROM control_admin_permissions
+       WHERE id IN ('data_governance.read', 'data_governance.manage', 'data_export.create',
+                    'customer_erasure.manage', 'legal_hold.manage', 'forensic_export.create')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'security_admin', id FROM control_admin_permissions
+       WHERE id IN ('data_governance.read', 'data_governance.manage',
+                    'customer_erasure.manage', 'legal_hold.manage', 'forensic_export.create')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'auditor', id FROM control_admin_permissions
+       WHERE id = 'data_governance.read'
+       ON CONFLICT DO NOTHING`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

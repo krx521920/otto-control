@@ -8,6 +8,8 @@ import {
   loadAuditWitnessWormStorageConfig,
   type AuditWitnessWormStorageConfig,
 } from './modules/audit-witness/worm-storage-config.js';
+import { loadDataGovernanceConfig } from './modules/data-governance/config.js';
+import type { DataGovernanceConfig } from './contracts/data-governance.js';
 
 export type ControlEnvironment = 'development' | 'test' | 'production';
 export type ControlLogLevel = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
@@ -55,6 +57,7 @@ export interface ControlConfig {
   artifactStorage: ArtifactStorageConfig | null;
   artifactStorageRequired: boolean;
   artifactAttestationKeysFile: string | null;
+  dataGovernance?: DataGovernanceConfig;
 }
 
 const LOG_LEVELS = new Set<ControlLogLevel>([
@@ -365,7 +368,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.24.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.25.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -479,5 +482,6 @@ export function loadControlConfig(
     artifactStorage,
     artifactStorageRequired,
     artifactAttestationKeysFile,
+    dataGovernance: loadDataGovernanceConfig(env, environment),
   });
 }

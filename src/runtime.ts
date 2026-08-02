@@ -16,6 +16,8 @@ import { AuditAnchorService } from './modules/audit-anchor/service.js';
 import { AuditWitnessService } from './modules/audit-witness/service.js';
 import { loadAuditWitnessSources } from './modules/audit-witness/source-config.js';
 import { S3AuditWitnessWormObjectStore } from './modules/audit-witness/s3-worm-object-store.js';
+import { DataGovernanceService } from './modules/data-governance/service.js';
+import { loadDataGovernanceConfig } from './modules/data-governance/config.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 import type { DatabaseObservabilitySource } from './observability/contracts.js';
 
@@ -31,6 +33,7 @@ export interface CommercialControlRuntime {
   audit?: AuditService;
   auditAnchors?: AuditAnchorService;
   auditWitness?: AuditWitnessService;
+  dataGovernance?: DataGovernanceService;
   observability?: DatabaseObservabilitySource;
 }
 
@@ -122,6 +125,14 @@ export async function createCommercialControlRuntime(
       signer,
       issuer: config.publicBaseUrl!,
     });
+    const dataGovernance = new DataGovernanceService({
+      store,
+      signer,
+      audit,
+      config: config.dataGovernance ?? loadDataGovernanceConfig({}, config.environment),
+      telemetryRetentionDays: config.telemetryRetentionDays,
+    });
+    await dataGovernance.initialize();
     const auditWitness = new AuditWitnessService({
       store,
       sources: loadAuditWitnessSources(config.auditWitnessSourcesFile),
@@ -151,6 +162,7 @@ export async function createCommercialControlRuntime(
         maxAttempts: config.auditAnchorMaxAttempts,
       }),
       auditWitness,
+      dataGovernance,
       observability: store,
       service: new CommercialControlService({
         store,

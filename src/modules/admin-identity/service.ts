@@ -70,6 +70,10 @@ const APPROVAL_REQUEST_FIELDS: Readonly<Record<string, readonly string[]>> = {
   'billing.rate.set': ['module', 'unitSize', 'creditsPerUnit'],
   'billing.topup': ['amount', 'idempotencyKey', 'referenceId', 'description'],
   'billing.refund': ['amount', 'idempotencyKey', 'transactionId', 'referenceId', 'description'],
+  'customer_erasure.execute': [],
+  'legal_hold.create': ['customerId', 'scope', 'reason', 'expiresAt'],
+  'legal_hold.release': ['reason'],
+  'forensic_export.create': ['customerId', 'reason'],
 };
 
 function approvalRequestSnapshot(operation: string, value: unknown): Record<string, unknown> {

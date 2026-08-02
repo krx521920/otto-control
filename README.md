@@ -560,7 +560,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.24.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.25.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -579,6 +579,19 @@ a misleading success report.
 | `CONTROL_LEASE_DURATION_MS` | `600000` | Online lease lifetime; Otto refreshes every two minutes |
 | `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
 | `CONTROL_UPDATE_POLICY_DURATION_MS` | `300000` | Signed update decision lifetime, from one minute to one hour |
+| `CONTROL_DATA_REGION` | `CN-BJ` | Persistently bound primary data region; explicitly required in production |
+| `CONTROL_ALLOWED_DATA_REGIONS` | primary region | Comma-separated approved storage/processing regions |
+| `CONTROL_CROSS_BORDER_ENABLED` | `false` | Explicit cross-border processing gate; never enabled by a UI-only flag |
+| `CONTROL_CROSS_BORDER_ASSESSMENT_ID` | empty | Required assessment/contract/certification reference when cross-border is enabled |
+| `CONTROL_PRIVACY_POLICY_VERSION` | `2026-08-01` | Version recorded in notices, acceptances, exports, and audits |
+| `CONTROL_PRIVACY_POLICY_EFFECTIVE_AT` | `2026-08-01T00:00:00.000Z` | Policy effective timestamp |
+| `CONTROL_PRIVACY_CONTROLLER` | development placeholder | Legal operator/controller name; explicitly required in production |
+| `CONTROL_PRIVACY_CONTACT` | development placeholder | Privacy request contact; explicitly required in production |
+| `CONTROL_CUSTOMER_ERASURE_GRACE_DAYS` | `14` | Cooling-off period before approved customer erasure can execute |
+| `CONTROL_BILLING_RETENTION_DAYS` | `1095` | Product baseline for restricted minimum billing evidence; legal review required |
+| `CONTROL_GOVERNANCE_AUDIT_RETENTION_DAYS` | `2555` | Product baseline for restricted security evidence; legal review required |
+| `CONTROL_DATA_EXPORT_RECORD_RETENTION_DAYS` | `30` | Days before delivered export result detail is restricted to its minimal hash record |
+| `CONTROL_DATA_RETENTION_POLL_INTERVAL_HOURS` | `24` | Automatic retention enforcement interval, from 1 to 168 hours |
 | `CONTROL_BACKUP_RETENTION_DAYS` | `30` | Number of days encrypted local backups are retained |
 | `CONTROL_BACKUP_REPORT_DIR` | empty | Read-only directory containing backup inventory reports |
 | `CONTROL_BACKUP_STATUS_MAX_AGE_HOURS` | `48` | Maximum acceptable age of the latest completed backup report |
@@ -1004,6 +1017,8 @@ both Otto and Otto Green clients from the same accounts and collaboration data.
 GET  /health/live
 GET  /health/ready
 GET  /v1
+GET  /v1/privacy/notice
+GET  /v1/privacy/data-map
 POST /v1/admin-auth/bootstrap
 POST /v1/admin-auth/enroll/confirm
 POST /v1/admin-auth/login
@@ -1018,6 +1033,16 @@ GET  /v1/admin/roles
 POST /v1/admin/approvals
 GET  /v1/admin/approvals
 POST /v1/admin/approvals/:approvalId/decide
+GET  /v1/admin/data-governance/status
+GET  /v1/admin/data-governance/requests/:id
+POST /v1/admin/data-governance/privacy-acceptances
+POST /v1/admin/customers/:customerId/data-exports
+POST /v1/admin/customers/:customerId/erasure-requests
+POST /v1/admin/data-governance/erasure-requests/:id/execute
+POST /v1/admin/data-governance/legal-holds
+POST /v1/admin/data-governance/legal-holds/:id/release
+POST /v1/admin/data-governance/forensic-exports
+POST /v1/admin/data-governance/retention/run
 POST /v1/admin/customers
 POST /v1/admin/deployments
 POST /v1/admin/licenses
@@ -1084,9 +1109,13 @@ Traefik
        -> audit (implemented query, export, and signed integrity verification)
        -> audit_anchor (implemented durable external evidence delivery)
        -> audit_witness (implemented independent verification and receipt retention)
+       -> data_governance (implemented residency, privacy notice, export, erasure, legal hold, and forensics)
 ```
 
 The Otto private server and desktop adapter now consume this signed policy and
 map it onto the existing `latest.json` and incremental manifest engines. The
-next phases are vendor-specific signer-broker deployment recipes, append-only
-witness-storage adapters, and eventually the separate federation gateway.
+Data-governance operating rules are documented in
+`docs/data-governance-policy.zh-CN.md`, the customer-facing notice template in
+`docs/privacy-notice.template.zh-CN.md`, and evidence handling in
+`docs/forensic-evidence-procedure.zh-CN.md`. The next phases include
+vendor-specific signer-broker deployment recipes and the separate federation gateway.

@@ -163,6 +163,10 @@ function approvalExecutionRequest(approval) {
     'billing.rate.set': { path: '/v1/admin/billing/customers/' + id + '/rates/' + encodeURIComponent(request.module), method: 'PUT', body: request },
     'billing.topup': { path: '/v1/admin/billing/customers/' + id + '/topups', method: 'POST', body: request },
     'billing.refund': { path: '/v1/admin/billing/customers/' + id + '/refunds', method: 'POST', body: request },
+    'customer_erasure.execute': { path: '/v1/admin/data-governance/erasure-requests/' + id + '/execute', method: 'POST', body: request },
+    'legal_hold.create': { path: '/v1/admin/data-governance/legal-holds', method: 'POST', body: request },
+    'legal_hold.release': { path: '/v1/admin/data-governance/legal-holds/' + id + '/release', method: 'POST', body: request },
+    'forensic_export.create': { path: '/v1/admin/data-governance/forensic-exports', method: 'POST', body: request },
   };
   return definitions[approval.operation];
 }

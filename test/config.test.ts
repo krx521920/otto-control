@@ -115,7 +115,27 @@ describe('control configuration', () => {
       NODE_ENV: 'production',
       CONTROL_PUBLIC_BASE_URL: 'https://control.example.test/',
       CONTROL_METRICS_TOKEN: 'm'.repeat(48),
+      CONTROL_DATA_REGION: 'CN-BJ',
+      CONTROL_PRIVACY_CONTROLLER: 'Otto Test Operator',
+      CONTROL_PRIVACY_CONTACT: 'privacy@otto.example.test',
     }).publicBaseUrl).toBe('https://control.example.test');
+  });
+
+  it('binds data residency and rejects unassessed cross-border processing', () => {
+    const config = loadControlConfig({
+      CONTROL_DATA_REGION: 'CN-SH',
+      CONTROL_ALLOWED_DATA_REGIONS: 'CN-SH,CN-BJ',
+    });
+    expect(config.dataGovernance).toMatchObject({
+      dataRegion: 'CN-SH',
+      allowedRegions: ['CN-SH', 'CN-BJ'],
+      crossBorderEnabled: false,
+    });
+    expect(() => loadControlConfig({
+      CONTROL_DATA_REGION: 'CN-SH',
+      CONTROL_ALLOWED_DATA_REGIONS: 'CN-SH,SG-SG',
+      CONTROL_CROSS_BORDER_ENABLED: 'true',
+    })).toThrow('cross-border processing requires');
   });
 
   it('loads managed S3 artifact storage only from file-backed credentials', () => {

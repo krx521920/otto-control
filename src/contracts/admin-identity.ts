@@ -32,6 +32,12 @@ export const ADMIN_PERMISSIONS = [
   'audit.export',
   'audit.verify',
   'audit.anchor.manage',
+  'data_governance.read',
+  'data_governance.manage',
+  'data_export.create',
+  'customer_erasure.manage',
+  'legal_hold.manage',
+  'forensic_export.create',
 ] as const;
 
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];
@@ -50,6 +56,10 @@ export const ADMIN_APPROVAL_OPERATIONS = [
   'billing.rate.set',
   'billing.topup',
   'billing.refund',
+  'customer_erasure.execute',
+  'legal_hold.create',
+  'legal_hold.release',
+  'forensic_export.create',
 ] as const;
 export type AdminApprovalOperation = (typeof ADMIN_APPROVAL_OPERATIONS)[number];
 
