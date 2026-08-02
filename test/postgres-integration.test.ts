@@ -1,9 +1,9 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 
 import pg from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import { canonicalJson, LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
 import { ManagedSigningKeyring } from '../src/crypto/signing-keyring.js';
 import { AuditService } from '../src/modules/audit/service.js';
 import { BillingService } from '../src/modules/billing/service.js';
@@ -111,7 +111,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       const migrations = await pool.query<{ id: string }>(
         'SELECT id FROM control_schema_migrations ORDER BY id',
       );
-      expect(migrations.rows.at(-1)?.id).toBe('020_managed_release_artifacts');
+      expect(migrations.rows.at(-1)?.id).toBe('021_audit_witness_worm_evidence');
       expect(new Set(migrations.rows.map((row) => row.id)).size).toBe(migrations.rows.length);
       const billingPolicyColumn = await pool.query<{
         column_name: string;
@@ -134,22 +134,127 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
         billing: string;
         witness: string;
         artifact_evidence: string;
+        witness_evidence: string;
       }>(
         `SELECT
           to_regclass('public.control_licenses')::text AS licenses,
           to_regclass('public.control_credit_transactions')::text AS billing,
           to_regclass('public.control_audit_witness_receipts')::text AS witness,
-          to_regclass('public.control_release_artifact_evidence')::text AS artifact_evidence`,
+          to_regclass('public.control_release_artifact_evidence')::text AS artifact_evidence,
+          to_regclass('public.control_audit_witness_evidence')::text AS witness_evidence`,
       );
       expect(tables.rows[0]).toEqual({
         licenses: 'control_licenses',
         billing: 'control_credit_transactions',
         witness: 'control_audit_witness_receipts',
         artifact_evidence: 'control_release_artifact_evidence',
+        witness_evidence: 'control_audit_witness_evidence',
       });
     } finally {
       await pool.end();
     }
+  });
+
+  it('persists witness receipt and WORM outbox atomically and leases one worker', async () => {
+    await resetDatabase(DATABASE_URL!);
+    const store = await openStore();
+    const signing = signer();
+    await store.appendAuditEvent({
+      actorId: 'admin:test', action: 'license.issue', targetType: 'license',
+      targetId: 'lic_postgres_worm', detail: {},
+    });
+    const audit = new AuditService({
+      store,
+      signer: signing,
+      issuer: 'https://source.integration.test',
+      now: () => NOW,
+    });
+    const signed = await audit.verify();
+    const fingerprint = createHash('sha256').update(canonicalJson({
+      issuer: signed.receipt.issuer,
+      lastSequence: signed.receipt.lastSequence,
+      headHash: signed.receipt.headHash,
+    })).digest('hex');
+    const receivedAt = new Date(NOW);
+    const receipt = {
+      id: `witness_${'1'.padStart(32, '0')}`,
+      sourceId: 'primary-control',
+      anchorId: `anchor_${'1'.padStart(32, '0')}`,
+      fingerprint,
+      issuer: signed.receipt.issuer,
+      chainSequence: signed.receipt.lastSequence,
+      headHash: signed.receipt.headHash,
+      signingKeyId: signed.signingKeyId,
+      payload: {
+        version: 1 as const,
+        anchorId: `anchor_${'1'.padStart(32, '0')}`,
+        fingerprint,
+        evidence: signed,
+      },
+      receivedAt,
+    };
+    const evidence = {
+      receiptId: receipt.id,
+      sourceId: receipt.sourceId,
+      chainSequence: receipt.chainSequence,
+      objectKey: 'audit/primary-control/00000000000000000001.json',
+      contentSha256: 'd'.repeat(64),
+      sizeBytes: 512,
+      status: 'pending' as const,
+      attempts: 0,
+      nextAttemptAt: receivedAt,
+      leaseUntil: null,
+      lastError: null,
+      objectVersionId: null,
+      serverSideEncryption: null,
+      objectLockMode: null,
+      objectLockRetainUntil: null,
+      storedAt: null,
+      verifiedAt: null,
+      createdAt: receivedAt,
+      updatedAt: receivedAt,
+    };
+    await store.ingestAuditWitnessReceipt({
+      record: receipt,
+      evidence,
+      audit: {
+        actorId: 'audit-source:primary-control', action: 'audit.witness.received',
+        targetType: 'audit_witness_receipt', targetId: receipt.id, detail: {},
+      },
+    });
+    const leaseUntil = new Date(NOW + 120_000);
+    const [first, second] = await Promise.all([
+      store.claimAuditWitnessEvidence({ now: receivedAt, leaseUntil }),
+      store.claimAuditWitnessEvidence({ now: receivedAt, leaseUntil }),
+    ]);
+    expect([first, second].filter(Boolean)).toHaveLength(1);
+    const claimed = first ?? second!;
+    await expect(store.finishAuditWitnessEvidence({
+      receiptId: receipt.id,
+      expectedLeaseUntil: claimed.leaseUntil!,
+      status: 'stored',
+      nextAttemptAt: receivedAt,
+      lastError: null,
+      objectVersionId: 'version-1',
+      serverSideEncryption: 'AES256',
+      objectLockMode: 'COMPLIANCE',
+      objectLockRetainUntil: new Date('2027-08-02T00:00:00.000Z'),
+      storedAt: receivedAt,
+      verifiedAt: receivedAt,
+      updatedAt: receivedAt,
+      audit: {
+        actorId: 'system:audit-worm-worker', action: 'audit.witness.worm_stored',
+        targetType: 'audit_witness_evidence', targetId: receipt.id, detail: {},
+      },
+    })).resolves.toMatchObject({ status: 'stored', objectVersionId: 'version-1' });
+    await closeStore(store);
+    const reopened = await openStore();
+    await expect(reopened.getAuditWitnessReceipt(receipt.id)).resolves.toMatchObject({
+      fingerprint,
+    });
+    await expect(reopened.summarizeAuditWitnessEvidence()).resolves.toMatchObject({
+      counts: { stored: 1, failed: 0 },
+    });
   });
 
   it('persists artifact metadata and storage evidence atomically across reconnects', async () => {

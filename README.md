@@ -90,7 +90,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Durable external audit-anchor outbox with stable chain-head deduplication,
   leased workers, exponential retry, terminal-failure recovery, and destination status
 - Independently deployable audit witness with pinned rotating Ed25519 keys, isolated
-  source tokens, idempotent receipt storage, rollback detection, and fork rejection
+  source tokens, idempotent receipt storage, rollback detection, fork rejection,
+  and independently encrypted S3/MinIO Object Lock evidence
 - Same-origin operator console with MFA login, RBAC-filtered commercial inventory,
   customer/deployment/License onboarding, renewal, seat management, immutable
   lifecycle history, dual-control review and execution, backup readiness, alert
@@ -477,13 +478,49 @@ Point the sender's `CONTROL_AUDIT_ANCHOR_URL` at
 The receiver verifies source authentication, issuer, receipt structure, stable
 fingerprint, signing-key allowlist, Ed25519 signature, clock skew, and sequence
 consistency before writing. Replays are idempotent; a lower sequence, reused
-anchor ID, or different head at the same sequence is rejected. Deploy the witness
-on a separate host, database, administrator boundary, and preferably append-only
-storage. Pointing a control plane at itself validates the protocol but does not
-protect against that host's superuser. A later higher-sequence receipt proves a
-new signed state but, without exporting sensitive event preimages, cannot by
-itself mathematically prove every intermediate event extends an earlier head;
-retain and periodically compare all witness receipts.
+anchor ID, or different head at the same sequence is rejected.
+
+For production evidence, configure the dedicated `CONTROL_AUDIT_WORM_*` storage
+identity and set `CONTROL_AUDIT_WORM_REQUIRED=true`. The accepted receipt and a
+pending evidence row are created in one PostgreSQL transaction. A leased worker
+then writes canonical JSON to an independently encrypted, versioned S3/MinIO
+bucket using `If-None-Match: *` and Object Lock. Object keys are fixed by source
+and chain sequence, so a fork cannot occupy the same logical slot with different
+bytes. Completion requires a real object version, SHA-256 checksum, expected
+encryption, matching lock mode, sufficient retention, and a byte-for-byte GET
+verification. Storage outages retry without rejecting new signed receipts;
+terminal failures remain visible and auditable until an administrator retries.
+
+Use a separate host, cloud account or MinIO tenant, bucket, credentials, and
+administrator boundary from both Control PostgreSQL and release artifacts. The
+least-privilege runtime identity needs Put, Get, Head, List, GetBucketVersioning,
+and GetObjectLockConfiguration inside its
+configured prefix and must not have delete, retention-bypass, bucket-policy, or
+Object-Lock administration permission. Production required mode accepts only
+`COMPLIANCE`; `GOVERNANCE` is limited to non-required development drills.
+
+The status, poll, retry, byte-verification, and recovery endpoints live under
+`/v1/admin/audit-witness/worm/*` and use existing audit RBAC. If PostgreSQL's
+witness tables are lost, recovery lists immutable objects, verifies their pinned
+source signatures and storage controls, and rebuilds the query index. Exercise
+that path and sample stored bytes with an MFA administrator session:
+
+```bash
+npm run drill:audit:worm -- \
+  --control-url https://witness.example.com \
+  --token-file ./security-admin-session-token \
+  --recover=true \
+  --sample-size 10 \
+  --output ./audit-worm-drill.json \
+  --confirm=VERIFY_OTTO_AUDIT_WORM
+```
+
+Pointing a control plane at itself validates the protocol but does not protect
+against that host's superuser. S3 Object Lock also cannot protect against loss of
+the entire provider account, so independently export drill reports and monitor
+the storage account. A later higher-sequence receipt proves a new signed state
+but, without sensitive event preimages, cannot by itself prove every intermediate
+event extends an earlier head; retain and periodically compare all receipts.
 
 Restore requires the exact confirmation phrase:
 
@@ -523,7 +560,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.23.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.24.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -559,6 +596,15 @@ a misleading success report.
 | `CONTROL_AUDIT_ANCHOR_TIMEOUT_MS` | `10000` | Per-delivery timeout, from 500 to 30000 milliseconds |
 | `CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS` | `8` | Maximum delivery attempts before a terminal failure |
 | `CONTROL_AUDIT_WITNESS_SOURCES_FILE` | empty | Version 1 trusted-source manifest for an independent witness receiver |
+| `CONTROL_AUDIT_WORM_REQUIRED` | `false` | Fail startup when immutable witness storage is not fully configured |
+| `CONTROL_AUDIT_WORM_S3_ENDPOINT` / `CONTROL_AUDIT_WORM_S3_BUCKET` | empty | Dedicated S3/MinIO Object-Lock-capable evidence namespace |
+| `CONTROL_AUDIT_WORM_S3_REGION` / `CONTROL_AUDIT_WORM_S3_PREFIX` | `us-east-1` / `otto-audit-witness` | SigV4 region and isolated object prefix |
+| `CONTROL_AUDIT_WORM_S3_ACCESS_KEY_ID_FILE` / `CONTROL_AUDIT_WORM_S3_SECRET_ACCESS_KEY_FILE` | empty | Dedicated least-privilege file-backed credentials |
+| `CONTROL_AUDIT_WORM_S3_ENCRYPTION` | `AES256` | `AES256` or `aws:kms`; KMS requires its separate key ID |
+| `CONTROL_AUDIT_WORM_S3_LOCK_MODE` | `COMPLIANCE` | Immutable retention mode; required production mode rejects `GOVERNANCE` |
+| `CONTROL_AUDIT_WORM_RETENTION_DAYS` | `2555` | Retention assigned from receipt acceptance time, from 30 to 3650 days |
+| `CONTROL_AUDIT_WORM_POLL_INTERVAL_MS` | `30000` | Leased worker poll interval |
+| `CONTROL_AUDIT_WORM_MAX_ATTEMPTS` | `20` | Attempts before evidence enters explicit terminal-failure state |
 | `CONTROL_BACKUP_OFFSITE_REQUIRED` | `false` | Fail the scheduled backup when remote replication cannot be verified |
 | `CONTROL_BACKUP_S3_ENDPOINT` | empty | HTTPS origin for AWS S3, MinIO, or another S3-compatible service |
 | `CONTROL_BACKUP_S3_BUCKET` | empty | Bucket receiving encrypted backup objects |

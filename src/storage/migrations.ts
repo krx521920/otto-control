@@ -764,6 +764,41 @@ const MIGRATIONS: Migration[] = [
        ON control_release_artifact_evidence(verified_at)`,
     ],
   },
+  {
+    id: '021_audit_witness_worm_evidence',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_audit_witness_evidence (
+        receipt_id TEXT PRIMARY KEY REFERENCES control_audit_witness_receipts(id) ON DELETE CASCADE,
+        source_id TEXT NOT NULL CHECK (source_id ~ '^[a-z][a-z0-9_-]{1,63}$'),
+        chain_sequence BIGINT NOT NULL CHECK (chain_sequence >= 0),
+        object_key TEXT NOT NULL UNIQUE CHECK (length(object_key) BETWEEN 1 AND 1024),
+        content_sha256 TEXT NOT NULL CHECK (content_sha256 ~ '^[a-f0-9]{64}$'),
+        size_bytes BIGINT NOT NULL CHECK (size_bytes > 0),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'storing', 'retrying', 'stored', 'failed')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 100),
+        next_attempt_at TIMESTAMPTZ NOT NULL,
+        lease_until TIMESTAMPTZ,
+        last_error TEXT,
+        object_version_id TEXT,
+        server_side_encryption TEXT,
+        object_lock_mode TEXT,
+        object_lock_retain_until TIMESTAMPTZ,
+        stored_at TIMESTAMPTZ,
+        verified_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (source_id, chain_sequence),
+        CHECK ((status = 'storing') = (lease_until IS NOT NULL)),
+        CHECK ((status = 'stored') = (stored_at IS NOT NULL AND verified_at IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_audit_witness_evidence_due
+       ON control_audit_witness_evidence(next_attempt_at, created_at)
+       WHERE status IN ('pending', 'retrying', 'storing')`,
+      `CREATE INDEX IF NOT EXISTS idx_control_audit_witness_evidence_status
+       ON control_audit_witness_evidence(status, updated_at DESC)`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

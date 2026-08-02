@@ -29,6 +29,8 @@ describe('control configuration', () => {
       auditAnchorTimeoutMs: 10_000,
       auditAnchorMaxAttempts: 8,
       auditWitnessSourcesFile: null,
+      auditWitnessWormStorage: null,
+      auditWitnessWormRequired: false,
       metricsToken: null,
       slowRequestThresholdMs: 1_000,
       capacitySampleIntervalMs: 60_000,
@@ -164,6 +166,35 @@ describe('control configuration', () => {
       CONTROL_ARTIFACT_S3_ENDPOINT: 'http://storage.example.test',
       CONTROL_ARTIFACT_S3_BUCKET: 'otto-releases',
     })).toThrow('CONTROL_ARTIFACT_S3_ENDPOINT must be a credential-free HTTPS origin');
+  });
+
+  it('loads isolated audit WORM storage and fails closed when required settings are missing', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'otto-audit-worm-config-'));
+    try {
+      const accessKeyFile = join(directory, 'access-key');
+      const secretKeyFile = join(directory, 'secret-key');
+      writeFileSync(accessKeyFile, 'audit-only-access');
+      writeFileSync(secretKeyFile, 'audit-only-secret');
+      const config = loadControlConfig({
+        CONTROL_AUDIT_WORM_REQUIRED: 'true',
+        CONTROL_AUDIT_WORM_S3_ENDPOINT: 'http://127.0.0.1:9000',
+        CONTROL_AUDIT_WORM_S3_BUCKET: 'otto-audit-evidence',
+        CONTROL_AUDIT_WORM_S3_ACCESS_KEY_ID_FILE: accessKeyFile,
+        CONTROL_AUDIT_WORM_S3_SECRET_ACCESS_KEY_FILE: secretKeyFile,
+      });
+      expect(config.auditWitnessWormRequired).toBe(true);
+      expect(config.auditWitnessWormStorage).toMatchObject({
+        bucket: 'otto-audit-evidence',
+        objectLockMode: 'COMPLIANCE',
+        retentionDays: 2_555,
+        accessKeyId: 'audit-only-access',
+      });
+      expect(() => loadControlConfig({ CONTROL_AUDIT_WORM_REQUIRED: 'true' })).toThrow(
+        'CONTROL_AUDIT_WORM_S3_ENDPOINT is missing',
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('fails closed without a metrics credential in production', () => {

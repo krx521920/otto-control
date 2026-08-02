@@ -83,7 +83,11 @@ import type {
   AuditAnchorRecord,
   AuditAnchorStatus,
 } from '../contracts/audit-anchor.js';
-import type { AuditWitnessReceiptRecord } from '../contracts/audit-witness.js';
+import type {
+  AuditWitnessEvidenceRecord,
+  AuditWitnessEvidenceStatus,
+  AuditWitnessReceiptRecord,
+} from '../contracts/audit-witness.js';
 import type {
   DatabaseCapacitySnapshot,
   DatabaseObservabilitySource,
@@ -425,6 +429,28 @@ interface AuditWitnessReceiptRow {
   received_at: Date;
 }
 
+interface AuditWitnessEvidenceRow {
+  receipt_id: string;
+  source_id: string;
+  chain_sequence: string;
+  object_key: string;
+  content_sha256: string;
+  size_bytes: string;
+  status: AuditWitnessEvidenceStatus;
+  attempts: number;
+  next_attempt_at: Date;
+  lease_until: Date | null;
+  last_error: string | null;
+  object_version_id: string | null;
+  server_side_encryption: string | null;
+  object_lock_mode: string | null;
+  object_lock_retain_until: Date | null;
+  stored_at: Date | null;
+  verified_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 interface CommercialInventoryCountRow {
   customer_total: string;
   customer_active: string;
@@ -732,6 +758,30 @@ function auditWitnessReceiptFromRow(row: AuditWitnessReceiptRow): AuditWitnessRe
     signingKeyId: row.signing_key_id,
     payload: row.payload,
     receivedAt: row.received_at,
+  };
+}
+
+function auditWitnessEvidenceFromRow(row: AuditWitnessEvidenceRow): AuditWitnessEvidenceRecord {
+  return {
+    receiptId: row.receipt_id,
+    sourceId: row.source_id,
+    chainSequence: Number(row.chain_sequence),
+    objectKey: row.object_key,
+    contentSha256: row.content_sha256,
+    sizeBytes: Number(row.size_bytes),
+    status: row.status,
+    attempts: row.attempts,
+    nextAttemptAt: row.next_attempt_at,
+    leaseUntil: row.lease_until,
+    lastError: row.last_error,
+    objectVersionId: row.object_version_id,
+    serverSideEncryption: row.server_side_encryption,
+    objectLockMode: row.object_lock_mode,
+    objectLockRetainUntil: row.object_lock_retain_until,
+    storedAt: row.stored_at,
+    verifiedAt: row.verified_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -3878,6 +3928,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
 
   async ingestAuditWitnessReceipt(input: {
     record: AuditWitnessReceiptRecord;
+    evidence?: AuditWitnessEvidenceRecord;
     audit: AuditEventInput;
   }): Promise<{ record: AuditWitnessReceiptRecord; replayed: boolean }> {
     const client = await this.#pool.connect();
@@ -3936,6 +3987,43 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
           input.record.receivedAt,
         ],
       );
+      if (input.evidence) {
+        if (input.evidence.receiptId !== input.record.id
+          || input.evidence.sourceId !== input.record.sourceId
+          || input.evidence.chainSequence !== input.record.chainSequence) {
+          throw new Error('audit witness evidence identity does not match its receipt');
+        }
+        await client.query(
+          `INSERT INTO control_audit_witness_evidence
+            (receipt_id, source_id, chain_sequence, object_key, content_sha256, size_bytes,
+             status, attempts, next_attempt_at, lease_until, last_error, object_version_id,
+             server_side_encryption, object_lock_mode, object_lock_retain_until, stored_at,
+             verified_at, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                   $15, $16, $17, $18, $19)`,
+          [
+            input.evidence.receiptId,
+            input.evidence.sourceId,
+            input.evidence.chainSequence,
+            input.evidence.objectKey,
+            input.evidence.contentSha256,
+            input.evidence.sizeBytes,
+            input.evidence.status,
+            input.evidence.attempts,
+            input.evidence.nextAttemptAt,
+            input.evidence.leaseUntil,
+            input.evidence.lastError,
+            input.evidence.objectVersionId,
+            input.evidence.serverSideEncryption,
+            input.evidence.objectLockMode,
+            input.evidence.objectLockRetainUntil,
+            input.evidence.storedAt,
+            input.evidence.verifiedAt,
+            input.evidence.createdAt,
+            input.evidence.updatedAt,
+          ],
+        );
+      }
       await appendChainedAuditEvent(client, input.audit);
       await client.query('COMMIT');
       return { record: auditWitnessReceiptFromRow(inserted.rows[0]!), replayed: false };
@@ -3961,6 +4049,278 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       values,
     );
     return result.rows.map(auditWitnessReceiptFromRow);
+  }
+
+  async getAuditWitnessReceipt(id: string): Promise<AuditWitnessReceiptRecord | null> {
+    const result = await this.#pool.query<AuditWitnessReceiptRow>(
+      'SELECT * FROM control_audit_witness_receipts WHERE id = $1',
+      [id],
+    );
+    return result.rows[0] ? auditWitnessReceiptFromRow(result.rows[0]) : null;
+  }
+
+  async claimAuditWitnessEvidence(input: {
+    now: Date;
+    leaseUntil: Date;
+  }): Promise<AuditWitnessEvidenceRecord | null> {
+    const result = await this.#pool.query<AuditWitnessEvidenceRow>(
+      `WITH candidate AS (
+         SELECT receipt_id FROM control_audit_witness_evidence
+         WHERE (status IN ('pending', 'retrying') AND next_attempt_at <= $1)
+            OR (status = 'storing' AND lease_until <= $1)
+         ORDER BY next_attempt_at, created_at
+         FOR UPDATE SKIP LOCKED LIMIT 1
+       )
+       UPDATE control_audit_witness_evidence AS evidence
+       SET status = 'storing', attempts = attempts + 1, lease_until = $2,
+           last_error = NULL, updated_at = $1
+       FROM candidate WHERE evidence.receipt_id = candidate.receipt_id
+       RETURNING evidence.*`,
+      [input.now, input.leaseUntil],
+    );
+    return result.rows[0] ? auditWitnessEvidenceFromRow(result.rows[0]) : null;
+  }
+
+  async finishAuditWitnessEvidence(input: {
+    receiptId: string;
+    expectedLeaseUntil: Date;
+    status: Extract<AuditWitnessEvidenceStatus, 'stored' | 'retrying' | 'failed'>;
+    nextAttemptAt: Date;
+    lastError: string | null;
+    objectVersionId: string | null;
+    serverSideEncryption: string | null;
+    objectLockMode: string | null;
+    objectLockRetainUntil: Date | null;
+    storedAt: Date | null;
+    verifiedAt: Date | null;
+    updatedAt: Date;
+    audit: AuditEventInput | null;
+  }): Promise<AuditWitnessEvidenceRecord | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<AuditWitnessEvidenceRow>(
+        `UPDATE control_audit_witness_evidence
+         SET status = $3, next_attempt_at = $4, lease_until = NULL, last_error = $5,
+             object_version_id = $6, server_side_encryption = $7, object_lock_mode = $8,
+             object_lock_retain_until = $9, stored_at = $10, verified_at = $11,
+             updated_at = $12
+         WHERE receipt_id = $1 AND status = 'storing' AND lease_until = $2
+         RETURNING *`,
+        [
+          input.receiptId,
+          input.expectedLeaseUntil,
+          input.status,
+          input.nextAttemptAt,
+          input.lastError,
+          input.objectVersionId,
+          input.serverSideEncryption,
+          input.objectLockMode,
+          input.objectLockRetainUntil,
+          input.storedAt,
+          input.verifiedAt,
+          input.updatedAt,
+        ],
+      );
+      if (result.rows[0] && input.audit) await appendChainedAuditEvent(client, input.audit);
+      await client.query('COMMIT');
+      return result.rows[0] ? auditWitnessEvidenceFromRow(result.rows[0]) : null;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async retryAuditWitnessEvidence(input: {
+    receiptId: string;
+    retriedAt: Date;
+    audit: AuditEventInput;
+  }): Promise<AuditWitnessEvidenceRecord | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<AuditWitnessEvidenceRow>(
+        `UPDATE control_audit_witness_evidence
+         SET status = 'pending', attempts = 0, next_attempt_at = $2, lease_until = NULL,
+             last_error = NULL, updated_at = $2
+         WHERE receipt_id = $1 AND status = 'failed'
+         RETURNING *`,
+        [input.receiptId, input.retriedAt],
+      );
+      if (result.rows[0]) await appendChainedAuditEvent(client, input.audit);
+      await client.query('COMMIT');
+      return result.rows[0] ? auditWitnessEvidenceFromRow(result.rows[0]) : null;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listAuditWitnessEvidence(input: {
+    status?: AuditWitnessEvidenceStatus;
+    limit: number;
+  }): Promise<AuditWitnessEvidenceRecord[]> {
+    const values: unknown[] = [];
+    const where = input.status ? 'WHERE status = $1' : '';
+    if (input.status) values.push(input.status);
+    values.push(input.limit);
+    const result = await this.#pool.query<AuditWitnessEvidenceRow>(
+      `SELECT * FROM control_audit_witness_evidence ${where}
+       ORDER BY updated_at DESC, receipt_id DESC LIMIT $${values.length}`,
+      values,
+    );
+    return result.rows.map(auditWitnessEvidenceFromRow);
+  }
+
+  async getAuditWitnessEvidence(receiptId: string): Promise<AuditWitnessEvidenceRecord | null> {
+    const result = await this.#pool.query<AuditWitnessEvidenceRow>(
+      'SELECT * FROM control_audit_witness_evidence WHERE receipt_id = $1',
+      [receiptId],
+    );
+    return result.rows[0] ? auditWitnessEvidenceFromRow(result.rows[0]) : null;
+  }
+
+  async restoreAuditWitnessEvidence(input: {
+    receipt: AuditWitnessReceiptRecord;
+    evidence: AuditWitnessEvidenceRecord;
+    audit: AuditEventInput;
+  }): Promise<{ record: AuditWitnessEvidenceRecord; replayed: boolean }> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext('otto_control_audit_witness:' || $1))",
+        [input.receipt.sourceId],
+      );
+      const existing = await client.query<AuditWitnessEvidenceRow & {
+        fingerprint: string;
+        head_hash: string;
+      }>(
+        `SELECT evidence.*, receipt.fingerprint, receipt.head_hash
+         FROM control_audit_witness_evidence AS evidence
+         JOIN control_audit_witness_receipts AS receipt ON receipt.id = evidence.receipt_id
+         WHERE evidence.source_id = $1 AND evidence.chain_sequence = $2`,
+        [input.receipt.sourceId, input.receipt.chainSequence],
+      );
+      if (existing.rows[0]) {
+        const row = existing.rows[0];
+        if (row.fingerprint !== input.receipt.fingerprint || row.head_hash !== input.receipt.headHash
+          || row.content_sha256 !== input.evidence.contentSha256
+          || row.object_key !== input.evidence.objectKey) {
+          throw conflict('audit WORM recovery detected conflicting evidence at the same sequence');
+        }
+        await client.query('COMMIT');
+        return { record: auditWitnessEvidenceFromRow(row), replayed: true };
+      }
+      const receiptId = await client.query<AuditWitnessReceiptRow>(
+        'SELECT * FROM control_audit_witness_receipts WHERE id = $1',
+        [input.receipt.id],
+      );
+      if (receiptId.rows[0]) {
+        const record = auditWitnessReceiptFromRow(receiptId.rows[0]);
+        if (record.sourceId !== input.receipt.sourceId
+          || record.fingerprint !== input.receipt.fingerprint) {
+          throw conflict('audit WORM recovery receipt id conflicts with PostgreSQL');
+        }
+      } else {
+        await client.query(
+          `INSERT INTO control_audit_witness_receipts
+            (id, source_id, anchor_id, fingerprint, issuer, chain_sequence, head_hash,
+             signing_key_id, payload, received_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
+          [
+            input.receipt.id,
+            input.receipt.sourceId,
+            input.receipt.anchorId,
+            input.receipt.fingerprint,
+            input.receipt.issuer,
+            input.receipt.chainSequence,
+            input.receipt.headHash,
+            input.receipt.signingKeyId,
+            JSON.stringify(input.receipt.payload),
+            input.receipt.receivedAt,
+          ],
+        );
+      }
+      const inserted = await client.query<AuditWitnessEvidenceRow>(
+        `INSERT INTO control_audit_witness_evidence
+          (receipt_id, source_id, chain_sequence, object_key, content_sha256, size_bytes,
+           status, attempts, next_attempt_at, lease_until, last_error, object_version_id,
+           server_side_encryption, object_lock_mode, object_lock_retain_until, stored_at,
+           verified_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'stored', $7, $8, NULL, NULL, $9, $10, $11,
+                 $12, $13, $14, $15, $16)
+         RETURNING *`,
+        [
+          input.evidence.receiptId,
+          input.evidence.sourceId,
+          input.evidence.chainSequence,
+          input.evidence.objectKey,
+          input.evidence.contentSha256,
+          input.evidence.sizeBytes,
+          input.evidence.attempts,
+          input.evidence.nextAttemptAt,
+          input.evidence.objectVersionId,
+          input.evidence.serverSideEncryption,
+          input.evidence.objectLockMode,
+          input.evidence.objectLockRetainUntil,
+          input.evidence.storedAt,
+          input.evidence.verifiedAt,
+          input.evidence.createdAt,
+          input.evidence.updatedAt,
+        ],
+      );
+      await appendChainedAuditEvent(client, input.audit);
+      await client.query('COMMIT');
+      return { record: auditWitnessEvidenceFromRow(inserted.rows[0]!), replayed: false };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async summarizeAuditWitnessEvidence(): Promise<{
+    counts: Record<AuditWitnessEvidenceStatus, number>;
+    oldestPendingAt: Date | null;
+    latestVerifiedAt: Date | null;
+  }> {
+    const result = await this.#pool.query<{
+      pending: string;
+      storing: string;
+      retrying: string;
+      stored: string;
+      failed: string;
+      oldest_pending_at: Date | null;
+      latest_verified_at: Date | null;
+    }>(
+      `SELECT
+         count(*) FILTER (WHERE status = 'pending') AS pending,
+         count(*) FILTER (WHERE status = 'storing') AS storing,
+         count(*) FILTER (WHERE status = 'retrying') AS retrying,
+         count(*) FILTER (WHERE status = 'stored') AS stored,
+         count(*) FILTER (WHERE status = 'failed') AS failed,
+         min(created_at) FILTER (WHERE status IN ('pending', 'storing', 'retrying')) AS oldest_pending_at,
+         max(verified_at) AS latest_verified_at
+       FROM control_audit_witness_evidence`,
+    );
+    const row = result.rows[0]!;
+    return {
+      counts: {
+        pending: Number(row.pending),
+        storing: Number(row.storing),
+        retrying: Number(row.retrying),
+        stored: Number(row.stored),
+        failed: Number(row.failed),
+      },
+      oldestPendingAt: row.oldest_pending_at,
+      latestVerifiedAt: row.latest_verified_at,
+    };
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

@@ -60,6 +60,8 @@ const config: Readonly<ControlConfig> = {
   auditAnchorTimeoutMs: 10_000,
   auditAnchorMaxAttempts: 8,
   auditWitnessSourcesFile: null,
+  auditWitnessWormStorage: null,
+  auditWitnessWormRequired: false,
   metricsToken: 'test-metrics-token-that-is-at-least-32-bytes',
   slowRequestThresholdMs: 1_000,
   capacitySampleIntervalMs: 60_000,
@@ -406,6 +408,21 @@ describe('commercial control HTTP routes', () => {
       sources: [{ id: 'test-control', issuer: config.publicBaseUrl }],
       receipts: [{ sourceId: 'test-control', fingerprint: witnessFingerprint }],
     });
+    const wormStatus = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/audit-witness/worm/status',
+      headers: { authorization: `Bearer ${auditorSessionToken}` },
+    });
+    expect(wormStatus.statusCode).toBe(200);
+    expect(wormStatus.json()).toMatchObject({
+      enabled: false, required: false, healthy: true, stored: 0, failed: 0,
+    });
+    const rejectedWormPoll = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/audit-witness/worm/poll',
+      headers: { authorization: `Bearer ${auditorSessionToken}` },
+    });
+    expect(rejectedWormPoll.statusCode).toBe(403);
     const rejectedWitnessIngest = await app.inject({
       method: 'POST',
       url: '/v1/audit-witness/anchors',

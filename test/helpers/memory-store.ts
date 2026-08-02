@@ -64,7 +64,11 @@ import type {
   AuditAnchorRecord,
   AuditAnchorStatus,
 } from '../../src/contracts/audit-anchor.js';
-import type { AuditWitnessReceiptRecord } from '../../src/contracts/audit-witness.js';
+import type {
+  AuditWitnessEvidenceRecord,
+  AuditWitnessEvidenceStatus,
+  AuditWitnessReceiptRecord,
+} from '../../src/contracts/audit-witness.js';
 import { AUDIT_GENESIS_HASH, auditEventHash } from '../../src/audit-chain.js';
 import { conflict } from '../../src/errors.js';
 
@@ -126,6 +130,7 @@ export class MemoryControlStore implements ControlStore {
   readonly alertDeliveries = new Map<string, AlertDeliveryRecord>();
   readonly auditAnchors = new Map<string, AuditAnchorRecord>();
   readonly auditWitnessReceipts: AuditWitnessReceiptRecord[] = [];
+  readonly auditWitnessEvidence = new Map<string, AuditWitnessEvidenceRecord>();
   #auditHeadHash = AUDIT_GENESIS_HASH;
   readonly adminRoles = new Map<string, AdminRoleRecord>([
     ['super_admin', role('super_admin', 'Super administrator', ALL_PERMISSIONS)],
@@ -1922,6 +1927,7 @@ export class MemoryControlStore implements ControlStore {
 
   async ingestAuditWitnessReceipt(input: {
     record: AuditWitnessReceiptRecord;
+    evidence?: AuditWitnessEvidenceRecord;
     audit: AuditEventInput;
   }): Promise<{ record: AuditWitnessReceiptRecord; replayed: boolean }> {
     const replay = this.auditWitnessReceipts.find((receipt) => (
@@ -1943,6 +1949,7 @@ export class MemoryControlStore implements ControlStore {
       throw conflict('audit witness detected conflicting heads at the same sequence');
     }
     this.auditWitnessReceipts.push(input.record);
+    if (input.evidence) this.auditWitnessEvidence.set(input.evidence.receiptId, input.evidence);
     this.#recordAudit(input.audit);
     return { record: input.record, replayed: false };
   }
@@ -1958,6 +1965,164 @@ export class MemoryControlStore implements ControlStore {
         || right.id.localeCompare(left.id)
       ))
       .slice(0, input.limit);
+  }
+
+  async getAuditWitnessReceipt(id: string): Promise<AuditWitnessReceiptRecord | null> {
+    return this.auditWitnessReceipts.find((record) => record.id === id) ?? null;
+  }
+
+  async claimAuditWitnessEvidence(input: {
+    now: Date;
+    leaseUntil: Date;
+  }): Promise<AuditWitnessEvidenceRecord | null> {
+    const record = [...this.auditWitnessEvidence.values()]
+      .filter((item) => (
+        ((item.status === 'pending' || item.status === 'retrying')
+          && item.nextAttemptAt.getTime() <= input.now.getTime())
+        || (item.status === 'storing'
+          && (item.leaseUntil?.getTime() ?? Number.POSITIVE_INFINITY) <= input.now.getTime())
+      ))
+      .sort((left, right) => left.nextAttemptAt.getTime() - right.nextAttemptAt.getTime())[0];
+    if (!record) return null;
+    const claimed: AuditWitnessEvidenceRecord = {
+      ...record,
+      status: 'storing',
+      attempts: record.attempts + 1,
+      leaseUntil: input.leaseUntil,
+      lastError: null,
+      updatedAt: input.now,
+    };
+    this.auditWitnessEvidence.set(claimed.receiptId, claimed);
+    return claimed;
+  }
+
+  async finishAuditWitnessEvidence(input: {
+    receiptId: string;
+    expectedLeaseUntil: Date;
+    status: Extract<AuditWitnessEvidenceStatus, 'stored' | 'retrying' | 'failed'>;
+    nextAttemptAt: Date;
+    lastError: string | null;
+    objectVersionId: string | null;
+    serverSideEncryption: string | null;
+    objectLockMode: string | null;
+    objectLockRetainUntil: Date | null;
+    storedAt: Date | null;
+    verifiedAt: Date | null;
+    updatedAt: Date;
+    audit: AuditEventInput | null;
+  }): Promise<AuditWitnessEvidenceRecord | null> {
+    const current = this.auditWitnessEvidence.get(input.receiptId);
+    if (!current || current.status !== 'storing'
+      || current.leaseUntil?.getTime() !== input.expectedLeaseUntil.getTime()) return null;
+    const finished: AuditWitnessEvidenceRecord = {
+      ...current,
+      status: input.status,
+      nextAttemptAt: input.nextAttemptAt,
+      leaseUntil: null,
+      lastError: input.lastError,
+      objectVersionId: input.objectVersionId,
+      serverSideEncryption: input.serverSideEncryption,
+      objectLockMode: input.objectLockMode,
+      objectLockRetainUntil: input.objectLockRetainUntil,
+      storedAt: input.storedAt,
+      verifiedAt: input.verifiedAt,
+      updatedAt: input.updatedAt,
+    };
+    this.auditWitnessEvidence.set(finished.receiptId, finished);
+    if (input.audit) this.#recordAudit(input.audit);
+    return finished;
+  }
+
+  async retryAuditWitnessEvidence(input: {
+    receiptId: string;
+    retriedAt: Date;
+    audit: AuditEventInput;
+  }): Promise<AuditWitnessEvidenceRecord | null> {
+    const current = this.auditWitnessEvidence.get(input.receiptId);
+    if (!current || current.status !== 'failed') return null;
+    const retried: AuditWitnessEvidenceRecord = {
+      ...current,
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: input.retriedAt,
+      leaseUntil: null,
+      lastError: null,
+      updatedAt: input.retriedAt,
+    };
+    this.auditWitnessEvidence.set(retried.receiptId, retried);
+    this.#recordAudit(input.audit);
+    return retried;
+  }
+
+  async listAuditWitnessEvidence(input: {
+    status?: AuditWitnessEvidenceStatus;
+    limit: number;
+  }): Promise<AuditWitnessEvidenceRecord[]> {
+    return [...this.auditWitnessEvidence.values()]
+      .filter((record) => !input.status || record.status === input.status)
+      .sort((left, right) => (
+        right.updatedAt.getTime() - left.updatedAt.getTime()
+        || right.receiptId.localeCompare(left.receiptId)
+      ))
+      .slice(0, input.limit);
+  }
+
+  async getAuditWitnessEvidence(receiptId: string): Promise<AuditWitnessEvidenceRecord | null> {
+    return this.auditWitnessEvidence.get(receiptId) ?? null;
+  }
+
+  async restoreAuditWitnessEvidence(input: {
+    receipt: AuditWitnessReceiptRecord;
+    evidence: AuditWitnessEvidenceRecord;
+    audit: AuditEventInput;
+  }): Promise<{ record: AuditWitnessEvidenceRecord; replayed: boolean }> {
+    const existing = [...this.auditWitnessEvidence.values()].find((record) => (
+      record.sourceId === input.evidence.sourceId
+      && record.chainSequence === input.evidence.chainSequence
+    ));
+    if (existing) {
+      const receipt = this.auditWitnessReceipts.find((item) => item.id === existing.receiptId)!;
+      if (receipt.fingerprint !== input.receipt.fingerprint
+        || existing.contentSha256 !== input.evidence.contentSha256
+        || existing.objectKey !== input.evidence.objectKey) {
+        throw conflict('audit WORM recovery detected conflicting evidence at the same sequence');
+      }
+      return { record: existing, replayed: true };
+    }
+    const byId = this.auditWitnessReceipts.find((record) => record.id === input.receipt.id);
+    if (byId && (byId.sourceId !== input.receipt.sourceId
+      || byId.fingerprint !== input.receipt.fingerprint)) {
+      throw conflict('audit WORM recovery receipt id conflicts with PostgreSQL');
+    }
+    if (!byId) this.auditWitnessReceipts.push(input.receipt);
+    this.auditWitnessEvidence.set(input.evidence.receiptId, input.evidence);
+    this.#recordAudit(input.audit);
+    return { record: input.evidence, replayed: false };
+  }
+
+  async summarizeAuditWitnessEvidence(): Promise<{
+    counts: Record<AuditWitnessEvidenceStatus, number>;
+    oldestPendingAt: Date | null;
+    latestVerifiedAt: Date | null;
+  }> {
+    const values = [...this.auditWitnessEvidence.values()];
+    const dates = values
+      .filter((record) => record.status === 'pending' || record.status === 'storing'
+        || record.status === 'retrying')
+      .map((record) => record.createdAt.getTime());
+    const verified = values
+      .flatMap((record) => record.verifiedAt ? [record.verifiedAt.getTime()] : []);
+    return {
+      counts: {
+        pending: values.filter((record) => record.status === 'pending').length,
+        storing: values.filter((record) => record.status === 'storing').length,
+        retrying: values.filter((record) => record.status === 'retrying').length,
+        stored: values.filter((record) => record.status === 'stored').length,
+        failed: values.filter((record) => record.status === 'failed').length,
+      },
+      oldestPendingAt: dates.length ? new Date(Math.min(...dates)) : null,
+      latestVerifiedAt: verified.length ? new Date(Math.max(...verified)) : null,
+    };
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

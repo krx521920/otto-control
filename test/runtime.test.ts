@@ -36,6 +36,8 @@ const baseConfig: Readonly<ControlConfig> = {
   auditAnchorTimeoutMs: 10_000,
   auditAnchorMaxAttempts: 8,
   auditWitnessSourcesFile: null,
+  auditWitnessWormStorage: null,
+  auditWitnessWormRequired: false,
   metricsToken: 'test-metrics-token-that-is-at-least-32-bytes',
   slowRequestThresholdMs: 1_000,
   capacitySampleIntervalMs: 60_000,

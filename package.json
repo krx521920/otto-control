@@ -1,6 +1,6 @@
 {
   "name": "otto-control",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "private": true,
   "description": "Commercial control plane for Otto private deployments",
   "type": "module",
@@ -18,6 +18,7 @@
     "drill:pitr:production": "sh deploy/drill-pitr-postgres.sh",
     "drill:signing:provider": "node scripts/drill-signing-provider.mjs",
     "drill:signing:rotation": "node scripts/drill-signing-rotation.mjs",
+    "drill:audit:worm": "node scripts/drill-audit-worm.mjs",
     "lint": "eslint .",
     "start": "node dist/server.js",
     "restore:production": "sh deploy/restore-postgres.sh",

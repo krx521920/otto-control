@@ -15,6 +15,7 @@ import { AuditService } from './modules/audit/service.js';
 import { AuditAnchorService } from './modules/audit-anchor/service.js';
 import { AuditWitnessService } from './modules/audit-witness/service.js';
 import { loadAuditWitnessSources } from './modules/audit-witness/source-config.js';
+import { S3AuditWitnessWormObjectStore } from './modules/audit-witness/s3-worm-object-store.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 import type { DatabaseObservabilitySource } from './observability/contracts.js';
 
@@ -87,6 +88,9 @@ export async function createCommercialControlRuntime(
     const attestationVerifier = await loadArtifactAttestationVerifier(
       config.artifactAttestationKeysFile,
     );
+    const auditWitnessWormStore = config.auditWitnessWormStorage
+      ? new S3AuditWitnessWormObjectStore(config.auditWitnessWormStorage)
+      : null;
     const releaseArtifacts = new ReleaseArtifactService({
       store,
       signer,
@@ -118,6 +122,16 @@ export async function createCommercialControlRuntime(
       signer,
       issuer: config.publicBaseUrl!,
     });
+    const auditWitness = new AuditWitnessService({
+      store,
+      sources: loadAuditWitnessSources(config.auditWitnessSourcesFile),
+      wormStore: auditWitnessWormStore,
+      wormRequired: config.auditWitnessWormRequired,
+      retentionDays: config.auditWitnessWormStorage?.retentionDays,
+      pollIntervalMs: config.auditWitnessWormStorage?.pollIntervalMs,
+      maxAttempts: config.auditWitnessWormStorage?.maxAttempts,
+    });
+    await auditWitness.assertWormReady();
     return {
       adminToken: config.adminToken!,
       identity,
@@ -136,10 +150,7 @@ export async function createCommercialControlRuntime(
         timeoutMs: config.auditAnchorTimeoutMs,
         maxAttempts: config.auditAnchorMaxAttempts,
       }),
-      auditWitness: new AuditWitnessService({
-        store,
-        sources: loadAuditWitnessSources(config.auditWitnessSourcesFile),
-      }),
+      auditWitness,
       observability: store,
       service: new CommercialControlService({
         store,

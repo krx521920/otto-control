@@ -4,6 +4,10 @@ import {
   loadArtifactStorageConfig,
   type ArtifactStorageConfig,
 } from './modules/release-artifacts/storage-config.js';
+import {
+  loadAuditWitnessWormStorageConfig,
+  type AuditWitnessWormStorageConfig,
+} from './modules/audit-witness/worm-storage-config.js';
 
 export type ControlEnvironment = 'development' | 'test' | 'production';
 export type ControlLogLevel = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
@@ -41,6 +45,8 @@ export interface ControlConfig {
   auditAnchorTimeoutMs: number;
   auditAnchorMaxAttempts: number;
   auditWitnessSourcesFile: string | null;
+  auditWitnessWormStorage: AuditWitnessWormStorageConfig | null;
+  auditWitnessWormRequired: boolean;
   metricsToken: string | null;
   slowRequestThresholdMs: number;
   capacitySampleIntervalMs: number;
@@ -314,6 +320,7 @@ export function loadControlConfig(
     'CONTROL_ARTIFACT_STORAGE_REQUIRED',
   );
   const artifactStorage = loadArtifactStorageConfig(env, environment);
+  const auditWitnessWorm = loadAuditWitnessWormStorageConfig(env, environment);
   const artifactAttestationKeysFile = env.CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE?.trim() || null;
   const signerPrivateKeyFile = env.CONTROL_SIGNER_PRIVATE_KEY_FILE?.trim() || null;
   const signerKeyringFile = env.CONTROL_SIGNER_KEYRING_FILE?.trim() || null;
@@ -358,7 +365,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.23.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.24.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -438,6 +445,8 @@ export function loadControlConfig(
       'CONTROL_AUDIT_ANCHOR_MAX_ATTEMPTS',
     ),
     auditWitnessSourcesFile: env.CONTROL_AUDIT_WITNESS_SOURCES_FILE?.trim() || null,
+    auditWitnessWormStorage: auditWitnessWorm.config,
+    auditWitnessWormRequired: auditWitnessWorm.required,
     metricsToken,
     slowRequestThresholdMs: parseBoundedInteger(
       env.CONTROL_SLOW_REQUEST_THRESHOLD_MS,

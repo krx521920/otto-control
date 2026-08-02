@@ -184,6 +184,9 @@ export async function buildControlApp(
     }
     if (commercialControl.auditWitness) {
       capabilities.push('external_audit_witness');
+      if (commercialControl.auditWitness.wormEnabled) {
+        capabilities.push('immutable_audit_witness_evidence');
+      }
       await registerAuditWitnessRoutes(app, {
         service: commercialControl.auditWitness,
         identity: commercialControl.identity,
@@ -204,12 +207,16 @@ export async function buildControlApp(
       commercialControl.auditAnchors?.start((error) => {
         app.log.error({ err: error }, 'audit anchor poll failed');
       });
+      commercialControl.auditWitness?.start((error) => {
+        app.log.error({ err: error }, 'audit WORM evidence poll failed');
+      });
     });
     app.addHook('onClose', async () => {
       try {
         await Promise.all([
           commercialControl.alerts.close(),
           commercialControl.auditAnchors?.close(),
+          commercialControl.auditWitness?.close(),
         ]);
       } finally {
         await commercialControl.service.close();

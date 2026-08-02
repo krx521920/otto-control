@@ -48,7 +48,11 @@ import type {
   AuditAnchorRecord,
   AuditAnchorStatus,
 } from '../contracts/audit-anchor.js';
-import type { AuditWitnessReceiptRecord } from '../contracts/audit-witness.js';
+import type {
+  AuditWitnessEvidenceRecord,
+  AuditWitnessEvidenceStatus,
+  AuditWitnessReceiptRecord,
+} from '../contracts/audit-witness.js';
 
 export type RecordStatus = 'active' | 'suspended';
 
@@ -639,11 +643,52 @@ export interface ControlStore {
   listAuditAnchors(limit: number): Promise<AuditAnchorRecord[]>;
   ingestAuditWitnessReceipt(input: {
     record: AuditWitnessReceiptRecord;
+    evidence?: AuditWitnessEvidenceRecord;
     audit: AuditEventInput;
   }): Promise<{ record: AuditWitnessReceiptRecord; replayed: boolean }>;
   listAuditWitnessReceipts(input: {
     sourceId?: string;
     limit: number;
   }): Promise<AuditWitnessReceiptRecord[]>;
+  getAuditWitnessReceipt(id: string): Promise<AuditWitnessReceiptRecord | null>;
+  claimAuditWitnessEvidence(input: {
+    now: Date;
+    leaseUntil: Date;
+  }): Promise<AuditWitnessEvidenceRecord | null>;
+  finishAuditWitnessEvidence(input: {
+    receiptId: string;
+    expectedLeaseUntil: Date;
+    status: Extract<AuditWitnessEvidenceStatus, 'stored' | 'retrying' | 'failed'>;
+    nextAttemptAt: Date;
+    lastError: string | null;
+    objectVersionId: string | null;
+    serverSideEncryption: string | null;
+    objectLockMode: string | null;
+    objectLockRetainUntil: Date | null;
+    storedAt: Date | null;
+    verifiedAt: Date | null;
+    updatedAt: Date;
+    audit: AuditEventInput | null;
+  }): Promise<AuditWitnessEvidenceRecord | null>;
+  retryAuditWitnessEvidence(input: {
+    receiptId: string;
+    retriedAt: Date;
+    audit: AuditEventInput;
+  }): Promise<AuditWitnessEvidenceRecord | null>;
+  listAuditWitnessEvidence(input: {
+    status?: AuditWitnessEvidenceStatus;
+    limit: number;
+  }): Promise<AuditWitnessEvidenceRecord[]>;
+  getAuditWitnessEvidence(receiptId: string): Promise<AuditWitnessEvidenceRecord | null>;
+  restoreAuditWitnessEvidence(input: {
+    receipt: AuditWitnessReceiptRecord;
+    evidence: AuditWitnessEvidenceRecord;
+    audit: AuditEventInput;
+  }): Promise<{ record: AuditWitnessEvidenceRecord; replayed: boolean }>;
+  summarizeAuditWitnessEvidence(): Promise<{
+    counts: Record<AuditWitnessEvidenceStatus, number>;
+    oldestPendingAt: Date | null;
+    latestVerifiedAt: Date | null;
+  }>;
   appendAuditEvent(input: AuditEventInput): Promise<void>;
 }

@@ -30,4 +30,41 @@ export async function registerAuditWitnessRoutes(
       return options.service.list(request.query);
     },
   );
+
+  app.get<{ Querystring: { limit?: string } }>(
+    '/v1/admin/audit-witness/worm/status',
+    async (request) => {
+      await authenticateAdmin(request, options, 'audit.read');
+      return options.service.evidenceStatus(request.query.limit ? Number(request.query.limit) : 50);
+    },
+  );
+
+  app.post('/v1/admin/audit-witness/worm/poll', async (request) => {
+    await authenticateAdmin(request, options, 'audit.anchor.manage');
+    return options.service.pollEvidenceOnce();
+  });
+
+  app.post<{ Params: { receiptId: string } }>(
+    '/v1/admin/audit-witness/worm/:receiptId/retry',
+    async (request) => {
+      const principal = await authenticateAdmin(request, options, 'audit.anchor.manage');
+      return options.service.retryEvidence(request.params.receiptId, principal.actorId);
+    },
+  );
+
+  app.post<{ Params: { receiptId: string } }>(
+    '/v1/admin/audit-witness/worm/:receiptId/verify',
+    async (request) => {
+      await authenticateAdmin(request, options, 'audit.verify');
+      return options.service.verifyEvidence(request.params.receiptId);
+    },
+  );
+
+  app.post<{ Body: { continuationToken?: unknown; limit?: unknown } }>(
+    '/v1/admin/audit-witness/worm/recover',
+    async (request) => {
+      const principal = await authenticateAdmin(request, options, 'audit.anchor.manage');
+      return options.service.recoverEvidence(request.body ?? {}, principal.actorId);
+    },
+  );
 }
