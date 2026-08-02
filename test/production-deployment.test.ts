@@ -180,6 +180,10 @@ describe('production deployment assets', () => {
     expect(prometheus.match(/control-[abc]:7788/gu)).toHaveLength(3);
     expect(prometheus.match(/federation-[abc]:7790/gu)).toHaveLength(3);
     expect(prometheus).toContain('credentials_file: /run/secrets/federation_metrics_token');
+    expect(rules).toContain('OttoFederationTargetMissing');
+    expect(rules).toContain('OttoFederationHttpErrorsHigh');
+    expect(rules).toContain('OttoFederationLatencyHigh');
+    expect(rules).toContain('OttoFederationPendingQueueHigh');
     expect(rules).toContain('otto_control:slo_availability:ratio_5m');
     expect(rules).toContain('OttoControlAvailabilityErrorBudgetBurnHigh');
     expect(rules).toContain('OttoControlPostgresPoolSaturated');

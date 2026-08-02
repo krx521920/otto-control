@@ -22,6 +22,17 @@ groups:
           )
       - record: otto_control:database_growth:bytes_24h
         expr: delta(otto_control_database_size_bytes[24h])
+      - record: otto_federation:http_error:ratio_5m
+        expr: |
+          sum(rate(otto_federation_http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(otto_federation_http_requests_total[5m])), 0.000000001)
+      - record: otto_federation:http_latency:p95_seconds_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(otto_federation_http_request_duration_seconds_bucket[5m]))
+          )
 
   - name: otto-control-alerts
     rules:
@@ -73,3 +84,32 @@ groups:
           severity: warning
         annotations:
           summary: Otto Control database capacity sampling is stale
+      - alert: OttoFederationTargetMissing
+        expr: up{job="otto-federation"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Otto Federation instance is unavailable
+          description: "{{ $labels.instance }} has not exposed metrics for two minutes."
+      - alert: OttoFederationHttpErrorsHigh
+        expr: otto_federation:http_error:ratio_5m > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Otto Federation HTTP error ratio is above five percent
+      - alert: OttoFederationLatencyHigh
+        expr: otto_federation:http_latency:p95_seconds_5m > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Otto Federation p95 latency is above two seconds
+      - alert: OttoFederationPendingQueueHigh
+        expr: max(otto_federation_messages{status="pending"}) > 5000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Otto Federation pending queue is above 5000 messages
