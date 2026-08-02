@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "keys": [
+    {
+      "id": "release-runner-2026-01",
+      "publicKeyFile": "release-attestation-public.pem"
+    }
+  ]
+}

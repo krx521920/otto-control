@@ -57,6 +57,9 @@ const config: Readonly<ControlConfig> = {
   capacitySampleIntervalMs: 60_000,
   sloAvailabilityTarget: 0.999,
   sloLatencyTargetMs: 500,
+  artifactStorage: null,
+  artifactStorageRequired: false,
+  artifactAttestationKeysFile: null,
 };
 
 describe('administrator identity HTTP routes', () => {

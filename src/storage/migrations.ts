@@ -745,6 +745,25 @@ const MIGRATIONS: Migration[] = [
        VALIDATE CONSTRAINT control_licenses_offline_billing_check`,
     ],
   },
+  {
+    id: '020_managed_release_artifacts',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_release_artifact_evidence (
+        artifact_id TEXT PRIMARY KEY REFERENCES control_release_artifacts(id) ON DELETE CASCADE,
+        object_key TEXT NOT NULL UNIQUE,
+        object_version_id TEXT,
+        verified_at TIMESTAMPTZ NOT NULL,
+        server_side_encryption TEXT,
+        object_lock_mode TEXT,
+        object_lock_retain_until TIMESTAMPTZ,
+        code_signing JSONB,
+        created_at TIMESTAMPTZ NOT NULL,
+        CHECK (length(object_key) BETWEEN 1 AND 1024)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_release_artifact_evidence_verified
+       ON control_release_artifact_evidence(verified_at)`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

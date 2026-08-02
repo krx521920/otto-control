@@ -2,6 +2,7 @@ import type {
   AuditEventInput,
   CommercialInventorySnapshot,
   ControlStore,
+  CreateManagedReleaseArtifactInput,
   CreateLicenseRecordInput,
   CreateReleaseArtifactRecordInput,
   CreateUpdateReleaseRecordInput,
@@ -11,7 +12,9 @@ import type {
   LicenseLifecycleEventRecord,
   LicenseRecord,
   LicenseSeatUsageRecord,
+  ManagedReleaseArtifactRecord,
   ReleaseArtifactRecord,
+  ReleaseArtifactEvidenceRecord,
   ReleaseArtifactRevocationResult,
   SigningKeyProvider,
   SigningKeyRecord,
@@ -106,6 +109,7 @@ export class MemoryControlStore implements ControlStore {
   readonly updateDistributions = new Map<string, UpdateDistributionRecord>();
   readonly updateReleases = new Map<string, UpdateReleaseRecord>();
   readonly releaseArtifacts = new Map<string, ReleaseArtifactRecord>();
+  readonly releaseArtifactEvidence = new Map<string, ReleaseArtifactEvidenceRecord>();
   readonly updateAssignments = new Map<string, DeploymentUpdateAssignmentRecord>();
   readonly updatePolicyNonces = new Set<string>();
   readonly adminAccounts = new Map<string, AdminAccountRecord>();
@@ -1038,6 +1042,28 @@ export class MemoryControlStore implements ControlStore {
 
   async getReleaseArtifact(id: string): Promise<ReleaseArtifactRecord | null> {
     return this.releaseArtifacts.get(id) ?? null;
+  }
+
+  async createManagedReleaseArtifact(
+    input: CreateManagedReleaseArtifactInput,
+  ): Promise<ManagedReleaseArtifactRecord> {
+    if ([...this.releaseArtifactEvidence.values()].some(
+      (evidence) => evidence.objectKey === input.evidence.objectKey,
+    )) {
+      throw conflict('managed release object already exists');
+    }
+    const artifact = await this.createReleaseArtifact(input.artifact);
+    const evidence: ReleaseArtifactEvidenceRecord = {
+      artifactId: artifact.id,
+      ...input.evidence,
+      createdAt: artifact.createdAt,
+    };
+    this.releaseArtifactEvidence.set(artifact.id, evidence);
+    return { artifact, evidence };
+  }
+
+  async getReleaseArtifactEvidence(id: string): Promise<ReleaseArtifactEvidenceRecord | null> {
+    return this.releaseArtifactEvidence.get(id) ?? null;
   }
 
   async listReleaseArtifacts(releaseId: string): Promise<ReleaseArtifactRecord[]> {

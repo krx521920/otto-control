@@ -123,7 +123,7 @@ export function loadTracingConfiguration(
     endpoint: endpoint.toString(),
     headers: loadHeaders(headersFile),
     sampleRatio: parseSampleRatio(env.CONTROL_TRACE_SAMPLE_RATIO, production),
-    serviceVersion: env.OTTO_CONTROL_VERSION?.trim() || '0.21.0',
+    serviceVersion: env.OTTO_CONTROL_VERSION?.trim() || '0.22.0',
     environment: env.NODE_ENV?.trim() || 'development',
     instanceId: env.HOSTNAME?.trim() || `pid-${process.pid}`,
   });

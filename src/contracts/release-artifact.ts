@@ -1,3 +1,5 @@
+import type { ArtifactStorageEvidence } from './artifact-storage.js';
+
 export const RELEASE_ARTIFACT_KINDS = [
   'windows_installer',
   'macos_dmg',
@@ -52,4 +54,5 @@ export interface ReleaseArtifactView extends SignedReleaseArtifactEnvelope {
   revokedAt: string | null;
   revokedBy: string | null;
   revocationReason: string | null;
+  storage?: ArtifactStorageEvidence | null;
 }

@@ -4,6 +4,7 @@ import pg from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import { ManagedSigningKeyring } from '../src/crypto/signing-keyring.js';
 import { AuditService } from '../src/modules/audit/service.js';
 import { BillingService } from '../src/modules/billing/service.js';
 import { CommercialControlService } from '../src/modules/commercial-control/service.js';
@@ -110,7 +111,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       const migrations = await pool.query<{ id: string }>(
         'SELECT id FROM control_schema_migrations ORDER BY id',
       );
-      expect(migrations.rows.at(-1)?.id).toBe('019_license_billing_enforcement');
+      expect(migrations.rows.at(-1)?.id).toBe('020_managed_release_artifacts');
       expect(new Set(migrations.rows.map((row) => row.id)).size).toBe(migrations.rows.length);
       const billingPolicyColumn = await pool.query<{
         column_name: string;
@@ -128,20 +129,92 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
         is_nullable: 'NO',
       });
       expect(billingPolicyColumn.rows[0]?.column_default).toContain('disabled');
-      const tables = await pool.query<{ licenses: string; billing: string; witness: string }>(
+      const tables = await pool.query<{
+        licenses: string;
+        billing: string;
+        witness: string;
+        artifactEvidence: string;
+      }>(
         `SELECT
           to_regclass('public.control_licenses')::text AS licenses,
           to_regclass('public.control_credit_transactions')::text AS billing,
-          to_regclass('public.control_audit_witness_receipts')::text AS witness`,
+          to_regclass('public.control_audit_witness_receipts')::text AS witness,
+          to_regclass('public.control_release_artifact_evidence')::text AS artifact_evidence`,
       );
       expect(tables.rows[0]).toEqual({
         licenses: 'control_licenses',
         billing: 'control_credit_transactions',
         witness: 'control_audit_witness_receipts',
+        artifactEvidence: 'control_release_artifact_evidence',
       });
     } finally {
       await pool.end();
     }
+  });
+
+  it('persists artifact metadata and storage evidence atomically across reconnects', async () => {
+    await resetDatabase(DATABASE_URL!);
+    const store = await openStore();
+    const signing = signer();
+    const keyring = await ManagedSigningKeyring.create({
+      store,
+      providers: [{ provider: 'local', signer: signing }],
+    });
+    await store.createUpdateDistribution({ id: 'otto', name: 'Otto desktop' });
+    const release = await store.createUpdateRelease({
+      id: 'rel_postgresartifact01',
+      distributionId: 'otto',
+      version: '2.1.0',
+      sourceCommit: 'a'.repeat(40),
+      channel: 'stable',
+      rolloutPercent: 100,
+      notes: 'PostgreSQL managed artifact fixture',
+      fullManifestUrl: null,
+      fullManifestSha256: null,
+      incrementalManifestUrl: null,
+      incrementalManifestSha256: null,
+    });
+    const createdAt = new Date(NOW);
+    const artifactId = 'art_postgresmanaged001';
+    await store.createManagedReleaseArtifact({
+      artifact: {
+        id: artifactId,
+        releaseId: release.id,
+        distributionId: release.distributionId,
+        releaseVersion: release.version,
+        sourceCommit: release.sourceCommit,
+        kind: 'update_manifest',
+        platform: 'any',
+        url: `https://control.integration.test/v1/release-artifacts/${artifactId}/download`,
+        sha256: 'e'.repeat(64),
+        sizeBytes: 4_096,
+        signingKeyId: keyring.keyId,
+        signature: 'ed25519:fixture',
+        createdAt,
+      },
+      evidence: {
+        objectKey: `releases/${release.id}/manifest.json`,
+        objectVersionId: 'version-0001',
+        verifiedAt: createdAt,
+        serverSideEncryption: 'aws:kms',
+        objectLockMode: 'COMPLIANCE',
+        objectLockRetainUntil: new Date('2027-08-01T10:00:00.000Z'),
+        codeSigning: null,
+      },
+    });
+
+    await closeStore(store);
+    const reopened = await openStore();
+    await expect(reopened.getReleaseArtifact(artifactId)).resolves.toMatchObject({
+      id: artifactId,
+      sha256: 'e'.repeat(64),
+    });
+    await expect(reopened.getReleaseArtifactEvidence(artifactId)).resolves.toMatchObject({
+      artifactId,
+      objectVersionId: 'version-0001',
+      serverSideEncryption: 'aws:kms',
+      objectLockMode: 'COMPLIANCE',
+    });
   });
 
   it('persists signed License, replay protection, and audit state across reconnects', async () => {

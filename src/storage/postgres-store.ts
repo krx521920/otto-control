@@ -26,6 +26,7 @@ import type {
   AuditEventInput,
   CommercialInventorySnapshot,
   ControlStore,
+  CreateManagedReleaseArtifactInput,
   CreateLicenseRecordInput,
   CreateReleaseArtifactRecordInput,
   CreateUpdateReleaseRecordInput,
@@ -35,8 +36,10 @@ import type {
   LicenseLifecycleEventRecord,
   LicenseRecord,
   LicenseSeatUsageRecord,
+  ManagedReleaseArtifactRecord,
   RecordStatus,
   ReleaseArtifactRecord,
+  ReleaseArtifactEvidenceRecord,
   ReleaseArtifactRevocationResult,
   SigningKeyProvider,
   SigningKeyRecord,
@@ -345,6 +348,18 @@ interface ReleaseArtifactRow {
   updated_at: Date;
 }
 
+interface ReleaseArtifactEvidenceRow {
+  artifact_id: string;
+  object_key: string;
+  object_version_id: string | null;
+  verified_at: Date;
+  server_side_encryption: string | null;
+  object_lock_mode: string | null;
+  object_lock_retain_until: Date | null;
+  code_signing: ReleaseArtifactEvidenceRecord['codeSigning'];
+  created_at: Date;
+}
+
 interface AlertDeliveryRow {
   id: string;
   channel_id: string;
@@ -634,6 +649,22 @@ function releaseArtifactFromRow(row: ReleaseArtifactRow): ReleaseArtifactRecord 
     revocationReason: row.revocation_reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function releaseArtifactEvidenceFromRow(
+  row: ReleaseArtifactEvidenceRow,
+): ReleaseArtifactEvidenceRecord {
+  return {
+    artifactId: row.artifact_id,
+    objectKey: row.object_key,
+    objectVersionId: row.object_version_id,
+    verifiedAt: row.verified_at,
+    serverSideEncryption: row.server_side_encryption,
+    objectLockMode: row.object_lock_mode,
+    objectLockRetainUntil: row.object_lock_retain_until,
+    codeSigning: row.code_signing,
+    createdAt: row.created_at,
   };
 }
 
@@ -2539,12 +2570,85 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     }
   }
 
+  async createManagedReleaseArtifact(
+    input: CreateManagedReleaseArtifactInput,
+  ): Promise<ManagedReleaseArtifactRecord> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const artifactResult = await client.query<ReleaseArtifactRow>(
+        `INSERT INTO control_release_artifacts
+          (id, release_id, distribution_id, release_version, source_commit, kind, platform,
+           url, sha256, size_bytes, signing_key_id, signature, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)
+         RETURNING *`,
+        [
+          input.artifact.id,
+          input.artifact.releaseId,
+          input.artifact.distributionId,
+          input.artifact.releaseVersion,
+          input.artifact.sourceCommit,
+          input.artifact.kind,
+          input.artifact.platform,
+          input.artifact.url,
+          input.artifact.sha256,
+          input.artifact.sizeBytes,
+          input.artifact.signingKeyId,
+          input.artifact.signature,
+          input.artifact.createdAt,
+        ],
+      );
+      const evidenceResult = await client.query<ReleaseArtifactEvidenceRow>(
+        `INSERT INTO control_release_artifact_evidence
+          (artifact_id, object_key, object_version_id, verified_at, server_side_encryption,
+           object_lock_mode, object_lock_retain_until, code_signing, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          input.artifact.id,
+          input.evidence.objectKey,
+          input.evidence.objectVersionId,
+          input.evidence.verifiedAt,
+          input.evidence.serverSideEncryption,
+          input.evidence.objectLockMode,
+          input.evidence.objectLockRetainUntil,
+          input.evidence.codeSigning,
+          input.artifact.createdAt,
+        ],
+      );
+      await client.query('COMMIT');
+      return {
+        artifact: releaseArtifactFromRow(artifactResult.rows[0]!),
+        evidence: releaseArtifactEvidenceFromRow(evidenceResult.rows[0]!),
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23503') {
+        throw conflict('release, distribution, or signing key does not exist');
+      }
+      if (postgresCode(error) === '23505') {
+        throw conflict('release artifact or managed object already exists');
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async getReleaseArtifact(id: string): Promise<ReleaseArtifactRecord | null> {
     const result = await this.#pool.query<ReleaseArtifactRow>(
       'SELECT * FROM control_release_artifacts WHERE id = $1',
       [id],
     );
     return result.rows[0] ? releaseArtifactFromRow(result.rows[0]) : null;
+  }
+
+  async getReleaseArtifactEvidence(id: string): Promise<ReleaseArtifactEvidenceRecord | null> {
+    const result = await this.#pool.query<ReleaseArtifactEvidenceRow>(
+      'SELECT * FROM control_release_artifact_evidence WHERE artifact_id = $1',
+      [id],
+    );
+    return result.rows[0] ? releaseArtifactEvidenceFromRow(result.rows[0]) : null;
   }
 
   async listReleaseArtifacts(releaseId: string): Promise<ReleaseArtifactRecord[]> {

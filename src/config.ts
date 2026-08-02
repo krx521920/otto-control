@@ -1,5 +1,10 @@
 import { readFileSync } from 'node:fs';
 
+import {
+  loadArtifactStorageConfig,
+  type ArtifactStorageConfig,
+} from './modules/release-artifacts/storage-config.js';
+
 export type ControlEnvironment = 'development' | 'test' | 'production';
 export type ControlLogLevel = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
 
@@ -41,6 +46,9 @@ export interface ControlConfig {
   capacitySampleIntervalMs: number;
   sloAvailabilityTarget: number;
   sloLatencyTargetMs: number;
+  artifactStorage: ArtifactStorageConfig | null;
+  artifactStorageRequired: boolean;
+  artifactAttestationKeysFile: string | null;
 }
 
 const LOG_LEVELS = new Set<ControlLogLevel>([
@@ -300,6 +308,13 @@ export function loadControlConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): Readonly<ControlConfig> {
   const environment = parseEnvironment(env.NODE_ENV);
+  const artifactStorageRequired = parseBoolean(
+    env.CONTROL_ARTIFACT_STORAGE_REQUIRED,
+    false,
+    'CONTROL_ARTIFACT_STORAGE_REQUIRED',
+  );
+  const artifactStorage = loadArtifactStorageConfig(env, environment);
+  const artifactAttestationKeysFile = env.CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE?.trim() || null;
   const signerPrivateKeyFile = env.CONTROL_SIGNER_PRIVATE_KEY_FILE?.trim() || null;
   const signerKeyringFile = env.CONTROL_SIGNER_KEYRING_FILE?.trim() || null;
   const alertWebhookUrl = parseAlertWebhookUrl(env.CONTROL_ALERT_WEBHOOK_URL);
@@ -331,6 +346,11 @@ export function loadControlConfig(
   if (environment === 'production' && !metricsToken) {
     throw new Error('CONTROL_METRICS_TOKEN or CONTROL_METRICS_TOKEN_FILE is required in production');
   }
+  if (artifactStorage && !artifactAttestationKeysFile) {
+    throw new Error(
+      'CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE is required when artifact storage is enabled',
+    );
+  }
   return Object.freeze({
     environment,
     host: env.CONTROL_HOST?.trim() || '127.0.0.1',
@@ -338,7 +358,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.21.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.22.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -447,5 +467,8 @@ export function loadControlConfig(
       30_000,
       'CONTROL_SLO_LATENCY_TARGET_MS',
     ),
+    artifactStorage,
+    artifactStorageRequired,
+    artifactAttestationKeysFile,
   });
 }

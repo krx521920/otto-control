@@ -140,6 +140,12 @@ export async function buildControlApp(
       'outbound_alert_delivery',
       'operator_console',
     );
+    if (config.artifactStorage) {
+      capabilities.push(
+        'managed_release_artifact_storage',
+        'release_artifact_code_signing_attestation',
+      );
+    }
     capabilities.push('admin_identity', 'admin_rbac', 'admin_mfa', 'dual_control_approval');
     await registerAdminIdentityRoutes(app, {
       adminToken: commercialControl.adminToken,

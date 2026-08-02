@@ -7,6 +7,8 @@ import { AdminIdentityService } from './modules/admin-identity/service.js';
 import { UpdatePolicyService } from './modules/update-policy/service.js';
 import { BillingService } from './modules/billing/service.js';
 import { ReleaseArtifactService } from './modules/release-artifacts/service.js';
+import { S3ArtifactObjectStore } from './modules/release-artifacts/s3-object-store.js';
+import { loadArtifactAttestationVerifier } from './modules/release-artifacts/attestation.js';
 import { BackupStatusService } from './modules/backup-status/service.js';
 import { AlertDeliveryService } from './modules/alert-delivery/service.js';
 import { AuditService } from './modules/audit/service.js';
@@ -79,7 +81,23 @@ export async function createCommercialControlRuntime(
       store,
       controlSecret: config.tokenSecret!,
     });
-    const releaseArtifacts = new ReleaseArtifactService({ store, signer });
+    const objectStore = config.artifactStorage
+      ? new S3ArtifactObjectStore(config.artifactStorage)
+      : null;
+    const attestationVerifier = await loadArtifactAttestationVerifier(
+      config.artifactAttestationKeysFile,
+    );
+    const releaseArtifacts = new ReleaseArtifactService({
+      store,
+      signer,
+      objectStore,
+      attestationVerifier,
+      publicBaseUrl: config.publicBaseUrl,
+      uploadTtlSeconds: config.artifactStorage?.uploadTtlSeconds,
+      downloadTtlSeconds: config.artifactStorage?.downloadTtlSeconds,
+      storageRequired: config.artifactStorageRequired,
+      objectLockRequired: config.artifactStorage?.objectLockRequired,
+    });
     const backupStatus = new BackupStatusService({
       reportDirectory: config.backupReportDirectory,
       maximumAgeHours: config.backupStatusMaximumAgeHours,

@@ -53,8 +53,15 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Independent update distributions for Otto, Otto Green, and future private editions
 - Draft, canary, stable, and required release policy with deterministic deployment cohorts
 - SHA-256-pinned full and incremental manifests with short-lived Ed25519 policy envelopes
+- Managed S3/MinIO release-artifact uploads with checksum-bound presigned requests,
+  server-side encryption, optional KMS, Object Lock retention, version evidence,
+  stable Control download URLs, and optional CDN delivery
+- Isolated release-runner attestations for timestamped Windows Authenticode,
+  notarized Apple Developer ID, and signed Linux/enterprise packages; Control
+  stores only trusted Ed25519 attestation public keys
 - Immutable release-artifact records binding distribution, release, source commit,
-  platform, URL, size, and SHA-256 into independently signed Ed25519 envelopes
+  platform, object version, size, SHA-256, and code-signing evidence into
+  independently signed Ed25519 envelopes
 - Fail-closed activation and rollback gates requiring a signed installer plus every
   referenced manifest; artifact revocation atomically pauses an active release
 - Audited activation, pause, and rollback to the previous release policy
@@ -88,6 +95,95 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
   customer/deployment/License onboarding, renewal, seat management, immutable
   lifecycle history, dual-control review and execution, backup readiness, alert
   retry, strict CSP, and tab-scoped sessions
+
+## Managed release artifact distribution
+
+Production releases can use a fail-closed upload and delivery pipeline instead
+of registering an arbitrary download URL. The binary bytes live in an
+S3-compatible object store or MinIO; PostgreSQL stores the immutable release
+binding, object version, storage controls, and platform-signing evidence.
+
+The sequence is:
+
+1. A release operator creates a draft release and requests an upload through
+   `POST /v1/admin/update-releases/:releaseId/artifact-uploads`.
+2. Control signs a short-lived upload ticket and returns a presigned `PUT` URL
+   plus the exact checksum, content length, encryption, and Object Lock headers.
+3. The release runner uploads those exact bytes and verifies their real platform
+   signature with Windows, macOS, or Linux-native tools.
+4. The runner signs the verification evidence with its separate Ed25519
+   attestation key. `POST .../artifact-uploads/complete` re-reads the object and
+   verifies the ticket, SHA-256, size, encryption, retention, object version, and
+   trusted platform evidence before one atomic PostgreSQL commit.
+5. Release activation revalidates the object and evidence. Revocation pauses an
+   active release and the stable download URL immediately stops resolving.
+
+Clients download from
+`GET /v1/release-artifacts/:artifactId/download`. Control returns a short-lived
+S3 redirect without recording the temporary URL. When
+`CONTROL_ARTIFACT_CDN_BASE_URL` is set, it must be an HTTPS origin serving only
+the immutable object-key namespace; otherwise leave it unset and use signed S3
+downloads.
+
+Create the attestation key on an isolated release runner, not on the Control
+host:
+
+```bash
+openssl genpkey -algorithm ED25519 -out release-attestation-private.pem
+openssl pkey -in release-attestation-private.pem -pubout \
+  -out release-attestation-public.pem
+```
+
+Copy only the public key to the Control secrets directory. Start from
+`deploy/artifact-attestation-keys.example.json`, keep the public-key reference
+relative to that manifest, and set
+`CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE=/run/otto-secrets/artifact-attestation-keys.json`.
+The private attestation key and platform code-signing credentials never belong
+on Control.
+
+After the installer or server archive has been signed by the platform-specific
+publisher key, produce the bound evidence on the matching release runner:
+
+```bash
+npm run attest:release -- \
+  --file ./otto-enterprise.tar.gz \
+  --release-id rel_example1234567890 \
+  --release-version 1.9.11 \
+  --source-commit 0123456789abcdef0123456789abcdef01234567 \
+  --kind enterprise_server \
+  --platform linux-x64 \
+  --linux-signature ./otto-enterprise.tar.gz.sig \
+  --linux-public-key ./package-signing-public.pem \
+  --attestation-key-id release-runner-2026-01 \
+  --attestation-private-key-file ./release-attestation-private.pem \
+  --output ./artifact-attestation.json
+```
+
+For `windows_installer`, the command must run on Windows and rejects a missing
+or untimestamped Authenticode signature. For `macos_dmg`, it must run on macOS
+and requires `codesign`, Gatekeeper assessment, and a stapled notarization
+ticket. Linux and enterprise archives require an Ed25519 detached package
+signature. Attestations older than 30 days or bound to another release, commit,
+platform, digest, or size are rejected.
+
+Configure managed storage with the following settings. Credentials are accepted
+only through files. Production endpoints and CDN origins must use HTTPS.
+
+| Setting | Purpose |
+| --- | --- |
+| `CONTROL_ARTIFACT_STORAGE_REQUIRED` | Set `true` to reject metadata-only legacy artifacts at activation. |
+| `CONTROL_ARTIFACT_S3_ENDPOINT` / `CONTROL_ARTIFACT_S3_BUCKET` | S3 or MinIO origin and an Object-Lock-capable bucket. |
+| `CONTROL_ARTIFACT_S3_ACCESS_KEY_ID_FILE` / `CONTROL_ARTIFACT_S3_SECRET_ACCESS_KEY_FILE` | Least-privilege file-backed upload, HEAD, and download credentials. |
+| `CONTROL_ARTIFACT_S3_ENCRYPTION` | `AES256` or `aws:kms`; KMS also requires `CONTROL_ARTIFACT_S3_KMS_KEY_ID`. |
+| `CONTROL_ARTIFACT_S3_OBJECT_LOCK_REQUIRED` | Requires active `GOVERNANCE` or `COMPLIANCE` retention; defaults to `true` in production. |
+| `CONTROL_ARTIFACT_S3_RETENTION_DAYS` | Retention assigned to new objects, default 365 days. |
+| `CONTROL_ARTIFACT_UPLOAD_TTL_SECONDS` / `CONTROL_ARTIFACT_DOWNLOAD_TTL_SECONDS` | Bounded presigned URL lifetimes. |
+| `CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE` | Trusted release-runner public-key manifest. Required whenever managed storage is enabled. |
+
+The bucket must have versioning and Object Lock enabled when it is created;
+these properties cannot be repaired by Control after the fact. Use a dedicated
+storage identity restricted to the configured bucket and prefix. Control never
+accepts object-store credentials in an API request or audit event.
 
 ## Development
 
@@ -427,7 +523,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.21.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.22.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |

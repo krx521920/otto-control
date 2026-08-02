@@ -21,6 +21,7 @@ import type {
   ReleaseArtifactPlatform,
   ReleaseArtifactState,
 } from '../contracts/release-artifact.js';
+import type { SignedArtifactCodeSigningEvidence } from '../contracts/artifact-storage.js';
 import type {
   BillingRateRecord,
   CreditAccountRecord,
@@ -261,6 +262,28 @@ export interface ReleaseArtifactRevocationResult {
   releasePaused: boolean;
 }
 
+export interface ReleaseArtifactEvidenceRecord {
+  artifactId: string;
+  objectKey: string;
+  objectVersionId: string | null;
+  verifiedAt: Date;
+  serverSideEncryption: string | null;
+  objectLockMode: string | null;
+  objectLockRetainUntil: Date | null;
+  codeSigning: SignedArtifactCodeSigningEvidence | null;
+  createdAt: Date;
+}
+
+export interface CreateManagedReleaseArtifactInput {
+  artifact: CreateReleaseArtifactRecordInput;
+  evidence: Omit<ReleaseArtifactEvidenceRecord, 'artifactId' | 'createdAt'>;
+}
+
+export interface ManagedReleaseArtifactRecord {
+  artifact: ReleaseArtifactRecord;
+  evidence: ReleaseArtifactEvidenceRecord;
+}
+
 export interface DeploymentUpdateAssignmentRecord {
   deploymentId: string;
   distributionId: string;
@@ -433,7 +456,11 @@ export interface ControlStore {
   rollbackUpdateRelease(id: string, updatedAt: Date): Promise<UpdateReleaseTransition | null>;
   getActiveUpdateReleases(distributionId: string): Promise<UpdateReleaseRecord[]>;
   createReleaseArtifact(input: CreateReleaseArtifactRecordInput): Promise<ReleaseArtifactRecord>;
+  createManagedReleaseArtifact(
+    input: CreateManagedReleaseArtifactInput,
+  ): Promise<ManagedReleaseArtifactRecord>;
   getReleaseArtifact(id: string): Promise<ReleaseArtifactRecord | null>;
+  getReleaseArtifactEvidence(id: string): Promise<ReleaseArtifactEvidenceRecord | null>;
   listReleaseArtifacts(releaseId: string): Promise<ReleaseArtifactRecord[]>;
   revokeReleaseArtifact(input: {
     id: string;

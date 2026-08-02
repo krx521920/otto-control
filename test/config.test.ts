@@ -34,6 +34,9 @@ describe('control configuration', () => {
       capacitySampleIntervalMs: 60_000,
       sloAvailabilityTarget: 0.999,
       sloLatencyTargetMs: 500,
+      artifactStorage: null,
+      artifactStorageRequired: false,
+      artifactAttestationKeysFile: null,
     });
   });
 
@@ -111,6 +114,56 @@ describe('control configuration', () => {
       CONTROL_PUBLIC_BASE_URL: 'https://control.example.test/',
       CONTROL_METRICS_TOKEN: 'm'.repeat(48),
     }).publicBaseUrl).toBe('https://control.example.test');
+  });
+
+  it('loads managed S3 artifact storage only from file-backed credentials', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'otto-artifact-storage-config-'));
+    try {
+      const accessKeyFile = join(directory, 'access-key');
+      const secretKeyFile = join(directory, 'secret-key');
+      writeFileSync(accessKeyFile, 'fixture-access-key');
+      writeFileSync(secretKeyFile, 'fixture-secret-key');
+      expect(() => loadControlConfig({
+        CONTROL_ARTIFACT_S3_ENDPOINT: 'http://127.0.0.1:9000',
+        CONTROL_ARTIFACT_S3_BUCKET: 'otto-release-fixtures',
+        CONTROL_ARTIFACT_S3_ACCESS_KEY_ID_FILE: accessKeyFile,
+        CONTROL_ARTIFACT_S3_SECRET_ACCESS_KEY_FILE: secretKeyFile,
+      })).toThrow('CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE is required');
+      const config = loadControlConfig({
+        CONTROL_ARTIFACT_STORAGE_REQUIRED: 'true',
+        CONTROL_ARTIFACT_S3_ENDPOINT: 'http://127.0.0.1:9000',
+        CONTROL_ARTIFACT_S3_BUCKET: 'otto-release-fixtures',
+        CONTROL_ARTIFACT_S3_ACCESS_KEY_ID_FILE: accessKeyFile,
+        CONTROL_ARTIFACT_S3_SECRET_ACCESS_KEY_FILE: secretKeyFile,
+        CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE: join(directory, 'trusted-keys.json'),
+      });
+
+      expect(config.artifactStorageRequired).toBe(true);
+      expect(config.artifactStorage).toMatchObject({
+        endpoint: 'http://127.0.0.1:9000',
+        bucket: 'otto-release-fixtures',
+        accessKeyId: 'fixture-access-key',
+        secretAccessKey: 'fixture-secret-key',
+        objectLockRequired: false,
+        uploadTtlSeconds: 900,
+        downloadTtlSeconds: 300,
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when required artifact storage is incomplete or insecure', () => {
+    expect(() => loadControlConfig({
+      CONTROL_ARTIFACT_STORAGE_REQUIRED: 'true',
+    })).toThrow('CONTROL_ARTIFACT_S3_ENDPOINT is missing');
+
+    expect(() => loadControlConfig({
+      NODE_ENV: 'production',
+      CONTROL_METRICS_TOKEN: 'm'.repeat(48),
+      CONTROL_ARTIFACT_S3_ENDPOINT: 'http://storage.example.test',
+      CONTROL_ARTIFACT_S3_BUCKET: 'otto-releases',
+    })).toThrow('CONTROL_ARTIFACT_S3_ENDPOINT must be a credential-free HTTPS origin');
   });
 
   it('fails closed without a metrics credential in production', () => {
