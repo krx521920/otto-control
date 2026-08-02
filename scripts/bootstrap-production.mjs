@@ -135,7 +135,7 @@ function main() {
     'CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token',
     'CONTROL_TOKEN_SECRET_FILE=/run/secrets/control_token_secret',
     'CONTROL_METRICS_TOKEN_FILE=/run/secrets/control_metrics_token',
-    'CONTROL_SIGNER_KEYRING_FILE=/run/otto-secrets/control_signer_keyring.json',
+    'CONTROL_SIGNER_KEYRING_FILE=/run/secrets/control_signer_keyring.json',
     'CONTROL_LEASE_DURATION_MS=600000',
     'CONTROL_TELEMETRY_RETENTION_DAYS=90',
     'CONTROL_UPDATE_POLICY_DURATION_MS=300000',

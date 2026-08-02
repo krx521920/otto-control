@@ -65,7 +65,7 @@ describe('production bootstrap', () => {
       expect(environment).toContain('ETCD_IMAGE=quay.io/coreos/etcd:v3.5.21');
       expect(environment).toContain('CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token');
       expect(environment).toContain(
-        'CONTROL_SIGNER_KEYRING_FILE=/run/otto-secrets/control_signer_keyring.json',
+        'CONTROL_SIGNER_KEYRING_FILE=/run/secrets/control_signer_keyring.json',
       );
       expect(environment).toContain('CONTROL_BACKUP_OFFSITE_REQUIRED=false');
       expect(environment).toContain(

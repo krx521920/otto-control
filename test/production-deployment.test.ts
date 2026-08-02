@@ -118,8 +118,11 @@ describe('production deployment assets', () => {
     expect(compose).toContain('cap_drop:');
     expect(compose).toContain('- source: control_signer_private_key');
     expect(compose).toContain('target: control_signer_private_key.pem');
+    expect(compose).toContain('- source: control_signer_keyring');
+    expect(compose).toContain('target: control_signer_keyring.json');
     expect(compose).toContain('file: ./secrets/control_signer_private_key.pem');
-    expect(compose).toContain('./secrets:/run/otto-secrets:ro');
+    expect(compose).toContain('file: ./secrets/control_signer_keyring.json');
+    expect(compose).not.toContain('./secrets:/run/otto-secrets:ro');
     expect(compose).toContain('- alert_webhook_secret');
     expect(compose).toContain('file: ./secrets/alert_webhook_secret');
     expect(compose).toContain('- audit_anchor_token');
@@ -219,6 +222,7 @@ describe('production deployment assets', () => {
     expect(control).toContain('CONTROL_SIGNER_KEYRING_FILE');
     expect(control).toContain('FEDERATION_ADMIN_TOKEN_FILE');
     expect(control).toContain('FEDERATION_DATABASE_PASSWORD_FILE');
+    expect(control).toContain('dist/federation-server.js');
     expect(compose).toContain('exec gosu postgres tail -f /dev/null');
     expect(compose).toContain('DAC_READ_SEARCH');
     expect(pitr).toContain('--user postgres postgres-pitr-drill');
