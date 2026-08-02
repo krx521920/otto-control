@@ -257,6 +257,9 @@ services:
 
   postgres-tools:
     image: ${POSTGRES_HA_IMAGE:-otto-control-postgres-ha:local}
+    build:
+      context: .
+      dockerfile: deploy/postgres-ha/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres-router:

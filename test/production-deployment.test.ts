@@ -103,6 +103,11 @@ describe('production deployment assets', () => {
     expect(compose).toContain('  postgres-3:');
     expect(compose).toContain('  postgres-router:');
     expect(compose).toContain('dockerfile: deploy/postgres-ha/Dockerfile');
+    const postgresTools = compose.slice(
+      compose.indexOf('  postgres-tools:'),
+      compose.indexOf('  postgres-pitr-drill:'),
+    );
+    expect(postgresTools).toContain('dockerfile: deploy/postgres-ha/Dockerfile');
     expect(compose).toContain('postgres_superuser_password');
     expect(compose).toContain('postgres_replication_password');
     expect(compose).toContain('pgbackrest_cipher_pass');
