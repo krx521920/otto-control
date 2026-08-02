@@ -49,6 +49,9 @@ FEDERATION_METRICS_TOKEN_FILE
 FEDERATION_DATABASE_PASSWORD_FILE'
     ;;
   *)
+    if [ -e /run/secrets/control_signer_private_key.pem ]; then
+      stage_file /run/secrets/control_signer_private_key.pem
+    fi
     secret_variables='CONTROL_ADMIN_TOKEN_FILE
 CONTROL_TOKEN_SECRET_FILE
 CONTROL_METRICS_TOKEN_FILE
