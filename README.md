@@ -119,6 +119,9 @@ Otto-specific. It accepts only E2EE ciphertext and never receives chat, file,
 or A2A context decryption keys. See
 [`docs/federation-protocol.zh-CN.md`](docs/federation-protocol.zh-CN.md) and
 [`docs/otto-private-server-federation-adapter.zh-CN.md`](docs/otto-private-server-federation-adapter.zh-CN.md).
+Production CI starts all three Federation instances and runs
+`scripts/smoke-federation.mjs` across them to prove signed ciphertext relay,
+cross-instance inbox leasing, signature verification, idempotency, and acknowledgement.
 
 ## Managed release artifact distribution
 

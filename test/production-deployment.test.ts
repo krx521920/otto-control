@@ -19,6 +19,9 @@ describe('production deployment assets', () => {
     expect(workflow).toContain('POSTGRES_DB: otto_control_test');
     expect(workflow).toContain('CONTROL_REQUIRE_POSTGRES_TEST: "true"');
     expect(workflow).toContain('npm run test:postgres');
+    expect(workflow).toContain('Prove all Federation instances and encrypted relay are ready');
+    expect(workflow).toContain('federation-a federation-b federation-c');
+    expect(workflow).toContain('scripts/smoke-federation.mjs');
     expect(workflow).toContain('git diff --check');
     expect(workflow).toContain('needs: [quality, postgres-integration]');
     expect(workflow).toContain('docker build --tag otto-control:ci .');
@@ -139,6 +142,12 @@ describe('production deployment assets', () => {
     expect(compose).toContain('FEDERATION_ADMIN_TOKEN_FILE: /run/secrets/federation_admin_token');
     expect(compose).toContain('command: ["node", "dist/federation-server.js"]');
     expect(compose).not.toMatch(/POSTGRES_PASSWORD:\s*[^\n]/u);
+    const smoke = repositoryFile('scripts/smoke-federation.mjs');
+    expect(smoke).toContain('FederationClient');
+    expect(smoke).toContain('verifyFederationSignature');
+    expect(smoke).toContain('http://federation-b:7790');
+    expect(smoke).toContain('http://federation-c:7790');
+    expect(smoke).not.toContain('BEGIN PRIVATE KEY');
   });
 
   it('routes only to the Patroni primary and removes unhealthy control instances', () => {

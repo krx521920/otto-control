@@ -131,11 +131,12 @@ jobs:
       - name: Bootstrap disposable HA identity
         run: npm run bootstrap:production -- --public-url https://control.example.test
 
-      - name: Start database quorum and three Control instances
+      - name: Start database quorum, Control, and Federation instances
         run: |
           trap 'docker compose -f compose.production.yaml --env-file .env.production logs --no-color' ERR
           docker compose -f compose.production.yaml --env-file .env.production \
-            up --detach --build --wait --wait-timeout 300 control-a control-b control-c
+            up --detach --build --wait --wait-timeout 300 \
+            control-a control-b control-c federation-a federation-b federation-c
 
       - name: Prove all Control instances are ready
         run: |
@@ -144,6 +145,16 @@ jobs:
               exec -T "$instance" node -e \
               "fetch('http://127.0.0.1:7788/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
           done
+
+      - name: Prove all Federation instances and encrypted relay are ready
+        run: |
+          for instance in federation-a federation-b federation-c; do
+            docker compose -f compose.production.yaml --env-file .env.production \
+              exec -T "$instance" node -e \
+              "fetch('http://127.0.0.1:7790/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+          done
+          docker compose -f compose.production.yaml --env-file .env.production \
+            exec -T federation-a node --input-type=module < scripts/smoke-federation.mjs
 
       - name: Exercise encrypted physical backup and automatic failover
         run: |
