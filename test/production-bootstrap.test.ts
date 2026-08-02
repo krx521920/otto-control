@@ -87,6 +87,7 @@ describe('production bootstrap', () => {
       expect(environment).toContain('CONTROL_BACKUP_S3_ADDRESSING_STYLE=path');
       expect(environment).toContain('CONTROL_PITR_REPORT_RETENTION_DAYS=180');
       expect(environment).toContain('CONTROL_PITR_MAX_BACKUP_AGE_HOURS=24');
+      expect(environment).toContain('FEDERATION_MAX_CLAIM_BYTES=4194304');
       expect(environment).not.toMatch(/CONTROL_BACKUP_S3_SECRET_ACCESS_KEY=[^\n]+/u);
       expect(environment).not.toContain(adminToken);
       expect(environment).not.toContain(databasePassword);

@@ -561,4 +561,127 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       await store.close();
     }
   });
+
+  it('keeps federation nonce, grant, and inbox capacity changes atomic under concurrency', async () => {
+    await resetDatabase(DATABASE_URL!);
+    const store = await PostgresFederationStore.connect({
+      connectionString: DATABASE_URL!,
+      ssl: false,
+    });
+    try {
+      const federation = new FederationService({ store, now: () => NOW });
+      const sender = signer();
+      const recipient = signer();
+      for (const [id, origin, key] of [
+        ['deployment_atomic_a', 'https://atomic-a.test', sender],
+        ['deployment_atomic_b', 'https://atomic-b.test', recipient],
+      ] as const) {
+        await federation.registerDeployment({
+          id,
+          displayName: id,
+          origin,
+          capabilities: ['federation.v1', 'chat.e2ee', 'a2a.e2ee'],
+          maxPendingMessages: 100,
+        });
+        await federation.registerKey(id, { publicKeyPem: key.publicKeyPem });
+      }
+
+      const retryEnvelope = {
+        version: 1 as const,
+        messageId: 'fmsg_atomic_retry_2026',
+        type: 'a2a.request' as const,
+        senderDeploymentId: 'deployment_atomic_a',
+        recipientDeploymentId: 'deployment_atomic_b',
+        issuedAt: new Date(NOW).toISOString(),
+        expiresAt: new Date(NOW + 60_000).toISOString(),
+        nonce: 'nonce_atomic_retry_2026',
+        contentType: 'application/otto-e2ee+json' as const,
+        ciphertext: 'YXRvbWljLXJldHJ5',
+        routing: {
+          conversationId: 'conversation_atomic',
+          senderPrincipalId: 'account_sender',
+          recipientPrincipalId: 'account_recipient',
+          a2aGrantId: 'fgrant_atomic_retry_2026',
+          a2aScope: 'worklog.read',
+        },
+      };
+      const signedRetryEnvelope = {
+        envelope: retryEnvelope,
+        signingKeyId: sender.keyId,
+        signature: await sender.sign(retryEnvelope),
+      };
+      await expect(federation.enqueue(signedRetryEnvelope)).rejects.toThrow('A2A grant is invalid');
+
+      const grantRequest = {
+        version: 1 as const,
+        deploymentId: 'deployment_atomic_b',
+        issuedAt: new Date(NOW).toISOString(),
+        expiresAt: new Date(NOW + 60_000).toISOString(),
+        nonce: 'nonce_atomic_grant_2026',
+        grantId: 'fgrant_atomic_retry_2026',
+        requesterDeploymentId: 'deployment_atomic_a',
+        ownerPrincipalId: 'account_recipient',
+        requesterPrincipalId: 'account_sender',
+        scopes: ['worklog.read'],
+        maxUses: 1,
+        grantExpiresAt: new Date(NOW + 10 * 60_000).toISOString(),
+      };
+      await federation.createA2aGrant({
+        request: grantRequest,
+        signingKeyId: recipient.keyId,
+        signature: await recipient.sign(grantRequest),
+      });
+      await expect(federation.enqueue(signedRetryEnvelope)).resolves.toMatchObject({ duplicate: false });
+
+      const chatEnvelopes = await Promise.all(Array.from({ length: 100 }, async (_, index) => {
+        const envelope = {
+          version: 1 as const,
+          messageId: `fmsg_capacity_${index}_2026`,
+          type: 'chat.message' as const,
+          senderDeploymentId: 'deployment_atomic_a',
+          recipientDeploymentId: 'deployment_atomic_b',
+          issuedAt: new Date(NOW).toISOString(),
+          expiresAt: new Date(NOW + 60_000).toISOString(),
+          nonce: `nonce_capacity_${index}_2026`,
+          contentType: 'application/otto-e2ee+json' as const,
+          ciphertext: Buffer.from(`ciphertext-${index}`).toString('base64url'),
+          routing: {
+            conversationId: 'conversation_capacity',
+            senderPrincipalId: 'account_sender',
+            recipientPrincipalId: 'account_recipient',
+          },
+        };
+        return {
+          envelope,
+          signingKeyId: sender.keyId,
+          signature: await sender.sign(envelope),
+        };
+      }));
+      const results = await Promise.allSettled(chatEnvelopes.map((envelope) => federation.enqueue(envelope)));
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(99);
+      const rejectedIndex = results.findIndex((result) => result.status === 'rejected');
+      expect(rejectedIndex).toBeGreaterThanOrEqual(0);
+
+      const raw = new Pool({ connectionString: DATABASE_URL!, ssl: false, max: 1 });
+      try {
+        const pending = await raw.query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count FROM control_federation_messages
+           WHERE recipient_deployment_id = $1 AND status IN ('pending', 'claimed')`,
+          ['deployment_atomic_b'],
+        );
+        expect(pending.rows[0]?.count).toBe('100');
+        await raw.query(
+          `UPDATE control_federation_messages SET status = 'delivered', delivered_at = $2
+           WHERE message_id = $1`,
+          ['fmsg_atomic_retry_2026', new Date(NOW)],
+        );
+      } finally {
+        await raw.end();
+      }
+
+      await expect(federation.enqueue(chatEnvelopes[rejectedIndex]!)).resolves.toMatchObject({ duplicate: false });
+    } finally {
+      await store.close();
+    }
+  });
 });

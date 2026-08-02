@@ -123,7 +123,10 @@ await jsonRequest(`${acknowledgeUrl}/v1/federation/inbox/ack`, {
     claimToken: claimed.claimToken,
   })),
 }, 200);
-const status = await jsonRequest(`${acknowledgeUrl}/v1/federation/status`, { method: 'GET' }, 200);
+const status = await jsonRequest(`${acknowledgeUrl}/v1/admin/federation/status`, {
+  method: 'GET',
+  headers: { authorization: `Bearer ${adminToken}` },
+}, 200);
 if ((status.queue?.delivered || 0) < 1) throw new Error('federation acknowledgement was not committed');
 
 process.stdout.write(`Federation smoke test passed for ${senderId} -> ${recipientId}.\n`);

@@ -103,6 +103,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Three-instance federation production topology behind Caddy, authenticated
   Prometheus metrics, ciphertext-only payload storage, and a documented Otto
   private-server adapter contract
+- Atomic replay protection and recipient capacity admission, bounded inbox
+  response batches, and historical verification of non-revoked rotating keys
 
 ## Federation gateway
 
@@ -1127,6 +1129,7 @@ POST /v1/federation/inbox/ack
 POST /v1/federation/a2a/grants
 POST /v1/federation/a2a/grants/revoke
 GET  /v1/admin/federation/deployments
+GET  /v1/admin/federation/status
 POST /v1/admin/federation/deployments
 PATCH /v1/admin/federation/deployments/:deploymentId/status
 ```

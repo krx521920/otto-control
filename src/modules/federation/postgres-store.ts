@@ -296,6 +296,18 @@ export class PostgresFederationStore implements FederationStore {
     return result.rows[0] ? keyFromRow(result.rows[0]) : null;
   }
 
+  async getVerificationKey(
+    deploymentId: string,
+    keyId: string,
+  ): Promise<FederationDeploymentKeyRecord | null> {
+    const result = await this.#pool.query<KeyRow>(
+      `SELECT * FROM control_federation_keys
+       WHERE deployment_id = $1 AND key_id = $2 AND status = 'active'`,
+      [deploymentId, keyId],
+    );
+    return result.rows[0] ? keyFromRow(result.rows[0]) : null;
+  }
+
   async consumeNonce(deploymentId: string, nonce: string, expiresAt: Date, now: Date): Promise<boolean> {
     await this.#pool.query('DELETE FROM control_federation_nonces WHERE expires_at <= $1', [now]);
     const result = await this.#pool.query(
@@ -389,19 +401,32 @@ export class PostgresFederationStore implements FederationStore {
         return { message, duplicate: true };
       }
 
-      const capacity = await client.query<{ max_pending_messages: number; pending: string }>(
-        `SELECT deployments.max_pending_messages,
-          COUNT(messages.message_id) FILTER (WHERE messages.status IN ('pending', 'claimed'))::text AS pending
-         FROM control_federation_deployments deployments
-         LEFT JOIN control_federation_messages messages
-           ON messages.recipient_deployment_id = deployments.id
-         WHERE deployments.id = $1
-         GROUP BY deployments.id`,
+      // Serialize capacity checks per recipient so concurrent gateway instances
+      // cannot collectively exceed the deployment's pending-message limit.
+      const recipient = await client.query<{ max_pending_messages: number }>(
+        `SELECT max_pending_messages FROM control_federation_deployments
+         WHERE id = $1 FOR UPDATE`,
         [envelope.recipientDeploymentId],
       );
-      const row = capacity.rows[0];
-      if (!row || Number(row.pending) >= row.max_pending_messages) {
+      const capacity = await client.query<{ pending: string }>(
+        `SELECT COUNT(*)::text AS pending FROM control_federation_messages
+         WHERE recipient_deployment_id = $1 AND status IN ('pending', 'claimed')`,
+        [envelope.recipientDeploymentId],
+      );
+      if (
+        !recipient.rows[0]
+        || Number(capacity.rows[0]?.pending ?? 0) >= recipient.rows[0].max_pending_messages
+      ) {
         throw conflict('recipient federation inbox is full');
+      }
+
+      const nonce = await client.query(
+        `INSERT INTO control_federation_nonces (deployment_id, nonce, expires_at, created_at)
+         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+        [envelope.senderDeploymentId, envelope.nonce, envelope.expiresAt, input.now],
+      );
+      if ((nonce.rowCount ?? 0) === 0) {
+        throw conflict('federation envelope nonce has already been used');
       }
 
       if (envelope.type === 'a2a.request') {
@@ -486,6 +511,7 @@ export class PostgresFederationStore implements FederationStore {
   async claimMessages(input: {
     recipientDeploymentId: string;
     limit: number;
+    maximumBytes: number;
     claimTtlMs: number;
     now: Date;
   }): Promise<FederationClaimedMessage[]> {
@@ -500,7 +526,9 @@ export class PostgresFederationStore implements FederationStore {
         [input.recipientDeploymentId, input.now, input.limit],
       );
       const output: FederationClaimedMessage[] = [];
+      let claimedBytes = 0;
       for (const row of candidates.rows) {
+        if (output.length > 0 && claimedBytes + row.size_bytes > input.maximumBytes) break;
         const claimToken = randomBytes(32).toString('base64url');
         const updated = await client.query<MessageRow>(
           `UPDATE control_federation_messages
@@ -510,6 +538,7 @@ export class PostgresFederationStore implements FederationStore {
           [row.message_id, claimedUntil, claimTokenHash(claimToken)],
         );
         output.push({ message: messageFromRow(updated.rows[0]!), claimToken });
+        claimedBytes += row.size_bytes;
       }
       return output;
     });

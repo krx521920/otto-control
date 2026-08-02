@@ -101,6 +101,8 @@ pending -> claimed -> delivered
 messageId、未过期租约和 claim token。消费者必须在本地成功持久化密文后再 ack。
 已送达和已过期密文默认保留 7 天后自动清除，可用
 `FEDERATION_DELIVERED_RETENTION_MS` 在 1 小时至 90 天之间调整。
+每次领取还受 `FEDERATION_MAX_CLAIM_BYTES` 总字节预算约束，默认 4 MiB，避免积压的大消息
+生成超大 HTTP 响应。该值不得小于单条密文上限 `FEDERATION_MAX_CIPHERTEXT_BYTES`。
 
 ## 6. A2A 一次性授权
 
@@ -138,6 +140,7 @@ POST /v1/federation/a2a/grants/revoke
 运维接口使用文件挂载的 `FEDERATION_ADMIN_TOKEN`，只允许 Control 后端或隔离运维网络调用：
 
 ```text
+GET    /v1/admin/federation/status
 GET    /v1/admin/federation/deployments
 POST   /v1/admin/federation/deployments
 PATCH  /v1/admin/federation/deployments/:deploymentId/status

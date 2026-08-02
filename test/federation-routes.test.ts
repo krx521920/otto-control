@@ -29,6 +29,7 @@ const config: Readonly<FederationConfig> = {
   adminToken: ADMIN_TOKEN,
   metricsToken: METRICS_TOKEN,
   maximumCiphertextBytes: 1024 * 1024,
+  maximumClaimBytes: 4 * 1024 * 1024,
   maximumEnvelopeTtlMs: 7 * 24 * 60 * 60_000,
   maximumClockSkewMs: 5 * 60_000,
   claimTtlMs: 60_000,
@@ -114,7 +115,7 @@ describe('Otto federation gateway', () => {
     store = new MemoryFederationStore();
     deploymentA = signer();
     deploymentB = signer();
-    const service = new FederationService({ store, now: () => now });
+    const service = new FederationService({ store, now: () => now, maximumClaimBytes: 30 });
     app = await buildFederationApp({ config, service, logger: false });
     for (const [id, displayName, origin, key] of [
       ['deployment_a', 'Tenant A', 'https://a.private.test', deploymentA],
@@ -201,6 +202,33 @@ describe('Otto federation gateway', () => {
       method: 'POST', url: '/v1/federation/envelopes', payload: tampered,
     })).statusCode).toBe(401);
 
+    const extendedEnvelope = { ...valid.envelope, unsupportedExtension: 'poison' };
+    expect((await app.inject({
+      method: 'POST',
+      url: '/v1/federation/envelopes',
+      payload: {
+        envelope: extendedEnvelope,
+        signingKeyId: deploymentA.keyId,
+        signature: await deploymentA.sign(extendedEnvelope),
+      },
+    })).statusCode).toBe(400);
+
+    const nonCanonicalEnvelope = {
+      ...valid.envelope,
+      messageId: 'fmsg_noncanonical_timestamp',
+      nonce: 'nonce_noncanonical_2026',
+      issuedAt: valid.envelope.issuedAt.replace('.000Z', 'Z'),
+    };
+    expect((await app.inject({
+      method: 'POST',
+      url: '/v1/federation/envelopes',
+      payload: {
+        envelope: nonCanonicalEnvelope,
+        signingKeyId: deploymentA.keyId,
+        signature: await deploymentA.sign(nonCanonicalEnvelope),
+      },
+    })).statusCode).toBe(400);
+
     const replay = await signedRequest(
       deploymentB,
       'deployment_b',
@@ -277,6 +305,49 @@ describe('Otto federation gateway', () => {
     expect(reused.statusCode).toBe(409);
   });
 
+  it('does not consume an envelope nonce when atomic enqueue validation fails', async () => {
+    const retryable = await signedEnvelope({
+      deploymentSigner: deploymentA,
+      senderDeploymentId: 'deployment_a',
+      recipientDeploymentId: 'deployment_b',
+      now,
+    });
+    store.deployments.get('deployment_b')!.maxPendingMessages = 0;
+    expect((await app.inject({
+      method: 'POST', url: '/v1/federation/envelopes', payload: retryable,
+    })).statusCode).toBe(409);
+
+    store.deployments.get('deployment_b')!.maxPendingMessages = 100;
+    const retried = await app.inject({
+      method: 'POST', url: '/v1/federation/envelopes', payload: retryable,
+    });
+    expect(retried.statusCode).toBe(202);
+    expect(retried.json()).toMatchObject({ accepted: true, duplicate: false });
+  });
+
+  it('bounds each inbox claim by ciphertext bytes as well as message count', async () => {
+    for (let index = 0; index < 2; index += 1) {
+      expect((await app.inject({
+        method: 'POST',
+        url: '/v1/federation/envelopes',
+        payload: await signedEnvelope({
+          deploymentSigner: deploymentA,
+          senderDeploymentId: 'deployment_a',
+          recipientDeploymentId: 'deployment_b',
+          now,
+          ciphertext: 'base64url-encrypted-payload',
+        }),
+      })).statusCode).toBe(202);
+    }
+    const inbox = await app.inject({
+      method: 'POST',
+      url: '/v1/federation/inbox/claim',
+      payload: await signedRequest(deploymentB, 'deployment_b', now, { limit: 20 }),
+    });
+    expect(inbox.statusCode).toBe(200);
+    expect(inbox.json().messages).toHaveLength(1);
+  });
+
   it('atomically consumes scoped A2A grants and only accepts a matching response', async () => {
     const grantRequest = await signedRequest(deploymentB, 'deployment_b', now, {
       grantId: 'fgrant_review_2026',
@@ -345,6 +416,14 @@ describe('Otto federation gateway', () => {
       protocolVersion: 1,
       privacy: { payloadStorage: 'ciphertext-only', gatewayCanDecrypt: false },
     });
+    expect(status.json()).not.toHaveProperty('queue');
+    const adminStatus = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/federation/status',
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+    });
+    expect(adminStatus.statusCode).toBe(200);
+    expect(adminStatus.json().queue).toEqual({ pending: 0, claimed: 0, delivered: 0, expired: 0 });
     expect((await app.inject({ method: 'GET', url: '/metrics' })).statusCode).toBe(404);
     const metrics = await app.inject({
       method: 'GET', url: '/metrics', headers: { authorization: `Bearer ${METRICS_TOKEN}` },
@@ -406,4 +485,60 @@ describe('Otto federation gateway', () => {
     await recipient.acknowledge(sent.messageId, claimed[0]!.claimToken);
     expect((await store.getMessage(sent.messageId))?.status).toBe('delivered');
   });
+
+  it('keeps expired non-revoked keys available only for messages signed during their validity', async () => {
+    const expiresAt = new Date(now + 5 * 60_000).toISOString();
+    expect((await app.inject({
+      method: 'POST',
+      url: '/v1/admin/federation/deployments/deployment_a/keys',
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+      payload: { publicKeyPem: deploymentA.publicKeyPem, expiresAt },
+    })).statusCode).toBe(201);
+
+    const sender = new FederationClient({
+      baseUrl: 'http://127.0.0.1:7790',
+      deploymentId: 'deployment_a',
+      signer: deploymentA,
+      fetch: injectedFetch(app),
+      now: () => now,
+      allowInsecureLoopback: true,
+    });
+    const recipient = new FederationClient({
+      baseUrl: 'http://127.0.0.1:7790',
+      deploymentId: 'deployment_b',
+      signer: deploymentB,
+      fetch: injectedFetch(app),
+      now: () => now,
+      allowInsecureLoopback: true,
+    });
+    await sender.sendCiphertext({
+      recipientDeploymentId: 'deployment_b',
+      type: 'chat.message',
+      ciphertext: 'ZW5jcnlwdGVkLWJlZm9yZS1rZXktZXhwaXJ5',
+      routing: {
+        conversationId: 'conversation_key_rotation',
+        senderPrincipalId: 'account_alice',
+        recipientPrincipalId: 'account_bob',
+      },
+    });
+
+    now += 10 * 60_000;
+    expect(await recipient.claim()).toHaveLength(1);
+  });
 });
+
+function injectedFetch(app: FastifyInstance): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    const response = await app.inject({
+      method: (init?.method || 'GET') as 'GET' | 'POST',
+      url: `${url.pathname}${url.search}`,
+      headers: init?.headers as Record<string, string> | undefined,
+      payload: typeof init?.body === 'string' ? init.body : undefined,
+    });
+    return new Response(response.body, {
+      status: response.statusCode,
+      headers: response.headers as Record<string, string>,
+    });
+  }) as typeof fetch;
+}

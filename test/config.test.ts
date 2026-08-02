@@ -284,6 +284,7 @@ describe('federation configuration', () => {
       port: 7790,
       databaseUrl: null,
       maximumCiphertextBytes: 1024 * 1024,
+      maximumClaimBytes: 4 * 1024 * 1024,
       maximumEnvelopeTtlMs: 7 * 24 * 60 * 60_000,
       maximumClockSkewMs: 5 * 60_000,
       claimTtlMs: 60_000,
@@ -300,6 +301,10 @@ describe('federation configuration', () => {
       NODE_ENV: 'production',
       FEDERATION_PUBLIC_BASE_URL: 'https://federation.example.test',
     })).toThrow('federation configuration is incomplete');
+    expect(() => loadFederationConfig({
+      FEDERATION_MAX_CIPHERTEXT_BYTES: '1048576',
+      FEDERATION_MAX_CLAIM_BYTES: '65536',
+    })).toThrow('FEDERATION_MAX_CLAIM_BYTES must be at least FEDERATION_MAX_CIPHERTEXT_BYTES');
   });
 
   it('loads database and gateway credentials from mounted files', () => {

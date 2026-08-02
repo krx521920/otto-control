@@ -30,6 +30,7 @@ try {
     maximumClockSkewMs: config.maximumClockSkewMs,
     maximumEnvelopeTtlMs: config.maximumEnvelopeTtlMs,
     maximumCiphertextBytes: config.maximumCiphertextBytes,
+    maximumClaimBytes: config.maximumClaimBytes,
     claimTtlMs: config.claimTtlMs,
     deliveredRetentionMs: config.deliveredRetentionMs,
   });

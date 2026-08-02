@@ -133,6 +133,14 @@ export class MemoryFederationStore implements FederationStore {
     return structuredClone(record);
   }
 
+  async getVerificationKey(
+    deploymentId: string,
+    keyId: string,
+  ): Promise<FederationDeploymentKeyRecord | null> {
+    const record = this.keys.get(`${deploymentId}:${keyId}`);
+    return record?.status === 'active' ? structuredClone(record) : null;
+  }
+
   async consumeNonce(deploymentId: string, nonce: string, expiresAt: Date, now: Date): Promise<boolean> {
     for (const [key, expiry] of this.nonces) if (expiry <= now) this.nonces.delete(key);
     const key = `${deploymentId}:${nonce}`;
@@ -209,6 +217,7 @@ export class MemoryFederationStore implements FederationStore {
       && (message.status === 'pending' || message.status === 'claimed')).length;
     if (!recipient || pending >= recipient.maxPendingMessages) throw conflict('recipient federation inbox is full');
 
+    let a2aGrant: FederationA2aGrantRecord | null = null;
     if (envelope.type === 'a2a.request') {
       const grant = this.grants.get(envelope.routing.a2aGrantId!);
       if (
@@ -219,7 +228,7 @@ export class MemoryFederationStore implements FederationStore {
         || !grant.scopes.includes(envelope.routing.a2aScope!)
         || grant.revokedAt || grant.expiresAt <= input.now || grant.usedCount >= grant.maxUses
       ) throw forbidden('A2A grant is invalid, expired, revoked, or already consumed');
-      grant.usedCount += 1;
+      a2aGrant = grant;
     }
 
     if (envelope.type === 'a2a.response') {
@@ -244,6 +253,10 @@ export class MemoryFederationStore implements FederationStore {
       ) throw forbidden('chat receipt does not match a delivered message route');
     }
 
+    for (const [key, expiry] of this.nonces) if (expiry <= input.now) this.nonces.delete(key);
+    const nonceKey = `${envelope.senderDeploymentId}:${envelope.nonce}`;
+    if (this.nonces.has(nonceKey)) throw conflict('federation envelope nonce has already been used');
+
     const message: MemoryMessage = {
       ...messageFromEnvelope({
         envelope,
@@ -255,6 +268,8 @@ export class MemoryFederationStore implements FederationStore {
       }),
       claimTokenHash: null,
     };
+    this.nonces.set(nonceKey, new Date(envelope.expiresAt));
+    if (a2aGrant) a2aGrant.usedCount += 1;
     this.messages.set(message.messageId, message);
     return { message: structuredClone(message), duplicate: false };
   }
@@ -262,6 +277,7 @@ export class MemoryFederationStore implements FederationStore {
   async claimMessages(input: {
     recipientDeploymentId: string;
     limit: number;
+    maximumBytes: number;
     claimTtlMs: number;
     now: Date;
   }): Promise<FederationClaimedMessage[]> {
@@ -273,14 +289,19 @@ export class MemoryFederationStore implements FederationStore {
       .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime()
         || left.messageId.localeCompare(right.messageId))
       .slice(0, input.limit);
-    return candidates.map((message) => {
+    const output: FederationClaimedMessage[] = [];
+    let claimedBytes = 0;
+    for (const message of candidates) {
+      if (output.length > 0 && claimedBytes + message.sizeBytes > input.maximumBytes) break;
       const claimToken = randomBytes(32).toString('base64url');
       message.status = 'claimed';
       message.attempts += 1;
       message.claimedUntil = new Date(input.now.getTime() + input.claimTtlMs);
       message.claimTokenHash = claimTokenHash(claimToken);
-      return { message: structuredClone(message), claimToken };
-    });
+      output.push({ message: structuredClone(message), claimToken });
+      claimedBytes += message.sizeBytes;
+    }
+    return output;
   }
 
   async acknowledgeMessage(input: {

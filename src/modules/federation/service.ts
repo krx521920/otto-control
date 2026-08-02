@@ -18,6 +18,19 @@ const NONCE_PATTERN = /^[A-Za-z0-9_-]{16,128}$/u;
 const SCOPE_PATTERN = /^[a-z][a-z0-9._:-]{1,63}$/u;
 const CAPABILITY_PATTERN = /^[a-z][a-z0-9._:-]{1,63}$/u;
 const MAX_ROUTING_VALUE = 256;
+const ENVELOPE_KEYS = new Set([
+  'version',
+  'messageId',
+  'type',
+  'senderDeploymentId',
+  'recipientDeploymentId',
+  'issuedAt',
+  'expiresAt',
+  'nonce',
+  'contentType',
+  'ciphertext',
+  'routing',
+]);
 
 function requiredText(value: unknown, name: string, maximum = 256): string {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > maximum) {
@@ -44,6 +57,15 @@ function stringList(value: unknown, name: string, pattern: RegExp, maximum = 32)
 function timestamp(value: unknown, name: string): Date {
   const parsed = new Date(requiredText(value, name, 64));
   if (!Number.isFinite(parsed.getTime())) throw invalidRequest(`${name} must be an ISO timestamp`);
+  return parsed;
+}
+
+function signedTimestamp(value: unknown, name: string): Date {
+  const text = requiredText(value, name, 64);
+  const parsed = new Date(text);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== text) {
+    throw invalidRequest(`${name} must use canonical UTC ISO format`);
+  }
   return parsed;
 }
 
@@ -93,6 +115,7 @@ export interface FederationServiceOptions {
   maximumEnvelopeTtlMs?: number;
   maximumRequestTtlMs?: number;
   maximumCiphertextBytes?: number;
+  maximumClaimBytes?: number;
   claimTtlMs?: number;
   deliveredRetentionMs?: number;
   now?: () => number;
@@ -104,6 +127,7 @@ export class FederationService {
   readonly #maximumEnvelopeTtlMs: number;
   readonly #maximumRequestTtlMs: number;
   readonly #maximumCiphertextBytes: number;
+  readonly #maximumClaimBytes: number;
   readonly #claimTtlMs: number;
   readonly #deliveredRetentionMs: number;
   readonly #now: () => number;
@@ -114,6 +138,8 @@ export class FederationService {
     this.#maximumEnvelopeTtlMs = options.maximumEnvelopeTtlMs ?? 7 * 24 * 60 * 60_000;
     this.#maximumRequestTtlMs = options.maximumRequestTtlMs ?? 5 * 60_000;
     this.#maximumCiphertextBytes = options.maximumCiphertextBytes ?? 1024 * 1024;
+    this.#maximumClaimBytes = options.maximumClaimBytes
+      ?? Math.max(this.#maximumCiphertextBytes, 4 * 1024 * 1024);
     this.#claimTtlMs = options.claimTtlMs ?? 60_000;
     this.#deliveredRetentionMs = options.deliveredRetentionMs ?? 7 * 24 * 60 * 60_000;
     this.#now = options.now ?? Date.now;
@@ -187,12 +213,11 @@ export class FederationService {
   async directoryKey(deploymentId: string, keyId: string): Promise<Record<string, unknown>> {
     const id = identifier(deploymentId, 'deploymentId');
     await this.#activeDeployment(id);
-    const key = await this.#store.getActiveKey(
+    const key = await this.#store.getVerificationKey(
       id,
       requiredText(keyId, 'keyId', 64),
-      new Date(this.#now()),
     );
-    if (!key) throw notFound('active federation key not found');
+    if (!key) throw notFound('federation verification key not found');
     return {
       deploymentId: key.deploymentId,
       keyId: key.keyId,
@@ -401,6 +426,7 @@ export class FederationService {
     const claimed = await this.#store.claimMessages({
       recipientDeploymentId: request.deploymentId,
       limit,
+      maximumBytes: this.#maximumClaimBytes,
       claimTtlMs: this.#claimTtlMs,
       now: new Date(this.#now()),
     });
@@ -441,16 +467,17 @@ export class FederationService {
     return { delivered: true };
   }
 
-  async status(): Promise<Record<string, unknown>> {
-    return {
+  async status(includeQueue = false): Promise<Record<string, unknown>> {
+    const status: Record<string, unknown> = {
       protocolVersion: FEDERATION_PROTOCOL_VERSION,
-      queue: await this.#store.queueStats(),
       privacy: {
         payloadStorage: 'ciphertext-only',
         gatewayCanDecrypt: false,
         visibleMetadata: ['deployment ids', 'message type', 'timestamps', 'size', 'delivery status'],
       },
     };
+    if (includeQueue) status.queue = await this.#store.queueStats();
+    return status;
   }
 
   async expire(): Promise<number> {
@@ -492,6 +519,9 @@ export class FederationService {
     if (!raw || typeof raw !== 'object' || !raw.envelope || typeof raw.envelope !== 'object') {
       throw invalidRequest('signed federation envelope is required');
     }
+    if (Object.keys(raw.envelope).some((key) => !ENVELOPE_KEYS.has(key))) {
+      throw invalidRequest('federation envelope contains unsupported fields');
+    }
     const envelope = raw.envelope as FederationEnvelope;
     if (envelope.version !== FEDERATION_PROTOCOL_VERSION) throw invalidRequest('unsupported federation version');
     if (!FEDERATION_MESSAGE_TYPES.includes(envelope.type)) throw invalidRequest('federation message type is invalid');
@@ -515,7 +545,7 @@ export class FederationService {
     if (await this.#store.isBlocked(envelope.senderDeploymentId, envelope.recipientDeploymentId)) {
       throw forbidden('federation route is blocked');
     }
-    const { expiresAt } = this.#validateTimeWindow(
+    this.#validateTimeWindow(
       envelope.issuedAt,
       envelope.expiresAt,
       this.#maximumEnvelopeTtlMs,
@@ -563,16 +593,6 @@ export class FederationService {
     );
     if (!key) throw unauthorized('active federation signing key not found');
     verifyFederationSignature({ payload: envelope, signature: raw.signature, publicKeyPem: key.publicKeyPem });
-    if (!await this.#store.consumeNonce(
-      envelope.senderDeploymentId,
-      envelope.nonce,
-      expiresAt,
-      new Date(this.#now()),
-    )) {
-      const existing = await this.#store.getMessage(envelope.messageId);
-      if (existing && existing.senderDeploymentId === envelope.senderDeploymentId) return raw;
-      throw conflict('federation envelope nonce has already been used');
-    }
     return raw;
   }
 
@@ -591,8 +611,8 @@ export class FederationService {
     issuedAt: Date;
     expiresAt: Date;
   } {
-    const issuedAt = timestamp(rawIssuedAt, 'issuedAt');
-    const expiresAt = timestamp(rawExpiresAt, 'expiresAt');
+    const issuedAt = signedTimestamp(rawIssuedAt, 'issuedAt');
+    const expiresAt = signedTimestamp(rawExpiresAt, 'expiresAt');
     const now = this.#now();
     if (issuedAt.getTime() > now + this.#maximumClockSkewMs) {
       throw unauthorized('federation timestamp is in the future');

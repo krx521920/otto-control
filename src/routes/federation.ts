@@ -62,6 +62,7 @@ export async function registerFederationRoutes(
 
   app.register(async (admin) => {
     admin.addHook('onRequest', async (request) => requireAdmin(request, options.adminToken));
+    admin.get('/status', async () => options.service.status(true));
     admin.get<{ Querystring: { limit?: string } }>('/deployments', async (request) =>
       options.service.listDeployments(request.query.limit));
     admin.post<{ Body: Record<string, unknown> }>('/deployments', async (request, reply) =>

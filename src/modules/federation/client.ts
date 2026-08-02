@@ -22,6 +22,7 @@ export interface FederationClientOptions {
   signer: PayloadSigner;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  maximumResponseBytes?: number;
   now?: () => number;
   allowInsecureLoopback?: boolean;
 }
@@ -62,6 +63,7 @@ export class FederationClient {
   readonly #signer: PayloadSigner;
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
+  readonly #maximumResponseBytes: number;
   readonly #now: () => number;
 
   constructor(options: FederationClientOptions) {
@@ -72,6 +74,10 @@ export class FederationClient {
     this.#timeoutMs = options.timeoutMs ?? 10_000;
     if (this.#timeoutMs < 500 || this.#timeoutMs > 30_000) {
       throw new Error('federation timeout must be between 500 and 30000 milliseconds');
+    }
+    this.#maximumResponseBytes = options.maximumResponseBytes ?? 16 * 1024 * 1024;
+    if (this.#maximumResponseBytes < 64 * 1024 || this.#maximumResponseBytes > 128 * 1024 * 1024) {
+      throw new Error('federation response limit must be between 64 KiB and 128 MiB');
     }
     this.#now = options.now ?? Date.now;
   }
@@ -145,6 +151,8 @@ export class FederationClient {
         deploymentId: string;
         keyId: string;
         publicKeyPem: string;
+        notBefore: string;
+        expiresAt: string | null;
       }>(
         `/v1/federation/directory/${encodeURIComponent(item.envelope.senderDeploymentId)}`
           + `/keys/${encodeURIComponent(item.signingKeyId)}`,
@@ -153,6 +161,16 @@ export class FederationClient {
       );
       if (key.deploymentId !== item.envelope.senderDeploymentId || key.keyId !== item.signingKeyId) {
         throw new Error('federation directory returned a mismatched signing key');
+      }
+      const issuedAt = Date.parse(item.envelope.issuedAt);
+      const notBefore = Date.parse(key.notBefore);
+      const expiresAt = key.expiresAt === null ? null : Date.parse(key.expiresAt);
+      if (
+        !Number.isFinite(issuedAt) || !Number.isFinite(notBefore)
+        || (expiresAt !== null && !Number.isFinite(expiresAt))
+        || issuedAt < notBefore || (expiresAt !== null && issuedAt >= expiresAt)
+      ) {
+        throw new Error('federation envelope was signed outside the key validity window');
       }
       verifyFederationSignature({
         payload: item.envelope,
@@ -230,7 +248,7 @@ export class FederationClient {
     if (!contentType.toLowerCase().startsWith('application/json')) {
       throw new Error(`federation gateway returned unexpected content type (${response.status})`);
     }
-    const text = await this.#boundedResponseText(response, 2 * 1024 * 1024);
+    const text = await this.#boundedResponseText(response, this.#maximumResponseBytes);
     let payload: unknown;
     try {
       payload = JSON.parse(text);

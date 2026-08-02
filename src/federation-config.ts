@@ -12,6 +12,7 @@ export interface FederationConfig {
   adminToken: string | null;
   metricsToken: string | null;
   maximumCiphertextBytes: number;
+  maximumClaimBytes: number;
   maximumEnvelopeTtlMs: number;
   maximumClockSkewMs: number;
   claimTtlMs: number;
@@ -128,6 +129,23 @@ export function loadFederationConfig(env: NodeJS.ProcessEnv = process.env): Read
       throw new Error('FEDERATION_DATABASE_URL must use PostgreSQL');
     }
   }
+  const maximumCiphertextBytes = boundedInteger(
+    env.FEDERATION_MAX_CIPHERTEXT_BYTES,
+    1024 * 1024,
+    4096,
+    10 * 1024 * 1024,
+    'FEDERATION_MAX_CIPHERTEXT_BYTES',
+  );
+  const maximumClaimBytes = boundedInteger(
+    env.FEDERATION_MAX_CLAIM_BYTES,
+    Math.max(maximumCiphertextBytes, 4 * 1024 * 1024),
+    4096,
+    100 * 1024 * 1024,
+    'FEDERATION_MAX_CLAIM_BYTES',
+  );
+  if (maximumClaimBytes < maximumCiphertextBytes) {
+    throw new Error('FEDERATION_MAX_CLAIM_BYTES must be at least FEDERATION_MAX_CIPHERTEXT_BYTES');
+  }
   const config: FederationConfig = {
     environment,
     host: env.FEDERATION_HOST?.trim() || '127.0.0.1',
@@ -139,13 +157,8 @@ export function loadFederationConfig(env: NodeJS.ProcessEnv = process.env): Read
     databaseSsl: boolean(env.FEDERATION_DATABASE_SSL, environment === 'production', 'FEDERATION_DATABASE_SSL'),
     adminToken: requiredSecret(env, 'FEDERATION_ADMIN_TOKEN', 'FEDERATION_ADMIN_TOKEN_FILE'),
     metricsToken: requiredSecret(env, 'FEDERATION_METRICS_TOKEN', 'FEDERATION_METRICS_TOKEN_FILE'),
-    maximumCiphertextBytes: boundedInteger(
-      env.FEDERATION_MAX_CIPHERTEXT_BYTES,
-      1024 * 1024,
-      4096,
-      10 * 1024 * 1024,
-      'FEDERATION_MAX_CIPHERTEXT_BYTES',
-    ),
+    maximumCiphertextBytes,
+    maximumClaimBytes,
     maximumEnvelopeTtlMs: boundedInteger(
       env.FEDERATION_MAX_ENVELOPE_TTL_MS,
       7 * 24 * 60 * 60_000,

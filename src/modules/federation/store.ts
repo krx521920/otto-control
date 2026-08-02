@@ -71,6 +71,10 @@ export interface FederationStore {
     keyId: string,
     now: Date,
   ): Promise<FederationDeploymentKeyRecord | null>;
+  getVerificationKey(
+    deploymentId: string,
+    keyId: string,
+  ): Promise<FederationDeploymentKeyRecord | null>;
   consumeNonce(deploymentId: string, nonce: string, expiresAt: Date, now: Date): Promise<boolean>;
   isBlocked(senderDeploymentId: string, recipientDeploymentId: string): Promise<boolean>;
   setBlock(input: FederationBlockRecord): Promise<void>;
@@ -81,6 +85,7 @@ export interface FederationStore {
   claimMessages(input: {
     recipientDeploymentId: string;
     limit: number;
+    maximumBytes: number;
     claimTtlMs: number;
     now: Date;
   }): Promise<FederationClaimedMessage[]>;

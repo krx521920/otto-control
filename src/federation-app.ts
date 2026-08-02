@@ -115,7 +115,7 @@ export async function buildFederationApp(options: {
   app.get('/metrics', async (request, reply) => {
     const expected = options.config.metricsToken;
     if (!expected || !secureEqual(bearer(request), expected)) return reply.code(404).send({ error: 'not found' });
-    const stats = (await options.service.status()).queue as Record<string, number>;
+    const stats = (await options.service.status(true)).queue as Record<string, number>;
     for (const [status, count] of Object.entries(stats)) queue.set({ status }, count);
     return reply.type(registry.contentType).send(await registry.metrics());
   });
