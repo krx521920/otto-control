@@ -1041,6 +1041,10 @@ const MIGRATIONS: Migration[] = [
   },
 ];
 
+export const CONTROL_SCHEMA_MIGRATION_IDS = Object.freeze(
+  MIGRATIONS.map((migration) => migration.id),
+);
+
 export async function runMigrations(client: PoolClient): Promise<void> {
   await client.query("SELECT pg_advisory_lock(hashtext('otto_control_migrations'))");
   try {

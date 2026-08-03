@@ -11,6 +11,7 @@ import { CommercialControlService } from '../src/modules/commercial-control/serv
 import { ControlTokenIssuer } from '../src/modules/commercial-control/token-issuer.js';
 import { PostgresFederationStore } from '../src/modules/federation/postgres-store.js';
 import { FederationService } from '../src/modules/federation/service.js';
+import { CONTROL_SCHEMA_MIGRATION_IDS } from '../src/storage/migrations.js';
 import { PostgresControlStore } from '../src/storage/postgres-store.js';
 
 const { Pool } = pg;
@@ -113,7 +114,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       const migrations = await pool.query<{ id: string }>(
         'SELECT id FROM control_schema_migrations ORDER BY id',
       );
-      expect(migrations.rows.at(-1)?.id).toBe('023_federation_gateway');
+      expect(migrations.rows.map((row) => row.id)).toEqual(CONTROL_SCHEMA_MIGRATION_IDS);
       expect(new Set(migrations.rows.map((row) => row.id)).size).toBe(migrations.rows.length);
       const billingPolicyColumn = await pool.query<{
         column_name: string;
