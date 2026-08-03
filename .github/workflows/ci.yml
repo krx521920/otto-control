@@ -41,7 +41,7 @@ jobs:
 
       - name: Validate production HA deployment assets
         run: |
-          trap 'rm -rf .env.production secrets signing backups' EXIT
+          trap 'rm -rf .env.production secrets signing attestations backups' EXIT
           npm run bootstrap:production -- \
             --environment production \
             --public-url https://control.ci.otto.cn \
@@ -50,9 +50,11 @@ jobs:
             --privacy-controller "Otto CI" \
             --privacy-contact ci@otto.cn \
             --data-region CN-BJ \
-            --allow-local-signing-for-test
+            --allow-local-signing-for-test \
+            --allow-unmanaged-artifacts-for-test
           npm run preflight:deployment -- \
-            --env-file .env.production --skip-dns --allow-local-signing-for-test
+            --env-file .env.production --skip-dns --allow-local-signing-for-test \
+            --allow-unmanaged-artifacts-for-test
           sh -n deploy/*.sh deploy/postgres-ha/*.sh deploy/postgres-ha/otto-pgbackrest
 
       - name: Reject whitespace errors
@@ -148,6 +150,7 @@ jobs:
           --privacy-contact ci@otto.cn
           --data-region CN-BJ
           --allow-local-signing-for-test
+          --allow-unmanaged-artifacts-for-test
 
       - name: Start database quorum, Control, and Federation instances
         run: |

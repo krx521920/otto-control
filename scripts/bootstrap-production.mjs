@@ -1,4 +1,4 @@
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createPublicKey, generateKeyPairSync, randomBytes } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -97,6 +97,114 @@ function requiredProductionOption(name, environment, fallback) {
   return value || '';
 }
 
+function requiredInputFile(flag, environmentName) {
+  const path = option(flag)?.trim() || process.env[environmentName]?.trim();
+  if (!path) throw new Error(`${flag} is required when release artifact storage is enabled`);
+  let value = '';
+  try {
+    value = readFileSync(resolve(path), 'utf8').trim();
+  } catch {
+    throw new Error(`${flag} could not be read`);
+  }
+  if (!value) throw new Error(`${flag} must not be empty`);
+  return value;
+}
+
+function artifactStorageConfiguration(environmentName, allowUnmanagedForTest) {
+  const endpointValue = option('--artifact-s3-endpoint')?.trim()
+    || process.env.CONTROL_ARTIFACT_S3_ENDPOINT?.trim();
+  if (!endpointValue) {
+    if (environmentName === 'production' && !allowUnmanagedForTest) {
+      throw new Error(
+        'production requires --artifact-s3-endpoint and signed release artifact storage; '
+        + 'only CI may use --allow-unmanaged-artifacts-for-test',
+      );
+    }
+    return null;
+  }
+  let endpoint;
+  try {
+    endpoint = new URL(endpointValue);
+  } catch {
+    throw new Error('--artifact-s3-endpoint must be an absolute URL');
+  }
+  if ((environmentName === 'production' && endpoint.protocol !== 'https:')
+    || !['https:', 'http:'].includes(endpoint.protocol)
+    || endpoint.username
+    || endpoint.password
+    || endpoint.search
+    || endpoint.hash) {
+    throw new Error('--artifact-s3-endpoint must be a credential-free HTTPS origin in production');
+  }
+  const bucket = option('--artifact-s3-bucket')?.trim()
+    || process.env.CONTROL_ARTIFACT_S3_BUCKET?.trim()
+    || '';
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/u.test(bucket)) {
+    throw new Error('--artifact-s3-bucket is invalid');
+  }
+  const region = option('--artifact-s3-region')?.trim()
+    || process.env.CONTROL_ARTIFACT_S3_REGION?.trim()
+    || 'us-east-1';
+  if (!/^[a-z0-9-]{3,40}$/u.test(region)) throw new Error('--artifact-s3-region is invalid');
+  const cdnValue = option('--artifact-cdn-base-url')?.trim()
+    || process.env.CONTROL_ARTIFACT_CDN_BASE_URL?.trim()
+    || '';
+  let cdnBaseUrl = '';
+  if (cdnValue) {
+    let cdn;
+    try {
+      cdn = new URL(cdnValue);
+    } catch {
+      throw new Error('--artifact-cdn-base-url must be an absolute URL');
+    }
+    if (cdn.protocol !== 'https:' || cdn.username || cdn.password || cdn.search || cdn.hash) {
+      throw new Error('--artifact-cdn-base-url must be a credential-free HTTPS origin');
+    }
+    cdnBaseUrl = cdn.toString().replace(/\/$/u, '');
+  }
+  const attestationKeyId = option('--artifact-attestation-key-id')?.trim()
+    || process.env.CONTROL_ARTIFACT_ATTESTATION_KEY_ID?.trim()
+    || '';
+  if (!/^[a-zA-Z0-9_.-]{3,64}$/u.test(attestationKeyId)) {
+    throw new Error('--artifact-attestation-key-id is invalid');
+  }
+  const attestationPublicKey = requiredInputFile(
+    '--artifact-attestation-public-key-file',
+    'CONTROL_ARTIFACT_ATTESTATION_PUBLIC_KEY_FILE',
+  );
+  try {
+    if (createPublicKey(attestationPublicKey).asymmetricKeyType !== 'ed25519') {
+      throw new Error('not Ed25519');
+    }
+  } catch {
+    throw new Error('--artifact-attestation-public-key-file must contain an Ed25519 public key');
+  }
+  const sessionTokenPath = option('--artifact-s3-session-token-file')?.trim()
+    || process.env.CONTROL_ARTIFACT_S3_SESSION_TOKEN_SOURCE_FILE?.trim();
+  return {
+    endpoint: endpoint.toString().replace(/\/$/u, ''),
+    bucket,
+    region,
+    cdnBaseUrl,
+    accessKeyId: requiredInputFile(
+      '--artifact-s3-access-key-id-file',
+      'CONTROL_ARTIFACT_S3_ACCESS_KEY_ID_SOURCE_FILE',
+    ),
+    secretAccessKey: requiredInputFile(
+      '--artifact-s3-secret-access-key-file',
+      'CONTROL_ARTIFACT_S3_SECRET_ACCESS_KEY_SOURCE_FILE',
+    ),
+    sessionToken: sessionTokenPath
+      ? requiredInputFile(
+          '--artifact-s3-session-token-file',
+          'CONTROL_ARTIFACT_S3_SESSION_TOKEN_SOURCE_FILE',
+        )
+      : null,
+    attestationKeyId,
+    attestationPublicKey,
+  };
+}
+
 function writeSecret(path, value) {
   writeFileSync(path, `${value}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
 }
@@ -175,6 +283,9 @@ function main() {
   const allowLocalSigningForTest = environmentName === 'production'
     && hasFlag('--allow-local-signing-for-test')
     && process.env.CI === 'true';
+  const allowUnmanagedArtifactsForTest = environmentName === 'production'
+    && hasFlag('--allow-unmanaged-artifacts-for-test')
+    && process.env.CI === 'true';
   const publicUrl = requiredPublicUrl();
   const federationUrl = federationPublicUrl(publicUrl);
   if (publicUrl.hostname === federationUrl.hostname) {
@@ -189,6 +300,10 @@ function main() {
       'production requires --aws-kms-key-arns; local signing is available only to CI with --allow-local-signing-for-test',
     );
   }
+  const artifactStorage = artifactStorageConfiguration(
+    environmentName,
+    allowUnmanagedArtifactsForTest,
+  );
   const acmeEmail = requiredProductionOption('--acme-email', environmentName, process.env.ACME_EMAIL);
   const privacyController = requiredProductionOption(
     '--privacy-controller',
@@ -219,9 +334,13 @@ function main() {
   const environmentFileName = `.env.${environmentName}`;
   const secretDirectoryName = environmentName === 'production' ? 'secrets' : 'secrets-staging';
   const signingDirectoryName = environmentName === 'production' ? 'signing' : 'signing-staging';
+  const attestationDirectoryName = environmentName === 'production'
+    ? 'attestations'
+    : 'attestations-staging';
   const backupDirectoryName = environmentName === 'production' ? 'backups' : 'backups-staging';
   const secretDirectory = resolve(root, secretDirectoryName);
   const signingDirectory = resolve(root, signingDirectoryName);
+  const attestationDirectory = resolve(root, attestationDirectoryName);
   const targets = [
     resolve(root, environmentFileName),
     resolve(signingDirectory, 'control_signer_keyring.json'),
@@ -240,18 +359,31 @@ function main() {
     resolve(secretDirectory, 'backup_encryption_key'),
     resolve(secretDirectory, 'alert_webhook_secret'),
     resolve(secretDirectory, 'audit_anchor_token'),
+    resolve(secretDirectory, 'artifact_s3_access_key_id'),
+    resolve(secretDirectory, 'artifact_s3_secret_access_key'),
+    resolve(secretDirectory, 'artifact_s3_session_token'),
     resolve(secretDirectory, 'postgres_tls_ca_private_key.pem'),
     resolve(secretDirectory, 'postgres_tls_ca.pem'),
     resolve(secretDirectory, 'postgres_tls_key.pem'),
     resolve(secretDirectory, 'postgres_tls_cert.pem'),
+    ...(artifactStorage
+      ? [
+          resolve(attestationDirectory, 'artifact_attestation_keyring.json'),
+          resolve(attestationDirectory, 'artifact_attestation_public_key.pem'),
+        ]
+      : []),
   ];
   const existing = targets.find(existsSync);
   if (existing) throw new Error(`refusing to overwrite existing deployment identity file: ${existing}`);
   if (existsSync(signingDirectory) && readdirSync(signingDirectory).length > 0) {
     throw new Error(`refusing to reuse non-empty signing directory: ${signingDirectory}`);
   }
+  if (existsSync(attestationDirectory) && readdirSync(attestationDirectory).length > 0) {
+    throw new Error(`refusing to reuse non-empty attestation directory: ${attestationDirectory}`);
+  }
   mkdirSync(secretDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(signingDirectory, { recursive: true, mode: 0o700 });
+  mkdirSync(attestationDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(resolve(root, backupDirectoryName), { recursive: true, mode: 0o700 });
   const backupReportDirectory = resolve(root, backupDirectoryName, 'reports');
   mkdirSync(backupReportDirectory, { recursive: true, mode: 0o755 });
@@ -307,17 +439,48 @@ function main() {
   writeSecret(resolve(secretDirectory, 'backup_encryption_key'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'alert_webhook_secret'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'audit_anchor_token'), randomBytes(48).toString('base64url'));
+  writeSecret(
+    resolve(secretDirectory, 'artifact_s3_access_key_id'),
+    artifactStorage?.accessKeyId ?? 'disabled-for-this-deployment',
+  );
+  writeSecret(
+    resolve(secretDirectory, 'artifact_s3_secret_access_key'),
+    artifactStorage?.secretAccessKey ?? 'disabled-for-this-deployment',
+  );
+  writeSecret(
+    resolve(secretDirectory, 'artifact_s3_session_token'),
+    artifactStorage?.sessionToken ?? 'disabled-for-this-deployment',
+  );
+  if (artifactStorage) {
+    writeSecret(
+      resolve(attestationDirectory, 'artifact_attestation_public_key.pem'),
+      artifactStorage.attestationPublicKey,
+    );
+    writeSecret(
+      resolve(attestationDirectory, 'artifact_attestation_keyring.json'),
+      JSON.stringify({
+        version: 1,
+        keys: [{
+          id: artifactStorage.attestationKeyId,
+          publicKeyFile: 'artifact_attestation_public_key.pem',
+        }],
+      }, null, 2),
+    );
+  }
   createPostgresTlsIdentity(secretDirectory);
 
   const environment = [
     'NODE_ENV=production',
+    `CI=${allowUnmanagedArtifactsForTest ? 'true' : ''}`,
+    `CONTROL_ALLOW_UNMANAGED_ARTIFACTS_FOR_TESTS=${allowUnmanagedArtifactsForTest ? 'true' : 'false'}`,
     `OTTO_CONTROL_DEPLOYMENT_ENVIRONMENT=${environmentName}`,
     `OTTO_CONTROL_STACK_NAME=otto-control-${environmentName}`,
     `OTTO_CONTROL_ENV_FILE=${environmentFileName}`,
     `OTTO_CONTROL_SECRETS_DIR=./${secretDirectoryName}`,
     `OTTO_CONTROL_SIGNING_DIR=./${signingDirectoryName}`,
+    `OTTO_CONTROL_ATTESTATION_DIR=./${attestationDirectoryName}`,
     `OTTO_CONTROL_BACKUP_DIR=./${backupDirectoryName}`,
-    'OTTO_CONTROL_VERSION=0.28.0',
+    'OTTO_CONTROL_VERSION=0.31.0',
     `ACME_EMAIL=${acmeEmail || `operations@${publicUrl.hostname}`}`,
     `ACME_CA=${environmentName === 'production'
       ? 'https://acme-v02.api.letsencrypt.org/directory'
@@ -377,23 +540,23 @@ function main() {
     'CONTROL_GOVERNANCE_AUDIT_RETENTION_DAYS=2555',
     'CONTROL_DATA_EXPORT_RECORD_RETENTION_DAYS=30',
     'CONTROL_DATA_RETENTION_POLL_INTERVAL_HOURS=24',
-    'CONTROL_ARTIFACT_STORAGE_REQUIRED=false',
-    'CONTROL_ARTIFACT_S3_ENDPOINT=',
-    'CONTROL_ARTIFACT_S3_BUCKET=',
-    'CONTROL_ARTIFACT_S3_REGION=us-east-1',
+    `CONTROL_ARTIFACT_STORAGE_REQUIRED=${artifactStorage ? 'true' : 'false'}`,
+    `CONTROL_ARTIFACT_S3_ENDPOINT=${artifactStorage?.endpoint ?? ''}`,
+    `CONTROL_ARTIFACT_S3_BUCKET=${artifactStorage?.bucket ?? ''}`,
+    `CONTROL_ARTIFACT_S3_REGION=${artifactStorage?.region ?? 'us-east-1'}`,
     'CONTROL_ARTIFACT_S3_PREFIX=otto-releases',
     'CONTROL_ARTIFACT_S3_FORCE_PATH_STYLE=true',
-    'CONTROL_ARTIFACT_S3_ACCESS_KEY_ID_FILE=',
-    'CONTROL_ARTIFACT_S3_SECRET_ACCESS_KEY_FILE=',
-    'CONTROL_ARTIFACT_S3_SESSION_TOKEN_FILE=',
+    `CONTROL_ARTIFACT_S3_ACCESS_KEY_ID_FILE=${artifactStorage ? '/run/secrets/artifact_s3_access_key_id' : ''}`,
+    `CONTROL_ARTIFACT_S3_SECRET_ACCESS_KEY_FILE=${artifactStorage ? '/run/secrets/artifact_s3_secret_access_key' : ''}`,
+    `CONTROL_ARTIFACT_S3_SESSION_TOKEN_FILE=${artifactStorage?.sessionToken ? '/run/secrets/artifact_s3_session_token' : ''}`,
     'CONTROL_ARTIFACT_S3_ENCRYPTION=AES256',
     'CONTROL_ARTIFACT_S3_KMS_KEY_ID=',
     'CONTROL_ARTIFACT_S3_OBJECT_LOCK_REQUIRED=true',
     'CONTROL_ARTIFACT_S3_RETENTION_DAYS=365',
     'CONTROL_ARTIFACT_UPLOAD_TTL_SECONDS=900',
     'CONTROL_ARTIFACT_DOWNLOAD_TTL_SECONDS=300',
-    'CONTROL_ARTIFACT_CDN_BASE_URL=',
-    'CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE=',
+    `CONTROL_ARTIFACT_CDN_BASE_URL=${artifactStorage?.cdnBaseUrl ?? ''}`,
+    `CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE=${artifactStorage ? '/run/otto-attestations/artifact_attestation_keyring.json' : ''}`,
     'CONTROL_BACKUP_RETENTION_DAYS=30',
     'CONTROL_BACKUP_REPORT_DIR=/var/lib/otto-control/backup-reports',
     'CONTROL_BACKUP_STATUS_MAX_AGE_HOURS=48',

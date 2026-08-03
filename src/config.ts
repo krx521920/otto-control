@@ -319,11 +319,24 @@ export function loadControlConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): Readonly<ControlConfig> {
   const environment = parseEnvironment(env.NODE_ENV);
+  const isProductionDeployment = environment === 'production'
+    && env.OTTO_CONTROL_DEPLOYMENT_ENVIRONMENT?.trim() !== 'staging';
   const artifactStorageRequired = parseBoolean(
     env.CONTROL_ARTIFACT_STORAGE_REQUIRED,
-    false,
+    isProductionDeployment,
     'CONTROL_ARTIFACT_STORAGE_REQUIRED',
   );
+  const unmanagedArtifactsTestOnly = parseBoolean(
+    env.CONTROL_ALLOW_UNMANAGED_ARTIFACTS_FOR_TESTS,
+    false,
+    'CONTROL_ALLOW_UNMANAGED_ARTIFACTS_FOR_TESTS',
+  );
+  if (unmanagedArtifactsTestOnly && (environment !== 'production' || env.CI !== 'true')) {
+    throw new Error('unmanaged release artifacts test bypass requires production CI=true');
+  }
+  if (isProductionDeployment && !artifactStorageRequired && !unmanagedArtifactsTestOnly) {
+    throw new Error('managed, signed release artifact storage is required in production');
+  }
   const artifactStorage = loadArtifactStorageConfig(env, environment);
   const auditWitnessWorm = loadAuditWitnessWormStorageConfig(env, environment);
   const artifactAttestationKeysFile = env.CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE?.trim() || null;
@@ -370,7 +383,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.28.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.31.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,

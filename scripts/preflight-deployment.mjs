@@ -237,6 +237,52 @@ function validateSigningIdentity(signingDirectory, deploymentEnvironment, allowL
   }
 }
 
+function validateArtifactAttestationIdentity(attestationDirectory, errors) {
+  const manifestPath = resolve(attestationDirectory, 'artifact_attestation_keyring.json');
+  const manifestText = readRequiredFile(manifestPath, errors, { privateFile: false });
+  if (!manifestText) return;
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestText);
+  } catch {
+    errors.push('artifact_attestation_keyring.json must contain valid JSON');
+    return;
+  }
+  if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.keys)
+    || manifest.keys.length < 1) {
+    errors.push('artifact_attestation_keyring.json must use version 1 and contain keys');
+    return;
+  }
+  const ids = new Set();
+  for (const entry of manifest.keys) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || typeof entry.id !== 'string'
+      || !/^[a-zA-Z0-9_.-]{3,64}$/u.test(entry.id)
+      || ids.has(entry.id)
+      || typeof entry.publicKeyFile !== 'string'
+      || basename(entry.publicKeyFile) !== entry.publicKeyFile) {
+      errors.push('artifact attestation keyring contains an invalid or duplicate key');
+      continue;
+    }
+    ids.add(entry.id);
+    const publicKeyPem = readRequiredFile(
+      resolve(attestationDirectory, entry.publicKeyFile),
+      errors,
+      { privateFile: false },
+    );
+    if (!publicKeyPem) continue;
+    try {
+      if (createPublicKey(publicKeyPem).asymmetricKeyType !== 'ed25519') {
+        errors.push(`artifact attestation key ${entry.id} must be Ed25519`);
+      }
+    } catch (error) {
+      errors.push(
+        `artifact attestation key ${entry.id} is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}
+
 function validatePostgresIdentity(secretDirectory, errors) {
   const caPath = resolve(secretDirectory, 'postgres_tls_ca.pem');
   const certificatePath = resolve(secretDirectory, 'postgres_tls_cert.pem');
@@ -307,6 +353,9 @@ async function main() {
   const errors = [];
   const allowLocalSigningForTest = deploymentEnvironment === 'production'
     && hasFlag('--allow-local-signing-for-test')
+    && process.env.CI === 'true';
+  const allowUnmanagedArtifactsForTest = deploymentEnvironment === 'production'
+    && hasFlag('--allow-unmanaged-artifacts-for-test')
     && process.env.CI === 'true';
   const requireValue = (name) => {
     const value = environment.get(name)?.trim();
@@ -379,6 +428,9 @@ async function main() {
     'FEDERATION_ADMIN_TOKEN',
     'FEDERATION_METRICS_TOKEN',
     'FEDERATION_DATABASE_PASSWORD',
+    'CONTROL_ARTIFACT_S3_ACCESS_KEY_ID',
+    'CONTROL_ARTIFACT_S3_SECRET_ACCESS_KEY',
+    'CONTROL_ARTIFACT_S3_SESSION_TOKEN',
   ];
   for (const name of forbiddenInlineSecrets) {
     if (environment.get(name)?.trim()) errors.push(`${name} must use a file-backed secret instead`);
@@ -392,6 +444,10 @@ async function main() {
   const signingDirectory = isAbsolute(signingDirectoryValue)
     ? signingDirectoryValue
     : resolve(dirname(environmentFile), signingDirectoryValue);
+  const attestationDirectoryValue = requireValue('OTTO_CONTROL_ATTESTATION_DIR');
+  const attestationDirectory = isAbsolute(attestationDirectoryValue)
+    ? attestationDirectoryValue
+    : resolve(dirname(environmentFile), attestationDirectoryValue);
   try {
     const signingStat = lstatSync(signingDirectory);
     if (signingStat.isSymbolicLink() || !signingStat.isDirectory()) {
@@ -401,6 +457,18 @@ async function main() {
     }
   } catch (error) {
     errors.push(`${signingDirectory} cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    const attestationStat = lstatSync(attestationDirectory);
+    if (attestationStat.isSymbolicLink() || !attestationStat.isDirectory()) {
+      errors.push(`${attestationDirectory} must be a real directory`);
+    } else if (process.platform !== 'win32' && (attestationStat.mode & 0o077) !== 0) {
+      errors.push(`${attestationDirectory} must not be accessible by group/other users`);
+    }
+  } catch (error) {
+    errors.push(
+      `${attestationDirectory} cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   const backupDirectoryValue = requireValue('OTTO_CONTROL_BACKUP_DIR');
   const backupDirectory = isAbsolute(backupDirectoryValue)
@@ -439,6 +507,70 @@ async function main() {
     errors,
   );
   validatePostgresIdentity(secretDirectory, errors);
+
+  const artifactStorageRequired = environment.get('CONTROL_ARTIFACT_STORAGE_REQUIRED') === 'true';
+  const unmanagedArtifactsTestMarker = environment.get('CI') === 'true'
+    && environment.get('CONTROL_ALLOW_UNMANAGED_ARTIFACTS_FOR_TESTS') === 'true';
+  if (unmanagedArtifactsTestMarker !== allowUnmanagedArtifactsForTest) {
+    errors.push('unmanaged release artifact bypass must be generated and approved by CI explicitly');
+  }
+  if (deploymentEnvironment === 'production'
+    && !artifactStorageRequired
+    && !allowUnmanagedArtifactsForTest) {
+    errors.push('production must require managed, signed release artifact storage');
+  }
+  if (artifactStorageRequired) {
+    const artifactEndpoint = requireValue('CONTROL_ARTIFACT_S3_ENDPOINT');
+    const artifactBucket = requireValue('CONTROL_ARTIFACT_S3_BUCKET');
+    if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/u.test(artifactBucket)) {
+      errors.push('CONTROL_ARTIFACT_S3_BUCKET is invalid');
+    }
+    try {
+      const endpoint = new URL(artifactEndpoint);
+      if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password
+        || endpoint.search || endpoint.hash) {
+        errors.push('CONTROL_ARTIFACT_S3_ENDPOINT must be a credential-free HTTPS origin');
+      }
+    } catch {
+      errors.push('CONTROL_ARTIFACT_S3_ENDPOINT is invalid');
+    }
+    const cdnValue = environment.get('CONTROL_ARTIFACT_CDN_BASE_URL')?.trim();
+    if (cdnValue) {
+      try {
+        const cdn = new URL(cdnValue);
+        if (cdn.protocol !== 'https:' || cdn.username || cdn.password || cdn.search || cdn.hash) {
+          errors.push('CONTROL_ARTIFACT_CDN_BASE_URL must be a credential-free HTTPS origin');
+        }
+      } catch {
+        errors.push('CONTROL_ARTIFACT_CDN_BASE_URL is invalid');
+      }
+    }
+    if (environment.get('CONTROL_ARTIFACT_S3_OBJECT_LOCK_REQUIRED') !== 'true') {
+      errors.push('production release artifacts must require S3 Object Lock');
+    }
+    const expectedArtifactFiles = [
+      ['CONTROL_ARTIFACT_S3_ACCESS_KEY_ID_FILE', '/run/secrets/artifact_s3_access_key_id', 'artifact_s3_access_key_id'],
+      ['CONTROL_ARTIFACT_S3_SECRET_ACCESS_KEY_FILE', '/run/secrets/artifact_s3_secret_access_key', 'artifact_s3_secret_access_key'],
+    ];
+    for (const [name, expectedPath, localName] of expectedArtifactFiles) {
+      if (environment.get(name) !== expectedPath) {
+        errors.push(`${name} must reference the Compose file-backed secret`);
+      }
+      readRequiredFile(resolve(secretDirectory, localName), errors);
+    }
+    if (environment.get('CONTROL_ARTIFACT_S3_SESSION_TOKEN_FILE')?.trim()) {
+      if (environment.get('CONTROL_ARTIFACT_S3_SESSION_TOKEN_FILE')
+        !== '/run/secrets/artifact_s3_session_token') {
+        errors.push('CONTROL_ARTIFACT_S3_SESSION_TOKEN_FILE must reference its Compose secret');
+      }
+      readRequiredFile(resolve(secretDirectory, 'artifact_s3_session_token'), errors);
+    }
+    if (environment.get('CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE')
+      !== '/run/otto-attestations/artifact_attestation_keyring.json') {
+      errors.push('CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE must reference the read-only attestation keyring');
+    }
+    validateArtifactAttestationIdentity(attestationDirectory, errors);
+  }
 
   if (deploymentEnvironment === 'production') {
     if (reservedHostname(controlDomain) || reservedHostname(federationDomain)) {

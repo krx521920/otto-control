@@ -116,12 +116,18 @@ describe('control configuration', () => {
   it('requires an HTTPS public URL in production', () => {
     expect(() => loadControlConfig({
       NODE_ENV: 'production',
+      CONTROL_ARTIFACT_STORAGE_REQUIRED: 'false',
+      CONTROL_ALLOW_UNMANAGED_ARTIFACTS_FOR_TESTS: 'true',
+      CI: 'true',
       CONTROL_PUBLIC_BASE_URL: 'http://control.example.test',
       CONTROL_METRICS_TOKEN: 'm'.repeat(48),
     })).toThrow('CONTROL_PUBLIC_BASE_URL must use HTTPS in production');
 
     expect(loadControlConfig({
       NODE_ENV: 'production',
+      CONTROL_ARTIFACT_STORAGE_REQUIRED: 'false',
+      CONTROL_ALLOW_UNMANAGED_ARTIFACTS_FOR_TESTS: 'true',
+      CI: 'true',
       CONTROL_PUBLIC_BASE_URL: 'https://control.example.test/',
       CONTROL_METRICS_TOKEN: 'm'.repeat(48),
       CONTROL_DATA_REGION: 'CN-BJ',
@@ -192,6 +198,28 @@ describe('control configuration', () => {
     expect(() => loadControlConfig({
       NODE_ENV: 'production',
       CONTROL_METRICS_TOKEN: 'm'.repeat(48),
+    })).toThrow('CONTROL_ARTIFACT_S3_ENDPOINT is missing');
+
+    expect(() => loadControlConfig({
+      NODE_ENV: 'production',
+      CONTROL_ARTIFACT_STORAGE_REQUIRED: 'false',
+      CONTROL_METRICS_TOKEN: 'm'.repeat(48),
+    })).toThrow('managed, signed release artifact storage is required in production');
+
+    expect(loadControlConfig({
+      NODE_ENV: 'production',
+      OTTO_CONTROL_DEPLOYMENT_ENVIRONMENT: 'staging',
+      CONTROL_ARTIFACT_STORAGE_REQUIRED: 'false',
+      CONTROL_METRICS_TOKEN: 'm'.repeat(48),
+      CONTROL_PUBLIC_BASE_URL: 'https://control.staging.example.net',
+      CONTROL_DATA_REGION: 'CN-BJ',
+      CONTROL_PRIVACY_CONTROLLER: 'Otto Staging Operator',
+      CONTROL_PRIVACY_CONTACT: 'privacy-staging@otto.example',
+    }).artifactStorage).toBeNull();
+
+    expect(() => loadControlConfig({
+      NODE_ENV: 'production',
+      CONTROL_METRICS_TOKEN: 'm'.repeat(48),
       CONTROL_ARTIFACT_S3_ENDPOINT: 'http://storage.example.test',
       CONTROL_ARTIFACT_S3_BUCKET: 'otto-releases',
     })).toThrow('CONTROL_ARTIFACT_S3_ENDPOINT must be a credential-free HTTPS origin');
@@ -251,7 +279,12 @@ describe('control configuration', () => {
   });
 
   it('fails closed without a metrics credential in production', () => {
-    expect(() => loadControlConfig({ NODE_ENV: 'production' })).toThrow(
+    expect(() => loadControlConfig({
+      NODE_ENV: 'production',
+      CONTROL_ARTIFACT_STORAGE_REQUIRED: 'false',
+      CONTROL_ALLOW_UNMANAGED_ARTIFACTS_FOR_TESTS: 'true',
+      CI: 'true',
+    })).toThrow(
       'CONTROL_METRICS_TOKEN or CONTROL_METRICS_TOKEN_FILE is required in production',
     );
   });
@@ -259,6 +292,9 @@ describe('control configuration', () => {
   it('disables unsigned legacy usage reports in production by default', () => {
     expect(loadControlConfig({
       NODE_ENV: 'production',
+      CONTROL_ARTIFACT_STORAGE_REQUIRED: 'false',
+      CONTROL_ALLOW_UNMANAGED_ARTIFACTS_FOR_TESTS: 'true',
+      CI: 'true',
       CONTROL_METRICS_TOKEN: 'm'.repeat(48),
       CONTROL_DATA_REGION: 'CN-BJ',
       CONTROL_PRIVACY_CONTROLLER: 'Otto Technology',

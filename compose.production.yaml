@@ -62,9 +62,13 @@ x-control-common: &control-common
     - postgres_tls_ca
     - alert_webhook_secret
     - audit_anchor_token
+    - artifact_s3_access_key_id
+    - artifact_s3_secret_access_key
+    - artifact_s3_session_token
   volumes:
     - ${OTTO_CONTROL_BACKUP_DIR:-./backups}/reports:/var/lib/otto-control/backup-reports:ro
     - ${OTTO_CONTROL_SIGNING_DIR:-./signing}:/run/otto-secrets:ro
+    - ${OTTO_CONTROL_ATTESTATION_DIR:-./attestations}:/run/otto-attestations:ro
   read_only: true
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=32m
@@ -409,6 +413,12 @@ secrets:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/alert_webhook_secret
   audit_anchor_token:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/audit_anchor_token
+  artifact_s3_access_key_id:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/artifact_s3_access_key_id
+  artifact_s3_secret_access_key:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/artifact_s3_secret_access_key
+  artifact_s3_session_token:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/artifact_s3_session_token
   postgres_tls_ca:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_tls_ca.pem
   postgres_tls_cert:

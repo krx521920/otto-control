@@ -166,10 +166,10 @@ openssl pkey -in release-attestation-private.pem -pubout \
   -out release-attestation-public.pem
 ```
 
-Copy only the public key to the Control secrets directory. Start from
+Copy only the public key to the dedicated Control attestation directory. Start from
 `deploy/artifact-attestation-keys.example.json`, keep the public-key reference
 relative to that manifest, and set
-`CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE=/run/otto-secrets/artifact-attestation-keys.json`.
+`CONTROL_ARTIFACT_ATTESTATION_KEYS_FILE=/run/otto-attestations/artifact_attestation_keyring.json`.
 The private attestation key and platform code-signing credentials never belong
 on Control.
 
@@ -203,7 +203,7 @@ only through files. Production endpoints and CDN origins must use HTTPS.
 
 | Setting | Purpose |
 | --- | --- |
-| `CONTROL_ARTIFACT_STORAGE_REQUIRED` | Set `true` to reject metadata-only legacy artifacts at activation. |
+| `CONTROL_ARTIFACT_STORAGE_REQUIRED` | Defaults to `true` in production and rejects metadata-only legacy artifacts at activation. |
 | `CONTROL_ARTIFACT_S3_ENDPOINT` / `CONTROL_ARTIFACT_S3_BUCKET` | S3 or MinIO origin and an Object-Lock-capable bucket. |
 | `CONTROL_ARTIFACT_S3_ACCESS_KEY_ID_FILE` / `CONTROL_ARTIFACT_S3_SECRET_ACCESS_KEY_FILE` | Least-privilege file-backed upload, HEAD, and download credentials. |
 | `CONTROL_ARTIFACT_S3_ENCRYPTION` | `AES256` or `aws:kms`; KMS also requires `CONTROL_ARTIFACT_S3_KMS_KEY_ID`. |
@@ -216,6 +216,37 @@ The bucket must have versioning and Object Lock enabled when it is created;
 these properties cannot be repaired by Control after the fact. Use a dedicated
 storage identity restricted to the configured bucket and prefix. Control never
 accepts object-store credentials in an API request or audit event.
+
+The production bootstrap refuses to create a deployable identity without this
+pipeline. Supply the object-store identity and the isolated runner's public
+attestation key explicitly:
+
+```bash
+npm run bootstrap:production -- \
+  --environment production \
+  --public-url https://control.company.cn \
+  --federation-public-url https://federation.company.cn \
+  --aws-kms-key-arns "$CONTROL_SIGNING_KMS_KEY_ARN" \
+  --acme-email operations@company.cn \
+  --privacy-controller "Company legal name" \
+  --privacy-contact privacy@company.cn \
+  --data-region CN-BJ \
+  --artifact-s3-endpoint https://s3.cn-north-1.amazonaws.com.cn \
+  --artifact-s3-bucket company-otto-releases \
+  --artifact-s3-region cn-north-1 \
+  --artifact-s3-access-key-id-file ./inputs/release-access-key-id \
+  --artifact-s3-secret-access-key-file ./inputs/release-secret-access-key \
+  --artifact-attestation-key-id nsiet-release-2026-01 \
+  --artifact-attestation-public-key-file ./inputs/release-attestation-public.pem \
+  --artifact-cdn-base-url https://releases.company.cn
+```
+
+The bootstrap copies credentials into Compose secrets, copies only the public
+attestation key into a separate read-only mount, and never writes either value
+to the environment file. The unmanaged-artifact escape hatch is accepted only
+when `CI=true`; it is not a production operating mode. See
+`docs/release-activation-runbook.zh-CN.md` for the Otto and Otto Green release
+procedure and rollback evidence.
 
 ## Development
 
@@ -647,7 +678,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.30.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.31.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -1115,10 +1146,12 @@ control service is unavailable.
    `PUT /v1/admin/deployments/:deploymentId/update-distribution`.
 3. Register a draft release with HTTPS full and/or incremental manifest URLs.
    Every manifest reference requires its lowercase SHA-256 digest.
-4. Register every downloadable file with
-   `POST /v1/admin/update-releases/:releaseId/artifacts`. At least one platform
-   installer and signed artifact records matching every referenced manifest are
-   required. Artifact metadata is immutable after signing.
+4. In production, upload every downloadable file through
+   `POST /v1/admin/update-releases/:releaseId/artifact-uploads` and complete it
+   with trusted platform-signing evidence. The metadata-only `artifacts` route
+   remains a development migration path and cannot activate a release when the
+   production storage gate is enabled. At least one platform installer and
+   signed artifact records matching every referenced manifest are required.
 5. Activate the release. A canary uses a stable 1-100 cohort derived from the
    distribution, release, and deployment IDs. Stable and required releases are
    always 100 percent; required responses set `mandatory: true`.

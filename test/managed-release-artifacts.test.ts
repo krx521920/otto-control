@@ -257,6 +257,23 @@ describe('managed release artifact pipeline', () => {
     }, ACTOR)).rejects.toThrow('timestamped Authenticode');
   });
 
+  it('rejects unsigned installers and evidence bound to another source commit', async () => {
+    const installer = await upload({
+      kind: 'windows_installer', platform: 'windows-x64', sha256: INSTALLER_SHA, sizeBytes: 100_000,
+    });
+    await expect(service.completeUpload(release.id, {
+      ticket: installer.ticket,
+    }, ACTOR)).rejects.toThrow('trusted code signing evidence');
+
+    const wrongCommit = codeSigning(installer.ticket.ticket);
+    wrongCommit.evidence.sourceCommit = 'f'.repeat(40);
+    await expect(service.completeUpload(release.id, {
+      ticket: installer.ticket,
+      codeSigning: wrongCommit,
+    }, ACTOR)).rejects.toThrow('not bound to the uploaded artifact');
+    expect(store.releaseArtifacts.size).toBe(0);
+  });
+
   it('detects object version and storage-control changes after completion', async () => {
     const installer = await upload({
       kind: 'windows_installer', platform: 'windows-x64', sha256: INSTALLER_SHA, sizeBytes: 100_000,

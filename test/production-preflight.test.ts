@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -70,6 +71,16 @@ describe('deployment preflight', () => {
     const output = mkdtempSync(join(tmpdir(), 'otto-control-preflight-kms-'));
     try {
       const keyArn = `arn:aws:kms:cn-north-1:111122223333:key/mrk-${'b'.repeat(32)}`;
+      const attestationKeys = generateKeyPairSync('ed25519');
+      const accessKeyFile = join(output, 'artifact-access-key.input');
+      const secretKeyFile = join(output, 'artifact-secret-key.input');
+      const attestationPublicKeyFile = join(output, 'artifact-attestation-public.input.pem');
+      writeFileSync(accessKeyFile, 'AKIAOTTOCONTROLTEST01', 'utf8');
+      writeFileSync(secretKeyFile, 'production-artifact-secret-fixture', 'utf8');
+      writeFileSync(
+        attestationPublicKeyFile,
+        attestationKeys.publicKey.export({ type: 'spki', format: 'pem' }),
+      );
       const bootstrap = spawnSync(process.execPath, [
         'scripts/bootstrap-production.mjs',
         '--environment', 'production',
@@ -80,6 +91,14 @@ describe('deployment preflight', () => {
         '--privacy-contact', 'privacy@otto.cn',
         '--data-region', 'CN-BJ',
         '--aws-kms-key-arns', keyArn,
+        '--artifact-s3-endpoint', 'https://s3.cn-north-1.amazonaws.com.cn',
+        '--artifact-s3-bucket', 'otto-production-releases',
+        '--artifact-s3-region', 'cn-north-1',
+        '--artifact-s3-access-key-id-file', accessKeyFile,
+        '--artifact-s3-secret-access-key-file', secretKeyFile,
+        '--artifact-attestation-key-id', 'nsiet-release-2026-01',
+        '--artifact-attestation-public-key-file', attestationPublicKeyFile,
+        '--artifact-cdn-base-url', 'https://releases.otto.cn',
         '--output', output,
       ], { cwd: process.cwd(), encoding: 'utf8' });
       expect(bootstrap.status, bootstrap.stderr).toBe(0);
@@ -105,8 +124,9 @@ describe('deployment preflight', () => {
         '--privacy-contact', 'privacy@otto.cn',
         '--data-region', 'CN-BJ',
         '--aws-kms-key-arns', keyArn,
+        '--allow-unmanaged-artifacts-for-test',
         '--output', output,
-      ], { cwd: process.cwd(), encoding: 'utf8' });
+      ], { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, CI: 'true' } });
       expect(bootstrap.status, bootstrap.stderr).toBe(0);
       writeFileSync(join(output, 'signing', 'control_signer_private_key.pem'), 'forbidden', 'utf8');
       const result = preflight(join(output, '.env.production'), 'production');
@@ -132,6 +152,7 @@ describe('deployment preflight', () => {
         '--privacy-contact', 'privacy@otto.cn',
         '--data-region', 'CN-BJ',
         '--allow-local-signing-for-test',
+        '--allow-unmanaged-artifacts-for-test',
         '--output', output,
       ], {
         cwd: process.cwd(),

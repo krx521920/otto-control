@@ -196,6 +196,7 @@ describe('production bootstrap', () => {
         '--data-region',
         'CN-BJ',
         '--allow-local-signing-for-test',
+        '--allow-unmanaged-artifacts-for-test',
         '--output',
         output,
       ], { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, CI: 'true' } });
@@ -225,8 +226,9 @@ describe('production bootstrap', () => {
         '--privacy-contact', 'privacy@otto.cn',
         '--data-region', 'CN-BJ',
         '--aws-kms-key-arns', keyArn,
+        '--allow-unmanaged-artifacts-for-test',
         '--output', output,
-      ], { cwd: process.cwd(), encoding: 'utf8' });
+      ], { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, CI: 'true' } });
       expect(result.status, result.stderr).toBe(0);
       const environment = readFileSync(join(output, '.env.production'), 'utf8');
       const keyring = JSON.parse(readFileSync(

@@ -78,10 +78,12 @@ export function loadArtifactStorageConfig(
   env: NodeJS.ProcessEnv,
   environment: ControlEnvironment,
 ): ArtifactStorageConfig | null {
+  const isProductionDeployment = environment === 'production'
+    && env.OTTO_CONTROL_DEPLOYMENT_ENVIRONMENT?.trim() !== 'staging';
   const endpoint = env.CONTROL_ARTIFACT_S3_ENDPOINT?.trim();
   const required = booleanValue(
     env.CONTROL_ARTIFACT_STORAGE_REQUIRED,
-    false,
+    isProductionDeployment,
     'CONTROL_ARTIFACT_STORAGE_REQUIRED',
   );
   if (!endpoint) {
@@ -156,4 +158,3 @@ export function loadArtifactStorageConfig(
       : null,
   };
 }
-
