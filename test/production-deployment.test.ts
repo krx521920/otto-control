@@ -256,6 +256,7 @@ describe('production deployment assets', () => {
     );
     expect(control).toContain('CONTROL_DATABASE_PASSWORD_FILE');
     expect(control).toContain('CONTROL_SIGNER_KEYRING_FILE');
+    expect(control).toContain('stage_environment_file NODE_EXTRA_CA_CERTS');
     expect(control).toContain('stage_file /run/secrets/control_signer_private_key.pem');
     expect(control).toContain('FEDERATION_ADMIN_TOKEN_FILE');
     expect(control).toContain('FEDERATION_DATABASE_PASSWORD_FILE');

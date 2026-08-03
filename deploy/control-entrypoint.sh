@@ -34,6 +34,10 @@ stage_environment_file() {
   export "$variable_name=$target_path"
 }
 
+# NODE_EXTRA_CA_CERTS is read while Node starts. Docker bind-mounted secrets
+# keep their host ownership, so stage the CA before dropping privileges.
+stage_environment_file NODE_EXTRA_CA_CERTS
+
 # Keep relative private-key references in a keyring valid after staging it.
 if [ -d /run/otto-secrets ]; then
   for source_path in /run/otto-secrets/*; do
