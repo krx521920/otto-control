@@ -1,3 +1,9 @@
+{
+  admin off
+  email {$ACME_EMAIL}
+  acme_ca {$ACME_CA}
+}
+
 {$CONTROL_DOMAIN} {
   encode zstd gzip
 

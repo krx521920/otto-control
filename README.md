@@ -261,18 +261,26 @@ test database URL is present.
 
 ## Production Compose deployment
 
-Point a public DNS name at the server first. Then create the deployment identity
-and secrets locally on that server:
+Point two public DNS names at the server first. Production requires explicit
+legal, residency, and ACME ownership metadata; the bootstrap no longer inserts
+development placeholders. The complete fresh-Ubuntu procedure and acceptance
+evidence are in
+[`docs/production-deployment-runbook.zh-CN.md`](docs/production-deployment-runbook.zh-CN.md).
 
 ```bash
 npm ci
 npm run bootstrap:production -- \
-  --public-url https://control.example.com \
-  --federation-public-url https://federation.example.com
-docker compose -f compose.production.yaml --env-file .env.production config
+  --environment production \
+  --public-url https://control.company.cn \
+  --federation-public-url https://federation.company.cn \
+  --acme-email operations@company.cn \
+  --privacy-controller "Your Company Ltd." \
+  --privacy-contact privacy@company.cn \
+  --data-region CN-BJ
+npm run preflight:deployment -- --env-file .env.production
 docker compose -f compose.production.yaml --env-file .env.production up -d --build
 docker compose -f compose.production.yaml --env-file .env.production ps
-curl https://control.example.com/health/ready
+curl https://control.company.cn/health/ready
 ```
 
 The stack keeps etcd and every PostgreSQL instance on a database-only network.
@@ -282,7 +290,13 @@ identity; Caddy checks `/health/ready`, removes failed instances, and sends new
 requests to the least-busy healthy instance. Only Caddy publishes ports 80 and
 443. Control containers run without Linux capabilities, with read-only root
 filesystems, and receive credentials through `/run/secrets` rather than image
-layers or plain environment values.
+layers or plain environment values. PostgreSQL requires TLS for network clients;
+the Control, Federation, operations, and replication clients validate the
+deployment CA instead of accepting an unauthenticated internal connection.
+
+Staging uses `--environment staging`, `.env.staging`, `secrets-staging/`,
+`backups-staging/`, and a distinct Compose project name. Run it on a separate
+host and separate domains; never copy production identity files into staging.
 
 This Compose topology provides **process-level high availability on one Linux
 host**. It tolerates a PostgreSQL or Control container/process failure, but it
@@ -375,6 +389,7 @@ sh deploy/backup-pitr-postgres.sh full
 sh deploy/drill-pitr-postgres.sh
 sh deploy/drill-pitr-postgres.sh 2026-08-02T10:15:00+08:00
 sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL
+sh deploy/drill-control-failover.sh --confirm=FAILOVER_OTTO_CONTROL_REPLICAS
 ```
 
 The PITR drill restores physical files into the dedicated

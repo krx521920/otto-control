@@ -6,12 +6,17 @@ umask 077
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 COMPOSE_FILE=${OTTO_CONTROL_COMPOSE_FILE:-"$ROOT/compose.production.yaml"}
 ENV_FILE=${OTTO_CONTROL_ENV_FILE:-"$ROOT/.env.production"}
-BACKUP_DIR=${OTTO_CONTROL_BACKUP_DIR:-"$ROOT/backups"}
 
 read_env() {
   sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1
 }
 
+BACKUP_DIR=${OTTO_CONTROL_BACKUP_DIR:-$(read_env OTTO_CONTROL_BACKUP_DIR)}
+BACKUP_DIR=${BACKUP_DIR:-"$ROOT/backups"}
+case "$BACKUP_DIR" in
+  /*) ;;
+  *) BACKUP_DIR="$ROOT/${BACKUP_DIR#./}" ;;
+esac
 DB_USER=$(read_env POSTGRES_USER)
 DB_NAME=$(read_env POSTGRES_DB)
 RETENTION_DAYS=$(read_env CONTROL_BACKUP_RETENTION_DAYS)

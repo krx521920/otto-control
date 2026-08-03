@@ -31,8 +31,10 @@ SUPERUSER_PASSWORD=$(read_secret /run/secrets/postgres_superuser_password)
 REPLICATION_PASSWORD=$(read_secret /run/secrets/postgres_replication_password)
 validate_generated_secret "$SUPERUSER_PASSWORD"
 validate_generated_secret "$REPLICATION_PASSWORD"
-if [ ! -s /run/secrets/postgres_password ] || [ ! -s /run/secrets/pgbackrest_cipher_pass ]; then
-  printf '%s\n' 'application or pgBackRest secret is missing' >&2
+if [ ! -s /run/secrets/postgres_password ] || [ ! -s /run/secrets/pgbackrest_cipher_pass ] || \
+   [ ! -s /run/secrets/postgres_tls_ca ] || [ ! -s /run/secrets/postgres_tls_cert ] || \
+   [ ! -s /run/secrets/postgres_tls_key ]; then
+  printf '%s\n' 'application, pgBackRest, or PostgreSQL TLS secret is missing' >&2
   exit 1
 fi
 
@@ -58,9 +60,16 @@ stage_secret() {
 
 POSTGRES_APP_PASSWORD_FILE=/run/patroni/postgres_password
 OTTO_PGBACKREST_CIPHER_FILE=/run/patroni/pgbackrest_cipher_pass
+POSTGRES_TLS_CA_FILE=/run/patroni/postgres_tls_ca.pem
+POSTGRES_TLS_CERT_FILE=/run/patroni/postgres_tls_cert.pem
+POSTGRES_TLS_KEY_FILE=/run/patroni/postgres_tls_key.pem
 stage_secret /run/secrets/postgres_password "$POSTGRES_APP_PASSWORD_FILE"
 stage_secret /run/secrets/pgbackrest_cipher_pass "$OTTO_PGBACKREST_CIPHER_FILE"
+stage_secret /run/secrets/postgres_tls_ca "$POSTGRES_TLS_CA_FILE"
+stage_secret /run/secrets/postgres_tls_cert "$POSTGRES_TLS_CERT_FILE"
+stage_secret /run/secrets/postgres_tls_key "$POSTGRES_TLS_KEY_FILE"
 export POSTGRES_APP_PASSWORD_FILE OTTO_PGBACKREST_CIPHER_FILE
+export POSTGRES_TLS_CA_FILE POSTGRES_TLS_CERT_FILE POSTGRES_TLS_KEY_FILE
 
 cat > /run/patroni/patroni.yml <<EOF
 scope: otto-control
@@ -92,8 +101,8 @@ bootstrap:
       use_slots: true
       pg_hba:
         - local all all trust
-        - host replication replicator 0.0.0.0/0 scram-sha-256
-        - host all all 0.0.0.0/0 scram-sha-256
+        - hostssl replication replicator 0.0.0.0/0 scram-sha-256
+        - hostssl all all 0.0.0.0/0 scram-sha-256
       parameters:
         archive_command: '/usr/local/bin/otto-pgbackrest --stanza=otto-control archive-push %p'
         archive_mode: 'on'
@@ -103,6 +112,10 @@ bootstrap:
         max_wal_senders: 10
         password_encryption: scram-sha-256
         restore_command: '/usr/local/bin/otto-pgbackrest --stanza=otto-control archive-get %f %p'
+        ssl: 'on'
+        ssl_ca_file: '${POSTGRES_TLS_CA_FILE}'
+        ssl_cert_file: '${POSTGRES_TLS_CERT_FILE}'
+        ssl_key_file: '${POSTGRES_TLS_KEY_FILE}'
         wal_level: replica
         wal_log_hints: 'on'
   initdb:
@@ -116,20 +129,31 @@ postgresql:
   data_dir: /var/lib/postgresql/data/pgdata
   bin_dir: /usr/lib/postgresql/17/bin
   pgpass: /run/patroni/pgpass
+  pg_hba:
+    - local all all trust
+    - hostssl replication replicator 0.0.0.0/0 scram-sha-256
+    - hostssl all all 0.0.0.0/0 scram-sha-256
   authentication:
     replication:
       username: replicator
       password: ${REPLICATION_PASSWORD}
+      sslmode: verify-full
+      sslrootcert: ${POSTGRES_TLS_CA_FILE}
     superuser:
       username: postgres
       password: ${SUPERUSER_PASSWORD}
+      sslmode: verify-full
+      sslrootcert: ${POSTGRES_TLS_CA_FILE}
   create_replica_methods:
     - basebackup
   basebackup:
     checkpoint: fast
     max-rate: 100M
   parameters:
-    ssl: 'off'
+    ssl: 'on'
+    ssl_ca_file: '${POSTGRES_TLS_CA_FILE}'
+    ssl_cert_file: '${POSTGRES_TLS_CERT_FILE}'
+    ssl_key_file: '${POSTGRES_TLS_KEY_FILE}'
 
 watchdog:
   mode: 'off'

@@ -1,4 +1,4 @@
-name: otto-control
+name: ${OTTO_CONTROL_STACK_NAME:-otto-control}
 
 x-postgres-common: &postgres-common
   image: ${POSTGRES_HA_IMAGE:-otto-control-postgres-ha:local}
@@ -18,6 +18,9 @@ x-postgres-common: &postgres-common
     - postgres_superuser_password
     - postgres_replication_password
     - pgbackrest_cipher_pass
+    - postgres_tls_ca
+    - postgres_tls_cert
+    - postgres_tls_key
   expose:
     - "5432"
     - "8008"
@@ -45,7 +48,7 @@ x-control-common: &control-common
   restart: unless-stopped
   init: true
   env_file:
-    - .env.production
+    - ${OTTO_CONTROL_ENV_FILE:-.env.production}
   depends_on:
     postgres-tools:
       condition: service_healthy
@@ -60,10 +63,11 @@ x-control-common: &control-common
     - source: control_signer_keyring
       target: control_signer_keyring.json
     - postgres_password
+    - postgres_tls_ca
     - alert_webhook_secret
     - audit_anchor_token
   volumes:
-    - ./backups/reports:/var/lib/otto-control/backup-reports:ro
+    - ${OTTO_CONTROL_BACKUP_DIR:-./backups}/reports:/var/lib/otto-control/backup-reports:ro
   read_only: true
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=32m
@@ -89,7 +93,7 @@ x-federation-common: &federation-common
   restart: unless-stopped
   init: true
   env_file:
-    - .env.production
+    - ${OTTO_CONTROL_ENV_FILE:-.env.production}
   environment:
     FEDERATION_HOST: 0.0.0.0
     FEDERATION_PORT: "7790"
@@ -110,6 +114,7 @@ x-federation-common: &federation-common
     - federation_admin_token
     - federation_metrics_token
     - postgres_password
+    - postgres_tls_ca
   read_only: true
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=32m
@@ -269,6 +274,8 @@ services:
       PGPASSFILE: /tmp/.pgpass
       PGPORT: "5432"
       PGUSER: ${POSTGRES_USER:-otto_control}
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: /run/secrets/postgres_tls_ca
     user: root
     entrypoint: ["/bin/sh", "-ec"]
     command:
@@ -278,7 +285,7 @@ services:
           gosu postgres sh -c 'umask 077; cat > "$$PGPASSFILE"'
         unset password
         exec gosu postgres tail -f /dev/null
-    secrets: [postgres_password]
+    secrets: [postgres_password, postgres_tls_ca]
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=1m,mode=1777
     healthcheck:
@@ -312,7 +319,7 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    env_file: [.env.production]
+    env_file: ["${OTTO_CONTROL_ENV_FILE:-.env.production}"]
     ports:
       - "80:80"
       - "443:443"
@@ -360,8 +367,11 @@ services:
     command:
       - |
         gosu postgres sh -c 'umask 077; cat > /run/patroni/pgbackrest_cipher_pass' < /run/secrets/pgbackrest_cipher_pass
+        gosu postgres sh -c 'umask 077; cat > /run/patroni/postgres_tls_ca.pem' < /run/secrets/postgres_tls_ca
+        gosu postgres sh -c 'umask 077; cat > /run/patroni/postgres_tls_cert.pem' < /run/secrets/postgres_tls_cert
+        gosu postgres sh -c 'umask 077; cat > /run/patroni/postgres_tls_key.pem' < /run/secrets/postgres_tls_key
         exec gosu postgres tail -f /dev/null
-    secrets: [pgbackrest_cipher_pass]
+    secrets: [pgbackrest_cipher_pass, postgres_tls_ca, postgres_tls_cert, postgres_tls_key]
     volumes:
       - postgres_pitr_drill_data:/var/lib/postgresql/data
       - pgbackrest_repository:/var/lib/pgbackrest:ro
@@ -377,31 +387,37 @@ services:
 
 secrets:
   control_admin_token:
-    file: ./secrets/control_admin_token
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_admin_token
   control_token_secret:
-    file: ./secrets/control_token_secret
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_token_secret
   control_metrics_token:
-    file: ./secrets/control_metrics_token
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_metrics_token
   federation_admin_token:
-    file: ./secrets/federation_admin_token
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/federation_admin_token
   federation_metrics_token:
-    file: ./secrets/federation_metrics_token
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/federation_metrics_token
   control_signer_private_key:
-    file: ./secrets/control_signer_private_key.pem
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_signer_private_key.pem
   control_signer_keyring:
-    file: ./secrets/control_signer_keyring.json
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_signer_keyring.json
   postgres_password:
-    file: ./secrets/postgres_password
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_password
   postgres_superuser_password:
-    file: ./secrets/postgres_superuser_password
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_superuser_password
   postgres_replication_password:
-    file: ./secrets/postgres_replication_password
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_replication_password
   pgbackrest_cipher_pass:
-    file: ./secrets/pgbackrest_cipher_pass
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/pgbackrest_cipher_pass
   alert_webhook_secret:
-    file: ./secrets/alert_webhook_secret
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/alert_webhook_secret
   audit_anchor_token:
-    file: ./secrets/audit_anchor_token
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/audit_anchor_token
+  postgres_tls_ca:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_tls_ca.pem
+  postgres_tls_cert:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_tls_cert.pem
+  postgres_tls_key:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_tls_key.pem
 
 volumes:
   etcd_1_data:

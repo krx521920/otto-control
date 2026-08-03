@@ -1,6 +1,16 @@
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -9,7 +19,11 @@ function option(name) {
 
 function requiredPublicUrl() {
   const raw = option('--public-url');
-  if (!raw) throw new Error('usage: npm run bootstrap:production -- --public-url https://control.example.com');
+  if (!raw) {
+    throw new Error(
+      'usage: npm run bootstrap:production -- --environment production --public-url https://control.example.com',
+    );
+  }
   const url = new URL(raw);
   if (url.protocol !== 'https:' || url.pathname !== '/' || url.search || url.hash) {
     throw new Error('--public-url must be an HTTPS origin without a path, query, or fragment');
@@ -26,17 +40,150 @@ function federationPublicUrl(controlUrl) {
   return url;
 }
 
+function deploymentEnvironment() {
+  const value = option('--environment')?.trim() || 'production';
+  if (value !== 'staging' && value !== 'production') {
+    throw new Error('--environment must be staging or production');
+  }
+  return value;
+}
+
+function reservedHostname(hostname) {
+  const value = hostname.toLowerCase();
+  return value === 'localhost'
+    || value.endsWith('.localhost')
+    || value.endsWith('.example')
+    || value.endsWith('.example.com')
+    || value.endsWith('.example.net')
+    || value.endsWith('.example.org')
+    || value.endsWith('.invalid')
+    || value.endsWith('.test');
+}
+
+function requiredProductionOption(name, environment, fallback) {
+  const value = option(name)?.trim() || fallback?.trim();
+  if (environment === 'production' && !value) {
+    throw new Error(`${name} is required for production deployments`);
+  }
+  return value || '';
+}
+
 function writeSecret(path, value) {
   writeFileSync(path, `${value}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
 }
 
+function runOpenSsl(arguments_, workingDirectory) {
+  const result = spawnSync('openssl', arguments_, {
+    cwd: workingDirectory,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.status !== 0) {
+    throw new Error(`openssl failed: ${result.stderr.trim() || result.stdout.trim()}`);
+  }
+}
+
+function createPostgresTlsIdentity(secretDirectory) {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'otto-control-postgres-tls-'));
+  try {
+    const caKey = join(temporaryDirectory, 'postgres_tls_ca_private_key.pem');
+    const caCertificate = join(temporaryDirectory, 'postgres_tls_ca.pem');
+    const serverKey = join(temporaryDirectory, 'postgres_tls_key.pem');
+    const serverRequest = join(temporaryDirectory, 'postgres_tls.csr');
+    const serverCertificate = join(temporaryDirectory, 'postgres_tls_cert.pem');
+    const extensions = join(temporaryDirectory, 'postgres_tls.ext');
+    const openSslConfiguration = join(temporaryDirectory, 'openssl.cnf');
+    writeFileSync(openSslConfiguration, [
+      '[req]',
+      'distinguished_name=req_distinguished_name',
+      '[req_distinguished_name]',
+      '[v3_ca]',
+      'basicConstraints=critical,CA:TRUE',
+      'keyUsage=critical,keyCertSign,cRLSign',
+      'subjectKeyIdentifier=hash',
+      'authorityKeyIdentifier=keyid:always',
+      '',
+    ].join('\n'), { encoding: 'utf8', mode: 0o600 });
+    writeFileSync(extensions, [
+      'basicConstraints=critical,CA:FALSE',
+      'keyUsage=critical,digitalSignature,keyEncipherment',
+      'extendedKeyUsage=serverAuth',
+      'subjectAltName=DNS:postgres-router,DNS:postgres-1,DNS:postgres-2,DNS:postgres-3',
+      '',
+    ].join('\n'), { encoding: 'utf8', mode: 0o600 });
+    runOpenSsl([
+      'req', '-x509', '-newkey', 'rsa:3072', '-sha256', '-nodes', '-days', '3650',
+      '-config', openSslConfiguration,
+      '-extensions', 'v3_ca',
+      '-subj', '/CN=Otto Control PostgreSQL CA', '-keyout', caKey, '-out', caCertificate,
+    ], temporaryDirectory);
+    runOpenSsl([
+      'req', '-new', '-newkey', 'rsa:3072', '-sha256', '-nodes',
+      '-config', openSslConfiguration,
+      '-subj', '/CN=postgres-router', '-keyout', serverKey, '-out', serverRequest,
+    ], temporaryDirectory);
+    runOpenSsl([
+      'x509', '-req', '-in', serverRequest, '-CA', caCertificate, '-CAkey', caKey,
+      '-CAcreateserial', '-out', serverCertificate, '-days', '825', '-sha256',
+      '-extfile', extensions,
+    ], temporaryDirectory);
+    for (const file of [
+      'postgres_tls_ca_private_key.pem',
+      'postgres_tls_ca.pem',
+      'postgres_tls_key.pem',
+      'postgres_tls_cert.pem',
+    ]) {
+      writeSecret(resolve(secretDirectory, file), readFileSync(join(temporaryDirectory, file), 'utf8').trim());
+    }
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
 function main() {
+  const environmentName = deploymentEnvironment();
   const publicUrl = requiredPublicUrl();
   const federationUrl = federationPublicUrl(publicUrl);
+  if (publicUrl.hostname === federationUrl.hostname) {
+    throw new Error('Control and Federation must use different public hostnames');
+  }
+  if (environmentName === 'production'
+    && (reservedHostname(publicUrl.hostname) || reservedHostname(federationUrl.hostname))) {
+    throw new Error('production deployments cannot use localhost or reserved example/test domains');
+  }
+  const acmeEmail = requiredProductionOption('--acme-email', environmentName, process.env.ACME_EMAIL);
+  const privacyController = requiredProductionOption(
+    '--privacy-controller',
+    environmentName,
+    process.env.CONTROL_PRIVACY_CONTROLLER,
+  );
+  const privacyContact = requiredProductionOption(
+    '--privacy-contact',
+    environmentName,
+    process.env.CONTROL_PRIVACY_CONTACT,
+  );
+  const dataRegion = requiredProductionOption(
+    '--data-region',
+    environmentName,
+    process.env.CONTROL_DATA_REGION,
+  ) || 'CN-BJ';
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+  if (acmeEmail && !emailPattern.test(acmeEmail)) {
+    throw new Error('--acme-email must be a valid email address');
+  }
+  if (privacyContact && !emailPattern.test(privacyContact)) {
+    throw new Error('--privacy-contact must be a valid email address');
+  }
+  if (!/^[A-Z]{2}(?:-[A-Z0-9]{2,8})+$/u.test(dataRegion)) {
+    throw new Error('--data-region must be an explicit region code such as CN-BJ');
+  }
   const root = resolve(option('--output') ?? '.');
-  const secretDirectory = resolve(root, 'secrets');
+  const environmentFileName = `.env.${environmentName}`;
+  const secretDirectoryName = environmentName === 'production' ? 'secrets' : 'secrets-staging';
+  const backupDirectoryName = environmentName === 'production' ? 'backups' : 'backups-staging';
+  const secretDirectory = resolve(root, secretDirectoryName);
   const targets = [
-    resolve(root, '.env.production'),
+    resolve(root, environmentFileName),
     resolve(secretDirectory, 'control_signer_private_key.pem'),
     resolve(secretDirectory, 'control_signer_keyring.json'),
     resolve(secretDirectory, 'control_admin_token'),
@@ -51,12 +198,16 @@ function main() {
     resolve(secretDirectory, 'backup_encryption_key'),
     resolve(secretDirectory, 'alert_webhook_secret'),
     resolve(secretDirectory, 'audit_anchor_token'),
+    resolve(secretDirectory, 'postgres_tls_ca_private_key.pem'),
+    resolve(secretDirectory, 'postgres_tls_ca.pem'),
+    resolve(secretDirectory, 'postgres_tls_key.pem'),
+    resolve(secretDirectory, 'postgres_tls_cert.pem'),
   ];
   const existing = targets.find(existsSync);
-  if (existing) throw new Error(`refusing to overwrite existing production identity file: ${existing}`);
+  if (existing) throw new Error(`refusing to overwrite existing deployment identity file: ${existing}`);
   mkdirSync(secretDirectory, { recursive: true, mode: 0o700 });
-  mkdirSync(resolve(root, 'backups'), { recursive: true, mode: 0o700 });
-  const backupReportDirectory = resolve(root, 'backups', 'reports');
+  mkdirSync(resolve(root, backupDirectoryName), { recursive: true, mode: 0o700 });
+  const backupReportDirectory = resolve(root, backupDirectoryName, 'reports');
   mkdirSync(backupReportDirectory, { recursive: true, mode: 0o755 });
   chmodSync(backupReportDirectory, 0o755);
 
@@ -96,10 +247,20 @@ function main() {
   writeSecret(resolve(secretDirectory, 'backup_encryption_key'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'alert_webhook_secret'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'audit_anchor_token'), randomBytes(48).toString('base64url'));
+  createPostgresTlsIdentity(secretDirectory);
 
   const environment = [
     'NODE_ENV=production',
+    `OTTO_CONTROL_DEPLOYMENT_ENVIRONMENT=${environmentName}`,
+    `OTTO_CONTROL_STACK_NAME=otto-control-${environmentName}`,
+    `OTTO_CONTROL_ENV_FILE=${environmentFileName}`,
+    `OTTO_CONTROL_SECRETS_DIR=./${secretDirectoryName}`,
+    `OTTO_CONTROL_BACKUP_DIR=./${backupDirectoryName}`,
     'OTTO_CONTROL_VERSION=0.26.0',
+    `ACME_EMAIL=${acmeEmail || `operations@${publicUrl.hostname}`}`,
+    `ACME_CA=${environmentName === 'production'
+      ? 'https://acme-v02.api.letsencrypt.org/directory'
+      : 'https://acme-staging-v02.api.letsencrypt.org/directory'}`,
     'CONTROL_HOST=0.0.0.0',
     'CONTROL_PORT=7788',
     'CONTROL_LOG_LEVEL=info',
@@ -117,7 +278,7 @@ function main() {
     'FEDERATION_DATABASE_NAME=otto_control',
     'FEDERATION_DATABASE_USER=otto_control',
     'FEDERATION_DATABASE_PASSWORD_FILE=/run/secrets/postgres_password',
-    'FEDERATION_DATABASE_SSL=false',
+    'FEDERATION_DATABASE_SSL=true',
     'FEDERATION_ADMIN_TOKEN_FILE=/run/secrets/federation_admin_token',
     'FEDERATION_METRICS_TOKEN_FILE=/run/secrets/federation_metrics_token',
     'FEDERATION_MAX_CIPHERTEXT_BYTES=1048576',
@@ -132,7 +293,8 @@ function main() {
     'CONTROL_DATABASE_NAME=otto_control',
     'CONTROL_DATABASE_USER=otto_control',
     'CONTROL_DATABASE_PASSWORD_FILE=/run/secrets/postgres_password',
-    'CONTROL_DATABASE_SSL=false',
+    'CONTROL_DATABASE_SSL=true',
+    'NODE_EXTRA_CA_CERTS=/run/secrets/postgres_tls_ca',
     'CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token',
     'CONTROL_TOKEN_SECRET_FILE=/run/secrets/control_token_secret',
     'CONTROL_METRICS_TOKEN_FILE=/run/secrets/control_metrics_token',
@@ -140,14 +302,14 @@ function main() {
     'CONTROL_LEASE_DURATION_MS=600000',
     'CONTROL_TELEMETRY_RETENTION_DAYS=90',
     'CONTROL_UPDATE_POLICY_DURATION_MS=300000',
-    `CONTROL_DATA_REGION=${process.env.CONTROL_DATA_REGION?.trim() || 'CN-BJ'}`,
-    `CONTROL_ALLOWED_DATA_REGIONS=${process.env.CONTROL_ALLOWED_DATA_REGIONS?.trim() || process.env.CONTROL_DATA_REGION?.trim() || 'CN-BJ'}`,
+    `CONTROL_DATA_REGION=${dataRegion}`,
+    `CONTROL_ALLOWED_DATA_REGIONS=${process.env.CONTROL_ALLOWED_DATA_REGIONS?.trim() || dataRegion}`,
     'CONTROL_CROSS_BORDER_ENABLED=false',
     'CONTROL_CROSS_BORDER_ASSESSMENT_ID=',
     'CONTROL_PRIVACY_POLICY_VERSION=2026-08-01',
     'CONTROL_PRIVACY_POLICY_EFFECTIVE_AT=2026-08-01T00:00:00.000Z',
-    `CONTROL_PRIVACY_CONTROLLER=${process.env.CONTROL_PRIVACY_CONTROLLER?.trim() || publicUrl.hostname}`,
-    `CONTROL_PRIVACY_CONTACT=${process.env.CONTROL_PRIVACY_CONTACT?.trim() || `privacy@${publicUrl.hostname}`}`,
+    `CONTROL_PRIVACY_CONTROLLER=${privacyController || 'Otto staging operator'}`,
+    `CONTROL_PRIVACY_CONTACT=${privacyContact || `privacy@${publicUrl.hostname}`}`,
     'CONTROL_CUSTOMER_ERASURE_GRACE_DAYS=14',
     'CONTROL_BILLING_RETENTION_DAYS=1095',
     'CONTROL_GOVERNANCE_AUDIT_RETENTION_DAYS=2555',
@@ -223,7 +385,7 @@ function main() {
     'CONTROL_DRILL_MAX_BACKUP_AGE_HOURS=48',
     'CONTROL_PITR_REPORT_RETENTION_DAYS=180',
     'CONTROL_PITR_MAX_BACKUP_AGE_HOURS=24',
-    'OTTO_CONTROL_BACKUP_KEY_FILE=./secrets/backup_encryption_key',
+    `OTTO_CONTROL_BACKUP_KEY_FILE=./${secretDirectoryName}/backup_encryption_key`,
     'POSTGRES_DB=otto_control',
     'POSTGRES_USER=otto_control',
     'ETCD_IMAGE=quay.io/coreos/etcd:v3.5.21',
@@ -238,7 +400,7 @@ function main() {
   });
 
   process.stdout.write(
-    `Production secrets created under ${secretDirectory}. Back them up securely before deployment.\n`,
+    `${environmentName} secrets created under ${secretDirectory}. Back them up securely before deployment.\n`,
   );
 }
 

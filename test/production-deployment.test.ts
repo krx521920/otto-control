@@ -22,6 +22,8 @@ describe('production deployment assets', () => {
     expect(workflow).toContain('Prove all Federation instances and encrypted relay are ready');
     expect(workflow).toContain('federation-a federation-b federation-c');
     expect(workflow).toContain('scripts/smoke-federation.mjs');
+    expect(workflow).toContain('Prove the edge survives every Control replica failure');
+    expect(workflow).toContain('compose.ci.resolved.yaml');
     expect(workflow).toContain('git diff --check');
     expect(workflow).toContain('needs: [quality, postgres-integration]');
     expect(workflow).toContain('docker build --tag otto-control:ci .');
@@ -105,6 +107,8 @@ describe('production deployment assets', () => {
     expect(compose).toContain('  postgres-2:');
     expect(compose).toContain('  postgres-3:');
     expect(compose).toContain('  postgres-router:');
+    expect(compose).toContain('name: ${OTTO_CONTROL_STACK_NAME:-otto-control}');
+    expect(compose).toContain('${OTTO_CONTROL_SECRETS_DIR:-./secrets}');
     expect(compose).toContain('dockerfile: deploy/postgres-ha/Dockerfile');
     const postgresTools = compose.slice(
       compose.indexOf('  postgres-tools:'),
@@ -114,6 +118,10 @@ describe('production deployment assets', () => {
     expect(compose).toContain('postgres_superuser_password');
     expect(compose).toContain('postgres_replication_password');
     expect(compose).toContain('pgbackrest_cipher_pass');
+    expect(compose).toContain('postgres_tls_ca');
+    expect(compose).toContain('postgres_tls_cert');
+    expect(compose).toContain('postgres_tls_key');
+    expect(compose).not.toContain('postgres_tls_ca_private_key');
     expect(compose).toContain('database:');
     expect(compose).toContain('internal: true');
     expect(compose).toContain('read_only: true');
@@ -123,13 +131,21 @@ describe('production deployment assets', () => {
     expect(compose).toContain('target: control_signer_private_key.pem');
     expect(compose).toContain('- source: control_signer_keyring');
     expect(compose).toContain('target: control_signer_keyring.json');
-    expect(compose).toContain('file: ./secrets/control_signer_private_key.pem');
-    expect(compose).toContain('file: ./secrets/control_signer_keyring.json');
+    expect(compose).toContain(
+      'file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_signer_private_key.pem',
+    );
+    expect(compose).toContain(
+      'file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_signer_keyring.json',
+    );
     expect(compose).not.toContain('./secrets:/run/otto-secrets:ro');
     expect(compose).toContain('- alert_webhook_secret');
-    expect(compose).toContain('file: ./secrets/alert_webhook_secret');
+    expect(compose).toContain(
+      'file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/alert_webhook_secret',
+    );
     expect(compose).toContain('- audit_anchor_token');
-    expect(compose).toContain('file: ./secrets/audit_anchor_token');
+    expect(compose).toContain(
+      'file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/audit_anchor_token',
+    );
     const databasePlane = compose.slice(compose.indexOf('services:'), compose.indexOf('  control-a:'));
     expect(databasePlane).not.toContain('alert_webhook_secret');
     expect(databasePlane).not.toContain('audit_anchor_token');
@@ -164,6 +180,9 @@ describe('production deployment assets', () => {
     expect(caddy).toContain('respond @internal_metrics 404');
     expect(caddy).toContain('@federation_admin path /v1/admin/federation/*');
     expect(caddy).toContain('respond @federation_admin 404');
+    expect(caddy).toContain('admin off');
+    expect(caddy).toContain('email {$ACME_EMAIL}');
+    expect(caddy).toContain('acme_ca {$ACME_CA}');
   });
 
   it('ships an authenticated internal Prometheus profile with SLO and capacity rules', () => {
@@ -196,7 +215,11 @@ describe('production deployment assets', () => {
     expect(entrypoint).toContain('synchronous_mode: true');
     expect(entrypoint).toContain('synchronous_node_count: 1');
     expect(entrypoint).toContain('failsafe_mode: true');
-    expect(entrypoint).toContain('host replication replicator 0.0.0.0/0 scram-sha-256');
+    expect(entrypoint).toContain('hostssl replication replicator 0.0.0.0/0 scram-sha-256');
+    expect(entrypoint.match(/hostssl all all 0\.0\.0\.0\/0 scram-sha-256/gu)).toHaveLength(2);
+    expect(entrypoint).toContain("ssl: 'on'");
+    expect(entrypoint).toContain("sslmode: verify-full");
+    expect(entrypoint).toContain('sslrootcert: ${POSTGRES_TLS_CA_FILE}');
     expect(entrypoint).toContain('password_encryption: scram-sha-256');
     expect(entrypoint).toContain('umask 077');
     expect(entrypoint).toContain('chmod 0700 /var/lib/postgresql/data/pgdata');
@@ -282,7 +305,7 @@ describe('production deployment assets', () => {
     const backupService = repositoryFile('deploy/systemd/otto-control-backup.service');
     expect(backupService).toContain('network-online.target');
     expect(repositoryFile('compose.production.yaml')).toContain(
-      './backups/reports:/var/lib/otto-control/backup-reports:ro',
+      '${OTTO_CONTROL_BACKUP_DIR:-./backups}/reports:/var/lib/otto-control/backup-reports:ro',
     );
   });
 
@@ -345,5 +368,23 @@ describe('production deployment assets', () => {
     expect(repositoryFile('deploy/systemd/otto-control-pitr-drill.timer')).toContain(
       'OnCalendar=Sun',
     );
+  });
+
+  it('fails unhealthy deployments before launch and drills every Control replica', () => {
+    const preflight = repositoryFile('scripts/preflight-deployment.mjs');
+    const drill = repositoryFile('deploy/drill-control-failover.sh');
+    expect(preflight).toContain('deployment preflight failed');
+    expect(preflight).toContain('CONTROL_DATABASE_SSL must be true');
+    expect(preflight).toContain('production domains cannot use localhost');
+    expect(preflight).toContain("'docker', ['version']");
+    expect(preflight).toContain("'config', '--quiet'");
+    expect(drill).toContain('--confirm=FAILOVER_OTTO_CONTROL_REPLICAS');
+    expect(drill).toContain('control-a control-b control-c');
+    expect(drill).toContain('public Control edge became unavailable');
+    expect(drill).toContain('replicas_tested=control-a,control-b,control-c');
+    const ciCaddy = repositoryFile('deploy/Caddyfile.ci');
+    expect(ciCaddy).toContain('auto_https off');
+    expect(ciCaddy).toContain(':8080');
+    expect(repositoryFile('compose.ci.yaml')).toContain('127.0.0.1:18080:8080');
   });
 });

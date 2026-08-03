@@ -15,12 +15,18 @@ esac
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 COMPOSE_FILE=${OTTO_CONTROL_COMPOSE_FILE:-"$ROOT/compose.production.yaml"}
 ENV_FILE=${OTTO_CONTROL_ENV_FILE:-"$ROOT/.env.production"}
-REPORT_DIR=${OTTO_CONTROL_PITR_REPORT_DIR:-"$ROOT/backups/reports/pitr"}
 
 read_env() {
   sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1
 }
 
+BACKUP_DIR=$(read_env OTTO_CONTROL_BACKUP_DIR)
+BACKUP_DIR=${BACKUP_DIR:-"$ROOT/backups"}
+case "$BACKUP_DIR" in
+  /*) ;;
+  *) BACKUP_DIR="$ROOT/${BACKUP_DIR#./}" ;;
+esac
+REPORT_DIR=${OTTO_CONTROL_PITR_REPORT_DIR:-"$BACKUP_DIR/reports/pitr"}
 REPORT_RETENTION_DAYS=$(read_env CONTROL_PITR_REPORT_RETENTION_DAYS)
 REPORT_RETENTION_DAYS=${REPORT_RETENTION_DAYS:-180}
 case "$REPORT_RETENTION_DAYS" in

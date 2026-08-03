@@ -11,7 +11,18 @@ fi
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 COMPOSE_FILE=${OTTO_CONTROL_COMPOSE_FILE:-"$ROOT/compose.production.yaml"}
 ENV_FILE=${OTTO_CONTROL_ENV_FILE:-"$ROOT/.env.production"}
-REPORT_DIR=${OTTO_CONTROL_FAILOVER_REPORT_DIR:-"$ROOT/backups/reports/failover"}
+
+read_env() {
+  sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1
+}
+
+BACKUP_DIR=$(read_env OTTO_CONTROL_BACKUP_DIR)
+BACKUP_DIR=${BACKUP_DIR:-"$ROOT/backups"}
+case "$BACKUP_DIR" in
+  /*) ;;
+  *) BACKUP_DIR="$ROOT/${BACKUP_DIR#./}" ;;
+esac
+REPORT_DIR=${OTTO_CONTROL_FAILOVER_REPORT_DIR:-"$BACKUP_DIR/reports/failover"}
 
 if docker compose version >/dev/null 2>&1; then
   COMPOSE_MODE=plugin

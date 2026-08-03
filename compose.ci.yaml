@@ -1,0 +1,6 @@
+services:
+  caddy:
+    volumes:
+      - ./deploy/Caddyfile.ci:/etc/caddy/Caddyfile:ro
+    ports:
+      - "127.0.0.1:18080:8080"

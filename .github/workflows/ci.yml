@@ -42,8 +42,15 @@ jobs:
       - name: Validate production HA deployment assets
         run: |
           trap 'rm -rf .env.production secrets backups' EXIT
-          npm run bootstrap:production -- --public-url https://control.example.test
-          docker compose -f compose.production.yaml --env-file .env.production config --quiet
+          npm run bootstrap:production -- \
+            --environment production \
+            --public-url https://control.ci.otto.cn \
+            --federation-public-url https://federation.ci.otto.cn \
+            --acme-email ci@otto.cn \
+            --privacy-controller "Otto CI" \
+            --privacy-contact ci@otto.cn \
+            --data-region CN-BJ
+          npm run preflight:deployment -- --env-file .env.production --skip-dns
           sh -n deploy/*.sh deploy/postgres-ha/*.sh deploy/postgres-ha/otto-pgbackrest
 
       - name: Reject whitespace errors
@@ -129,19 +136,29 @@ jobs:
           cache: npm
 
       - name: Bootstrap disposable HA identity
-        run: npm run bootstrap:production -- --public-url https://control.example.test
+        run: >-
+          npm run bootstrap:production --
+          --environment production
+          --public-url https://control.ci.otto.cn
+          --federation-public-url https://federation.ci.otto.cn
+          --acme-email ci@otto.cn
+          --privacy-controller "Otto CI"
+          --privacy-contact ci@otto.cn
+          --data-region CN-BJ
 
       - name: Start database quorum, Control, and Federation instances
         run: |
-          trap 'docker compose -f compose.production.yaml --env-file .env.production logs --no-color' ERR
-          docker compose -f compose.production.yaml --env-file .env.production \
+          docker compose -f compose.production.yaml -f compose.ci.yaml \
+            --env-file .env.production config > compose.ci.resolved.yaml
+          trap 'docker compose -f compose.ci.resolved.yaml logs --no-color' ERR
+          docker compose -f compose.ci.resolved.yaml \
             up --detach --build --wait --wait-timeout 300 \
-            control-a control-b control-c federation-a federation-b federation-c
+            control-a control-b control-c federation-a federation-b federation-c caddy
 
       - name: Prove all Control instances are ready
         run: |
           for instance in control-a control-b control-c; do
-            docker compose -f compose.production.yaml --env-file .env.production \
+            docker compose -f compose.ci.resolved.yaml \
               exec -T "$instance" node -e \
               "fetch('http://127.0.0.1:7788/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
           done
@@ -149,19 +166,29 @@ jobs:
       - name: Prove all Federation instances and encrypted relay are ready
         run: |
           for instance in federation-a federation-b federation-c; do
-            docker compose -f compose.production.yaml --env-file .env.production \
+            docker compose -f compose.ci.resolved.yaml \
               exec -T "$instance" node -e \
               "fetch('http://127.0.0.1:7790/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
           done
-          docker compose -f compose.production.yaml --env-file .env.production \
+          docker compose -f compose.ci.resolved.yaml \
             exec -T federation-a node --input-type=module < scripts/smoke-federation.mjs
 
+      - name: Prove the edge survives every Control replica failure
+        env:
+          OTTO_CONTROL_COMPOSE_FILE: ${{ github.workspace }}/compose.ci.resolved.yaml
+          OTTO_CONTROL_FAILOVER_EDGE_URL: http://127.0.0.1:18080
+        run: sh deploy/drill-control-failover.sh --confirm=FAILOVER_OTTO_CONTROL_REPLICAS
+
       - name: Exercise encrypted physical backup and automatic failover
+        env:
+          OTTO_CONTROL_COMPOSE_FILE: ${{ github.workspace }}/compose.ci.resolved.yaml
         run: |
           sh deploy/backup-pitr-postgres.sh full
           sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL
 
       - name: Restore an isolated PITR instance
+        env:
+          OTTO_CONTROL_COMPOSE_FILE: ${{ github.workspace }}/compose.ci.resolved.yaml
         run: sh deploy/drill-pitr-postgres.sh
 
       - name: Validate Caddy load-balancer configuration
@@ -172,7 +199,10 @@ jobs:
       - name: Print diagnostics and clean up
         if: always()
         run: |
-          docker compose -f compose.production.yaml --env-file .env.production ps || true
-          docker compose -f compose.production.yaml --env-file .env.production logs --no-color --tail=500 || true
-          docker compose -f compose.production.yaml --env-file .env.production down --volumes --remove-orphans || true
+          if [ -f compose.ci.resolved.yaml ]; then
+            docker compose -f compose.ci.resolved.yaml ps || true
+            docker compose -f compose.ci.resolved.yaml logs --no-color --tail=500 || true
+            docker compose -f compose.ci.resolved.yaml down --volumes --remove-orphans || true
+          fi
+          rm -f compose.ci.resolved.yaml
 

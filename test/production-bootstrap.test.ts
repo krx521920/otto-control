@@ -1,3 +1,4 @@
+import { X509Certificate } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +12,8 @@ describe('production bootstrap', () => {
     try {
       const result = spawnSync(process.execPath, [
         'scripts/bootstrap-production.mjs',
+        '--environment',
+        'staging',
         '--public-url',
         'https://control.example.test',
         '--output',
@@ -18,49 +21,57 @@ describe('production bootstrap', () => {
       ], { cwd: process.cwd(), encoding: 'utf8' });
       expect(result.status, result.stderr).toBe(0);
 
-      const environment = readFileSync(join(output, '.env.production'), 'utf8');
-      const adminToken = readFileSync(join(output, 'secrets', 'control_admin_token'), 'utf8').trim();
+      const environment = readFileSync(join(output, '.env.staging'), 'utf8');
+      const adminToken = readFileSync(
+        join(output, 'secrets-staging', 'control_admin_token'),
+        'utf8',
+      ).trim();
       const databasePassword = readFileSync(
-        join(output, 'secrets', 'postgres_password'),
+        join(output, 'secrets-staging', 'postgres_password'),
         'utf8',
       ).trim();
       const superuserPassword = readFileSync(
-        join(output, 'secrets', 'postgres_superuser_password'),
+        join(output, 'secrets-staging', 'postgres_superuser_password'),
         'utf8',
       ).trim();
       const replicationPassword = readFileSync(
-        join(output, 'secrets', 'postgres_replication_password'),
+        join(output, 'secrets-staging', 'postgres_replication_password'),
         'utf8',
       ).trim();
       const pgbackrestCipherPass = readFileSync(
-        join(output, 'secrets', 'pgbackrest_cipher_pass'),
+        join(output, 'secrets-staging', 'pgbackrest_cipher_pass'),
         'utf8',
       ).trim();
       const backupKey = readFileSync(
-        join(output, 'secrets', 'backup_encryption_key'),
+        join(output, 'secrets-staging', 'backup_encryption_key'),
         'utf8',
       ).trim();
       const alertWebhookSecret = readFileSync(
-        join(output, 'secrets', 'alert_webhook_secret'),
+        join(output, 'secrets-staging', 'alert_webhook_secret'),
         'utf8',
       ).trim();
       const auditAnchorToken = readFileSync(
-        join(output, 'secrets', 'audit_anchor_token'),
+        join(output, 'secrets-staging', 'audit_anchor_token'),
         'utf8',
       ).trim();
       const metricsToken = readFileSync(
-        join(output, 'secrets', 'control_metrics_token'),
+        join(output, 'secrets-staging', 'control_metrics_token'),
         'utf8',
       ).trim();
       const signer = readFileSync(
-        join(output, 'secrets', 'control_signer_private_key.pem'),
+        join(output, 'secrets-staging', 'control_signer_private_key.pem'),
         'utf8',
       );
       const keyring = JSON.parse(readFileSync(
-        join(output, 'secrets', 'control_signer_keyring.json'),
+        join(output, 'secrets-staging', 'control_signer_keyring.json'),
         'utf8',
       )) as { version: number; keys: Array<{ privateKeyFile: string }> };
       expect(environment).toContain('CONTROL_PUBLIC_BASE_URL=https://control.example.test');
+      expect(environment).toContain('OTTO_CONTROL_DEPLOYMENT_ENVIRONMENT=staging');
+      expect(environment).toContain('OTTO_CONTROL_STACK_NAME=otto-control-staging');
+      expect(environment).toContain('CONTROL_DATABASE_SSL=true');
+      expect(environment).toContain('FEDERATION_DATABASE_SSL=true');
+      expect(environment).toContain('NODE_EXTRA_CA_CERTS=/run/secrets/postgres_tls_ca');
       expect(environment).toContain('CONTROL_DATABASE_HOST=postgres-router');
       expect(environment).toContain('ETCD_IMAGE=quay.io/coreos/etcd:v3.5.21');
       expect(environment).toContain('CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token');
@@ -103,10 +114,24 @@ describe('production bootstrap', () => {
         version: 1,
         keys: [{ provider: 'local', privateKeyFile: 'control_signer_private_key.pem' }],
       });
-      expect(existsSync(join(output, 'backups', 'reports'))).toBe(true);
+      expect(existsSync(join(output, 'backups-staging', 'reports'))).toBe(true);
+      const postgresCa = new X509Certificate(readFileSync(
+        join(output, 'secrets-staging', 'postgres_tls_ca.pem'),
+        'utf8',
+      ));
+      const postgresCertificate = new X509Certificate(readFileSync(
+        join(output, 'secrets-staging', 'postgres_tls_cert.pem'),
+        'utf8',
+      ));
+      expect(postgresCa.ca).toBe(true);
+      expect(postgresCertificate.verify(postgresCa.publicKey)).toBe(true);
+      expect(postgresCertificate.checkHost('postgres-router')).toBe('postgres-router');
+      expect(postgresCertificate.checkHost('postgres-3')).toBe('postgres-3');
 
       const repeated = spawnSync(process.execPath, [
         'scripts/bootstrap-production.mjs',
+        '--environment',
+        'staging',
         '--public-url',
         'https://control.example.test',
         '--output',
@@ -114,8 +139,53 @@ describe('production bootstrap', () => {
       ], { cwd: process.cwd(), encoding: 'utf8' });
       expect(repeated.status).toBe(1);
       expect(
-        readFileSync(join(output, 'secrets', 'control_admin_token'), 'utf8').trim(),
+        readFileSync(join(output, 'secrets-staging', 'control_admin_token'), 'utf8').trim(),
       ).toBe(adminToken);
+    } finally {
+      rmSync(output, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects placeholder production identity and missing legal metadata', () => {
+    const result = spawnSync(process.execPath, [
+      'scripts/bootstrap-production.mjs',
+      '--environment',
+      'production',
+      '--public-url',
+      'https://control.example.test',
+    ], { cwd: process.cwd(), encoding: 'utf8' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('reserved example/test domains');
+  });
+
+  it('creates an explicit production identity with no development defaults', () => {
+    const output = mkdtempSync(join(tmpdir(), 'otto-control-production-bootstrap-'));
+    try {
+      const result = spawnSync(process.execPath, [
+        'scripts/bootstrap-production.mjs',
+        '--environment',
+        'production',
+        '--public-url',
+        'https://control.otto.cn',
+        '--federation-public-url',
+        'https://federation.otto.cn',
+        '--acme-email',
+        'operations@otto.cn',
+        '--privacy-controller',
+        'Otto Technology Co., Ltd.',
+        '--privacy-contact',
+        'privacy@otto.cn',
+        '--data-region',
+        'CN-BJ',
+        '--output',
+        output,
+      ], { cwd: process.cwd(), encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      const environment = readFileSync(join(output, '.env.production'), 'utf8');
+      expect(environment).toContain('ACME_EMAIL=operations@otto.cn');
+      expect(environment).toContain('CONTROL_PRIVACY_CONTROLLER=Otto Technology Co., Ltd.');
+      expect(environment).toContain('CONTROL_DATA_REGION=CN-BJ');
+      expect(environment).not.toContain('staging operator');
     } finally {
       rmSync(output, { recursive: true, force: true });
     }

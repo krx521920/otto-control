@@ -9,6 +9,7 @@
   },
   "scripts": {
     "bootstrap:production": "node scripts/bootstrap-production.mjs",
+    "preflight:deployment": "node scripts/preflight-deployment.mjs",
     "backup:production": "sh deploy/backup-postgres.sh",
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run lint && npm run typecheck && npm test && npm run build",
@@ -16,6 +17,7 @@
     "dev:federation": "tsx watch src/federation-server.ts",
     "drill:restore:production": "sh deploy/drill-restore-postgres.sh",
     "drill:failover:production": "sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL",
+    "drill:control:production": "sh deploy/drill-control-failover.sh --confirm=FAILOVER_OTTO_CONTROL_REPLICAS",
     "drill:pitr:production": "sh deploy/drill-pitr-postgres.sh",
     "drill:signing:provider": "node scripts/drill-signing-provider.mjs",
     "drill:signing:rotation": "node scripts/drill-signing-rotation.mjs",
