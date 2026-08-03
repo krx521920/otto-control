@@ -31,6 +31,7 @@ read_env() {
 }
 
 DB_USER=$(read_env POSTGRES_USER)
+DB_ADMIN_USER=${OTTO_CONTROL_DB_ADMIN_USER:-postgres}
 DB_NAME=$(read_env POSTGRES_DB)
 BACKUP_KEY_FILE=$(read_env OTTO_CONTROL_BACKUP_KEY_FILE)
 DB_USER=${DB_USER:-otto_control}
@@ -49,6 +50,12 @@ esac
 case "$DB_NAME" in
   ''|*[!A-Za-z0-9_]*)
     printf '%s\n' 'database user and name may contain only letters, digits, and underscores' >&2
+    exit 1
+    ;;
+esac
+case "$DB_ADMIN_USER" in
+  ''|*[!A-Za-z0-9_]*)
+    printf '%s\n' 'database administrator user may contain only letters, digits, and underscores' >&2
     exit 1
     ;;
 esac
@@ -77,39 +84,20 @@ compose() {
 # Authenticate the encrypted archive and verify PostgreSQL can parse it before any write is stopped.
 BACKUP_DIR=${OTTO_CONTROL_BACKUP_DIR:-"$ROOT/backups"}
 mkdir -p "$BACKUP_DIR"
-VERIFY_PIPE="$BACKUP_DIR/.restore-verify-$$.pipe"
-VERIFY_PID=''
-cleanup_verify() {
-  if [ -n "$VERIFY_PID" ]; then kill "$VERIFY_PID" 2>/dev/null || true; fi
-  rm -f -- "$VERIFY_PIPE"
-}
-trap cleanup_verify EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-mkfifo "$VERIFY_PIPE"
-node "$ROOT/scripts/backup-crypto.mjs" decrypt \
+if [ "$COMPOSE_MODE" = plugin ]; then
+  set -- docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE"
+else
+  set -- docker-compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE"
+fi
+if ! node "$ROOT/scripts/backup-crypto.mjs" decrypt-run \
   --input "$BACKUP_PATH" \
-  --output - \
-  --key-file "$BACKUP_KEY_FILE" > "$VERIFY_PIPE" &
-VERIFY_PID=$!
-if ! compose exec -T postgres-tools pg_restore --list < "$VERIFY_PIPE" >/dev/null; then
-  kill "$VERIFY_PID" 2>/dev/null || true
-  wait "$VERIFY_PID" 2>/dev/null || true
-  VERIFY_PID=''
-  rm -f -- "$VERIFY_PIPE"
+  --key-file "$BACKUP_KEY_FILE" \
+  --command-stdout ignore \
+  -- "$@" exec -T postgres-tools pg_restore --no-password --list
+then
   printf '%s\n' 'backup archive validation failed' >&2
   exit 1
 fi
-if ! wait "$VERIFY_PID"; then
-  VERIFY_PID=''
-  rm -f -- "$VERIFY_PIPE"
-  printf '%s\n' 'backup decryption or authentication failed' >&2
-  exit 1
-fi
-VERIFY_PID=''
-rm -f -- "$VERIFY_PIPE"
-trap - EXIT HUP INT TERM
 
 # A restorable snapshot of the current state is mandatory before destructive work.
 sh "$ROOT/deploy/backup-postgres.sh"
@@ -121,11 +109,7 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 
 RESTORE_COMPLETE=false
-RESTORE_PIPE=''
-RESTORE_PID=''
 cleanup() {
-  if [ -n "$RESTORE_PID" ]; then kill "$RESTORE_PID" 2>/dev/null || true; fi
-  if [ -n "$RESTORE_PIPE" ]; then rm -f -- "$RESTORE_PIPE"; fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
   if [ "$RESTORE_COMPLETE" != true ]; then
     printf '%s\n' 'restore did not complete; the control service is not confirmed ready' >&2
@@ -138,41 +122,30 @@ trap 'exit 143' TERM
 
 compose stop control-a control-b control-c
 compose exec -T postgres-tools dropdb \
-  --username "$DB_USER" \
+  --username "$DB_ADMIN_USER" \
+  --no-password \
   --if-exists \
   --force \
   "$DB_NAME"
 compose exec -T postgres-tools createdb \
-  --username "$DB_USER" \
+  --username "$DB_ADMIN_USER" \
+  --no-password \
   --owner "$DB_USER" \
+  --template template0 \
   "$DB_NAME"
-RESTORE_PIPE="$BACKUP_DIR/.restore-$$.pipe"
-mkfifo "$RESTORE_PIPE"
-node "$ROOT/scripts/backup-crypto.mjs" decrypt \
+if ! node "$ROOT/scripts/backup-crypto.mjs" decrypt-run \
   --input "$BACKUP_PATH" \
-  --output - \
-  --key-file "$BACKUP_KEY_FILE" > "$RESTORE_PIPE" &
-RESTORE_PID=$!
-if ! compose exec -T postgres-tools pg_restore \
-  --username "$DB_USER" \
-  --dbname "$DB_NAME" \
-  --no-owner \
-  --exit-on-error < "$RESTORE_PIPE"
+  --key-file "$BACKUP_KEY_FILE" \
+  -- "$@" exec -T postgres-tools pg_restore \
+    --username "$DB_USER" \
+    --dbname "$DB_NAME" \
+    --no-password \
+    --no-owner \
+    --exit-on-error
 then
-  kill "$RESTORE_PID" 2>/dev/null || true
-  wait "$RESTORE_PID" 2>/dev/null || true
-  RESTORE_PID=''
   printf '%s\n' 'PostgreSQL restore failed' >&2
   exit 1
 fi
-if ! wait "$RESTORE_PID"; then
-  RESTORE_PID=''
-  printf '%s\n' 'backup decryption or authentication failed during restore' >&2
-  exit 1
-fi
-RESTORE_PID=''
-rm -f -- "$RESTORE_PIPE"
-RESTORE_PIPE=''
 compose start control-a control-b control-c
 
 ATTEMPT=0

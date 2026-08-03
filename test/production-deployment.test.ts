@@ -139,6 +139,12 @@ describe('production deployment assets', () => {
     expect(postgresTools).toContain(
       `"$$PGHOST" "$$PGPORT" '*' "$$PGUSER" "$$password"`,
     );
+    expect(postgresTools).toContain(
+      `"$$PGHOST" "$$PGPORT" '*' 'postgres' "$$superuser_password"`,
+    );
+    expect(postgresTools).toContain(
+      'secrets: [postgres_password, postgres_superuser_password, postgres_tls_ca]',
+    );
     expect(compose).toContain('postgres_superuser_password');
     expect(compose).toContain('postgres_replication_password');
     expect(compose).toContain('pgbackrest_cipher_pass');
@@ -319,7 +325,10 @@ describe('production deployment assets', () => {
     expect(backup).toContain('compose exec -T postgres-tools pg_dump');
     expect(backup).toContain('--no-password');
     expect(backup).not.toContain('--file -');
-    expect(restore).toContain('compose exec -T postgres-tools pg_restore');
+    expect(restore).toContain('exec -T postgres-tools pg_restore');
+    expect(restore).toContain('decrypt-run');
+    expect(restore).not.toContain('RESTORE_PIPE');
+    expect(restore).toContain('--username "$DB_ADMIN_USER"');
     expect(restore).toContain('sha256sum --check');
     expect(restore).toContain('backup-crypto.mjs');
     expect(restore).toContain('/health/ready');

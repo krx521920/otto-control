@@ -46,6 +46,7 @@ BACKUP_NAME=$(basename -- "$BACKUP_PATH")
 BACKUP_PATH="$BACKUP_DIRECTORY/$BACKUP_NAME"
 
 DB_USER=$(read_env POSTGRES_USER)
+DB_ADMIN_USER=${OTTO_CONTROL_DB_ADMIN_USER:-postgres}
 BACKUP_KEY_FILE=$(read_env OTTO_CONTROL_BACKUP_KEY_FILE)
 REPORT_RETENTION_DAYS=$(read_env CONTROL_DRILL_REPORT_RETENTION_DAYS)
 MAX_BACKUP_AGE_HOURS=$(read_env CONTROL_DRILL_MAX_BACKUP_AGE_HOURS)
@@ -60,6 +61,12 @@ esac
 case "$DB_USER" in
   ''|*[!A-Za-z0-9_]*)
     printf '%s\n' 'database user may contain only letters, digits, and underscores' >&2
+    exit 1
+    ;;
+esac
+case "$DB_ADMIN_USER" in
+  ''|*[!A-Za-z0-9_]*)
+    printf '%s\n' 'database administrator user may contain only letters, digits, and underscores' >&2
     exit 1
     ;;
 esac
@@ -119,7 +126,7 @@ cleanup() {
   if [ -n "$MANIFEST_TEMP" ]; then rm -f -- "$MANIFEST_TEMP"; fi
   if [ -n "$DRILL_DATABASE" ]; then
     compose exec -T postgres-tools dropdb \
-      --username "$DB_USER" --no-password --if-exists --force "$DRILL_DATABASE" >/dev/null 2>&1 || true
+      --username "$DB_ADMIN_USER" --no-password --if-exists --force "$DRILL_DATABASE" >/dev/null 2>&1 || true
   fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
@@ -147,7 +154,7 @@ STARTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 STARTED_SECONDS=$NOW_SECONDS
 DRILL_DATABASE="otto_drill_$(date -u '+%Y%m%d%H%M%S')_$$"
 compose exec -T postgres-tools createdb \
-  --username "$DB_USER" \
+  --username "$DB_ADMIN_USER" \
   --no-password \
   --owner "$DB_USER" \
   --template template0 \
@@ -220,7 +227,7 @@ if [ -z "$DATABASE_FINGERPRINT" ]; then
 fi
 
 compose exec -T postgres-tools dropdb \
-  --username "$DB_USER" --no-password --if-exists --force "$DRILL_DATABASE"
+  --username "$DB_ADMIN_USER" --no-password --if-exists --force "$DRILL_DATABASE"
 DRILL_DATABASE=''
 
 COMPLETED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
