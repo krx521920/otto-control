@@ -219,7 +219,7 @@ jobs:
               ELSE 'accidental-deletion-confirmed' END" \
             | grep -F -x 'accidental-deletion-confirmed'
           docker compose -f compose.ci.resolved.yaml exec -T postgres-tools \
-            psql --username otto_control --dbname otto_control \
+            psql --username postgres --dbname otto_control --no-password \
             --set=ON_ERROR_STOP=1 --command='SELECT pg_switch_wal()'
           sh deploy/backup-pitr-postgres.sh diff
           sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL

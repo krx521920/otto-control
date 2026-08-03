@@ -383,6 +383,9 @@ describe('production deployment assets', () => {
     expect(repositoryFile('.github/workflows/ci.yml')).toContain(
       'customer_pitr_recovery_probe',
     );
+    expect(repositoryFile('.github/workflows/ci.yml')).toMatch(
+      /psql --username postgres --dbname otto_control --no-password\s+\\\n\s+--set=ON_ERROR_STOP=1 --command='SELECT pg_switch_wal\(\)'/u,
+    );
     expect(pgBackRestWrapper).toContain('--config|--config=*');
     expect(pgBackRestWrapper).toContain('exec pgbackrest "$@"');
     expect(failover).toContain('--confirm=FAILOVER_OTTO_CONTROL');
