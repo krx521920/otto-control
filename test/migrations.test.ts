@@ -59,6 +59,14 @@ describe('PostgreSQL migrations', () => {
     ))).toBe(true);
     expect(statements.some((statement) => statement.includes("VALUES ('customer_delivery.read')")))
       .toBe(true);
+    const customerDeliveryGrant = statements.find((statement) => (
+      statement.includes("SELECT id, 'customer_delivery.read'")
+    ));
+    expect(customerDeliveryGrant).toContain("WHERE id IN ('super_admin', 'license_admin', 'auditor')");
+    expect(customerDeliveryGrant).not.toContain('SELECT role_id');
+    expect(statements.some((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_federation_rate_windows')
+    ))).toBe(true);
     expect(statements.some((statement) => (
       statement.includes('CREATE TABLE IF NOT EXISTS control_release_artifacts')
     ))).toBe(true);

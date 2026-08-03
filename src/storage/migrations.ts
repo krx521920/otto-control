@@ -1115,9 +1115,9 @@ const MIGRATIONS: Migration[] = [
       `INSERT INTO control_admin_permissions (id) VALUES ('customer_delivery.read')
        ON CONFLICT DO NOTHING`,
       `INSERT INTO control_admin_role_permissions (role_id, permission_id)
-       SELECT role_id, 'customer_delivery.read'
+       SELECT id, 'customer_delivery.read'
        FROM control_admin_roles
-       WHERE role_id IN ('super_admin', 'license_admin', 'auditor')
+       WHERE id IN ('super_admin', 'license_admin', 'auditor')
        ON CONFLICT DO NOTHING`,
     ],
   },
