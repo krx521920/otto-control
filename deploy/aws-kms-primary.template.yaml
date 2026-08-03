@@ -1,0 +1,42 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Otto Control primary multi-Region Ed25519 signing key
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedPattern: "^[a-z0-9-]{2,32}$"
+
+Resources:
+  SigningKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub Otto Control ${EnvironmentName} Ed25519 signing primary
+      Enabled: true
+      KeySpec: ECC_NIST_EDWARDS25519
+      KeyUsage: SIGN_VERIFY
+      MultiRegion: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+
+  SigningAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/otto-control-${EnvironmentName}-signing-primary
+      TargetKeyId: !Ref SigningKey
+
+Outputs:
+  PrimaryKeyArn:
+    Value: !GetAtt SigningKey.Arn
+  PrimaryKeyId:
+    Value: !Ref SigningKey

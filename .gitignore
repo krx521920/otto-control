@@ -5,6 +5,8 @@ coverage/
 .env.*
 !.env.example
 secrets/
+signing/
+signing-staging/
 backups/
 *.log
 .DS_Store

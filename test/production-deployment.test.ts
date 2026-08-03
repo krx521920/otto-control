@@ -40,6 +40,7 @@ describe('production deployment assets', () => {
   it('keeps credentials out of the image build context', () => {
     const ignore = repositoryFile('.dockerignore');
     expect(ignore).toContain('secrets');
+    expect(ignore).toContain('signing');
     expect(ignore).toContain('.env.*');
     expect(ignore).toContain('*.pem');
     expect(JSON.parse(repositoryFile('deploy/audit-witness-sources.example.json'))).toMatchObject({
@@ -83,6 +84,11 @@ describe('production deployment assets', () => {
     expect(rotation).toContain('ROTATE_OTTO_SIGNING_KEY');
     expect(rotation).toContain("operation: 'signing_key.activate'");
     expect(rotation).toContain("'x-otto-approval-id': approvalId");
+    expect(rotation).toContain('legacyLicenseVerification');
+    const revocation = repositoryFile('scripts/drill-signing-revocation.mjs');
+    expect(revocation).toContain('REVOKE_OTTO_SIGNING_KEY');
+    expect(revocation).toContain("operation: 'signing_key.revoke'");
+    expect(revocation).toContain('publicKeyringVerified: true');
     const provider = repositoryFile('scripts/drill-signing-provider.mjs');
     expect(provider).toContain('PROBE_OTTO_SIGNING_PROVIDER');
     expect(provider).toContain('expected active location');
@@ -97,6 +103,20 @@ describe('production deployment assets', () => {
     expect(workflow).toContain('role-duration-seconds: 900');
     expect(workflow).not.toContain('AWS_SECRET_ACCESS_KEY:');
     expect(workflow).not.toContain('secrets.AWS_');
+    const primaryTemplate = repositoryFile('deploy/aws-kms-primary.template.yaml');
+    const replicaTemplate = repositoryFile('deploy/aws-kms-replica.template.yaml');
+    const roleTemplate = repositoryFile('deploy/aws-kms-github-role.template.yaml');
+    expect(primaryTemplate).toContain('KeySpec: ECC_NIST_EDWARDS25519');
+    expect(primaryTemplate).toContain('MultiRegion: true');
+    expect(primaryTemplate).toContain('DeletionPolicy: Retain');
+    expect(replicaTemplate).toContain('Type: AWS::KMS::ReplicaKey');
+    expect(roleTemplate).toContain('sts:AssumeRoleWithWebIdentity');
+    expect(roleTemplate).toContain('repo:${GitHubRepository}:environment:${GitHubEnvironment}');
+    expect(roleTemplate).not.toMatch(/kms:(CreateKey|DisableKey|ScheduleKeyDeletion|Decrypt)/u);
+    const operations = repositoryFile('docs/production-signing-operations.zh-CN.md');
+    expect(operations).toContain('密钥负责人 A');
+    expect(operations).toContain('drill:signing:revoke');
+    expect(operations).toContain('--legacy-license-id');
   });
 
   it('isolates the HA database plane and hardens every control runtime', () => {
@@ -128,17 +148,11 @@ describe('production deployment assets', () => {
     expect(compose).toContain('read_only: true');
     expect(compose).toContain('no-new-privileges:true');
     expect(compose).toContain('cap_drop:');
-    expect(compose).toContain('- source: control_signer_private_key');
-    expect(compose).toContain('target: control_signer_private_key.pem');
-    expect(compose).toContain('- source: control_signer_keyring');
-    expect(compose).toContain('target: control_signer_keyring.json');
+    expect(compose).not.toContain('control_signer_private_key:');
+    expect(compose).not.toContain('control_signer_keyring:');
     expect(compose).toContain(
-      'file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_signer_private_key.pem',
+      '${OTTO_CONTROL_SIGNING_DIR:-./signing}:/run/otto-secrets:ro',
     );
-    expect(compose).toContain(
-      'file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_signer_keyring.json',
-    );
-    expect(compose).not.toContain('./secrets:/run/otto-secrets:ro');
     expect(compose).toContain('- alert_webhook_secret');
     expect(compose).toContain(
       'file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/alert_webhook_secret',
@@ -258,7 +272,7 @@ describe('production deployment assets', () => {
     expect(control).toContain('CONTROL_DATABASE_PASSWORD_FILE');
     expect(control).toContain('CONTROL_SIGNER_KEYRING_FILE');
     expect(control).toContain('stage_environment_file NODE_EXTRA_CA_CERTS');
-    expect(control).toContain('stage_file /run/secrets/control_signer_private_key.pem');
+    expect(control).toContain('staged Control signing keyring is missing or empty');
     expect(control).toContain('FEDERATION_ADMIN_TOKEN_FILE');
     expect(control).toContain('FEDERATION_DATABASE_PASSWORD_FILE');
     expect(control).toContain('dist/federation-server.js');

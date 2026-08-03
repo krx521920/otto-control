@@ -4,6 +4,8 @@ coverage
 dist
 node_modules
 secrets
+signing
+signing-staging
 backups
 .env
 .env.*

@@ -3,6 +3,7 @@ export interface SigningRotationDrillInput {
   requesterToken: string;
   approverToken: string;
   targetKeyId: string;
+  legacyLicenseId?: string | null;
 }
 
 export interface SigningRotationDrillReport {
@@ -17,6 +18,13 @@ export interface SigningRotationDrillReport {
   targetBackend: string | null;
   targetLocation: string | null;
   approvalId: string;
+  legacyLicenseVerification: {
+    licenseId: string;
+    signingKeyId: string;
+    keyState: 'retired';
+    verifiedBeforeRotation: true;
+    verifiedAfterRotation: true;
+  } | null;
 }
 
 export function runSigningRotationDrill(

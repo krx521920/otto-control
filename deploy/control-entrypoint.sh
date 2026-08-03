@@ -53,15 +53,15 @@ FEDERATION_METRICS_TOKEN_FILE
 FEDERATION_DATABASE_PASSWORD_FILE'
     ;;
   *)
-    if [ -e /run/secrets/control_signer_private_key.pem ]; then
-      stage_file /run/secrets/control_signer_private_key.pem
+    if [ -z "${CONTROL_SIGNER_KEYRING_FILE:-}" ] || [ ! -s "$CONTROL_SIGNER_KEYRING_FILE" ]; then
+      printf '%s\n' 'staged Control signing keyring is missing or empty' >&2
+      exit 1
     fi
     secret_variables='CONTROL_ADMIN_TOKEN_FILE
 CONTROL_TOKEN_SECRET_FILE
 CONTROL_METRICS_TOKEN_FILE
 CONTROL_DATABASE_PASSWORD_FILE
 CONTROL_SIGNER_PRIVATE_KEY_FILE
-CONTROL_SIGNER_KEYRING_FILE
 CONTROL_ALERT_WEBHOOK_SECRET_FILE
 CONTROL_ALERT_CHANNELS_FILE
 CONTROL_AUDIT_ANCHOR_TOKEN_FILE

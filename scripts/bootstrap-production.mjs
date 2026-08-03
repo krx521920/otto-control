@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -15,6 +16,34 @@ import { spawnSync } from 'node:child_process';
 function option(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function hasFlag(name) {
+  return process.argv.includes(name);
+}
+
+function awsKmsSigningKeyArns() {
+  const raw = option('--aws-kms-key-arns')?.trim();
+  if (!raw) return [];
+  const arns = raw.split(',').map((value) => value.trim()).filter(Boolean);
+  const pattern = /^arn:(aws|aws-cn|aws-us-gov):kms:([a-z0-9-]{3,32}):(\d{12}):key\/(mrk-[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/u;
+  const parsed = arns.map((arn) => ({ arn, match: pattern.exec(arn) }));
+  if (arns.length < 1 || arns.length > 3 || parsed.some((entry) => !entry.match)) {
+    throw new Error('--aws-kms-key-arns must contain one to three immutable AWS KMS key ARNs');
+  }
+  if (new Set(arns).size !== arns.length) {
+    throw new Error('--aws-kms-key-arns must not contain duplicate ARNs');
+  }
+  if (parsed.length > 1) {
+    const identities = parsed.map(({ match }) => `${match[1]}:${match[3]}:${match[4]}`);
+    const regions = parsed.map(({ match }) => match[2]);
+    if (!parsed.every(({ match }) => match[4].startsWith('mrk-'))
+      || new Set(identities).size !== 1
+      || new Set(regions).size !== regions.length) {
+      throw new Error('--aws-kms-key-arns replicas must be one multi-Region key in distinct regions');
+    }
+  }
+  return arns;
 }
 
 function requiredPublicUrl() {
@@ -142,6 +171,10 @@ function createPostgresTlsIdentity(secretDirectory) {
 
 function main() {
   const environmentName = deploymentEnvironment();
+  const kmsKeyArns = awsKmsSigningKeyArns();
+  const allowLocalSigningForTest = environmentName === 'production'
+    && hasFlag('--allow-local-signing-for-test')
+    && process.env.CI === 'true';
   const publicUrl = requiredPublicUrl();
   const federationUrl = federationPublicUrl(publicUrl);
   if (publicUrl.hostname === federationUrl.hostname) {
@@ -150,6 +183,11 @@ function main() {
   if (environmentName === 'production'
     && (reservedHostname(publicUrl.hostname) || reservedHostname(federationUrl.hostname))) {
     throw new Error('production deployments cannot use localhost or reserved example/test domains');
+  }
+  if (environmentName === 'production' && kmsKeyArns.length === 0 && !allowLocalSigningForTest) {
+    throw new Error(
+      'production requires --aws-kms-key-arns; local signing is available only to CI with --allow-local-signing-for-test',
+    );
   }
   const acmeEmail = requiredProductionOption('--acme-email', environmentName, process.env.ACME_EMAIL);
   const privacyController = requiredProductionOption(
@@ -180,12 +218,16 @@ function main() {
   const root = resolve(option('--output') ?? '.');
   const environmentFileName = `.env.${environmentName}`;
   const secretDirectoryName = environmentName === 'production' ? 'secrets' : 'secrets-staging';
+  const signingDirectoryName = environmentName === 'production' ? 'signing' : 'signing-staging';
   const backupDirectoryName = environmentName === 'production' ? 'backups' : 'backups-staging';
   const secretDirectory = resolve(root, secretDirectoryName);
+  const signingDirectory = resolve(root, signingDirectoryName);
   const targets = [
     resolve(root, environmentFileName),
-    resolve(secretDirectory, 'control_signer_private_key.pem'),
-    resolve(secretDirectory, 'control_signer_keyring.json'),
+    resolve(signingDirectory, 'control_signer_keyring.json'),
+    ...(kmsKeyArns.length === 0
+      ? [resolve(signingDirectory, 'control_signer_private_key.pem')]
+      : []),
     resolve(secretDirectory, 'control_admin_token'),
     resolve(secretDirectory, 'control_token_secret'),
     resolve(secretDirectory, 'control_metrics_token'),
@@ -205,26 +247,44 @@ function main() {
   ];
   const existing = targets.find(existsSync);
   if (existing) throw new Error(`refusing to overwrite existing deployment identity file: ${existing}`);
+  if (existsSync(signingDirectory) && readdirSync(signingDirectory).length > 0) {
+    throw new Error(`refusing to reuse non-empty signing directory: ${signingDirectory}`);
+  }
   mkdirSync(secretDirectory, { recursive: true, mode: 0o700 });
+  mkdirSync(signingDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(resolve(root, backupDirectoryName), { recursive: true, mode: 0o700 });
   const backupReportDirectory = resolve(root, backupDirectoryName, 'reports');
   mkdirSync(backupReportDirectory, { recursive: true, mode: 0o755 });
   chmodSync(backupReportDirectory, 0o755);
 
-  const { privateKey } = generateKeyPairSync('ed25519');
+  const keyring = kmsKeyArns.length > 0
+    ? {
+        version: 1,
+        keys: [{
+          provider: 'kms',
+          backend: 'aws_kms',
+          keyArns: kmsKeyArns,
+          timeoutMs: 5_000,
+          validateSignPermission: true,
+        }],
+      }
+    : (() => {
+        const { privateKey } = generateKeyPairSync('ed25519');
+        writeSecret(
+          resolve(signingDirectory, 'control_signer_private_key.pem'),
+          privateKey.export({ type: 'pkcs8', format: 'pem' }),
+        );
+        return {
+          version: 1,
+          keys: [{
+            provider: 'local',
+            privateKeyFile: 'control_signer_private_key.pem',
+          }],
+        };
+      })();
   writeSecret(
-    resolve(secretDirectory, 'control_signer_private_key.pem'),
-    privateKey.export({ type: 'pkcs8', format: 'pem' }),
-  );
-  writeSecret(
-    resolve(secretDirectory, 'control_signer_keyring.json'),
-    JSON.stringify({
-      version: 1,
-      keys: [{
-        provider: 'local',
-        privateKeyFile: 'control_signer_private_key.pem',
-      }],
-    }, null, 2),
+    resolve(signingDirectory, 'control_signer_keyring.json'),
+    JSON.stringify(keyring, null, 2),
   );
   writeSecret(resolve(secretDirectory, 'control_admin_token'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'control_token_secret'), randomBytes(48).toString('base64url'));
@@ -255,6 +315,7 @@ function main() {
     `OTTO_CONTROL_STACK_NAME=otto-control-${environmentName}`,
     `OTTO_CONTROL_ENV_FILE=${environmentFileName}`,
     `OTTO_CONTROL_SECRETS_DIR=./${secretDirectoryName}`,
+    `OTTO_CONTROL_SIGNING_DIR=./${signingDirectoryName}`,
     `OTTO_CONTROL_BACKUP_DIR=./${backupDirectoryName}`,
     'OTTO_CONTROL_VERSION=0.26.0',
     `ACME_EMAIL=${acmeEmail || `operations@${publicUrl.hostname}`}`,
@@ -298,7 +359,7 @@ function main() {
     'CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token',
     'CONTROL_TOKEN_SECRET_FILE=/run/secrets/control_token_secret',
     'CONTROL_METRICS_TOKEN_FILE=/run/secrets/control_metrics_token',
-    'CONTROL_SIGNER_KEYRING_FILE=/run/secrets/control_signer_keyring.json',
+    'CONTROL_SIGNER_KEYRING_FILE=/run/otto-runtime-secrets/control_signer_keyring.json',
     'CONTROL_LEASE_DURATION_MS=600000',
     'CONTROL_TELEMETRY_RETENTION_DAYS=90',
     'CONTROL_UPDATE_POLICY_DURATION_MS=300000',
@@ -400,7 +461,7 @@ function main() {
   });
 
   process.stdout.write(
-    `${environmentName} secrets created under ${secretDirectory}. Back them up securely before deployment.\n`,
+    `${environmentName} secrets created under ${secretDirectory}; signing configuration created under ${signingDirectory}. Back them up securely before deployment.\n`,
   );
 }
 

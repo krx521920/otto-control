@@ -1,3 +1,4 @@
+import { createPublicKey, verify } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +38,33 @@ function readToken(path) {
   return token;
 }
 
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonicalize(item)]));
+  }
+  return value;
+}
+
+function verifyEnvelope(envelope, publicKeyPem) {
+  if (!envelope?.license || typeof envelope.signature !== 'string'
+    || !envelope.signature.startsWith('ed25519:')) {
+    throw new Error('legacy License envelope is invalid');
+  }
+  const signature = Buffer.from(envelope.signature.slice('ed25519:'.length), 'base64url');
+  if (signature.length !== 64 || !verify(
+    null,
+    Buffer.from(JSON.stringify(canonicalize(envelope.license))),
+    createPublicKey(publicKeyPem),
+    signature,
+  )) {
+    throw new Error('legacy License signature verification failed');
+  }
+}
+
 async function request(controlUrl, path, token, init = {}) {
   const response = await fetch(new URL(path, controlUrl), {
     ...init,
@@ -71,6 +99,18 @@ export async function runSigningRotationDrill(input) {
     throw new Error('target signing key is unavailable or revoked');
   }
   if (target.state === 'active') throw new Error('target signing key is already active');
+  let legacyLicense = null;
+  if (input.legacyLicenseId) {
+    legacyLicense = await request(
+      input.controlUrl,
+      `/v1/admin/licenses/${encodeURIComponent(input.legacyLicenseId)}`,
+      input.requesterToken,
+    );
+    if (legacyLicense.signingKeyId !== previous.keyId) {
+      throw new Error('legacy License was not signed by the currently active key');
+    }
+    verifyEnvelope(legacyLicense, previous.publicKeyPem);
+  }
   const probe = await request(
     input.controlUrl,
     `/v1/admin/signing-keys/${encodeURIComponent(target.keyId)}/probe`,
@@ -116,6 +156,26 @@ export async function runSigningRotationDrill(input) {
   if (active?.keyId !== target.keyId || retired?.state !== 'retired') {
     throw new Error('signing-key rotation state verification failed');
   }
+  let legacyLicenseVerification = null;
+  if (legacyLicense) {
+    const afterRotation = await request(
+      input.controlUrl,
+      `/v1/admin/licenses/${encodeURIComponent(input.legacyLicenseId)}`,
+      input.requesterToken,
+    );
+    if (afterRotation.signingKeyId !== retired.keyId
+      || afterRotation.signature !== legacyLicense.signature) {
+      throw new Error('legacy License changed during signing-key rotation');
+    }
+    verifyEnvelope(afterRotation, retired.publicKeyPem);
+    legacyLicenseVerification = {
+      licenseId: input.legacyLicenseId,
+      signingKeyId: retired.keyId,
+      keyState: retired.state,
+      verifiedBeforeRotation: true,
+      verifiedAfterRotation: true,
+    };
+  }
   return {
     version: 1,
     drill: 'signing_key_rotation',
@@ -128,6 +188,7 @@ export async function runSigningRotationDrill(input) {
     targetBackend: probe.probe.providerHealth?.backend ?? null,
     targetLocation: probe.probe.providerHealth?.activeLocation ?? null,
     approvalId,
+    legacyLicenseVerification,
   };
 }
 
@@ -141,6 +202,7 @@ async function main() {
     requesterToken: readToken(required(values, 'requester-token-file')),
     approverToken: readToken(required(values, 'approver-token-file')),
     targetKeyId: required(values, 'target-key-id'),
+    legacyLicenseId: values.get('legacy-license-id')?.trim() || null,
   });
   const output = resolve(required(values, 'output'));
   writeFileSync(output, `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx', mode: 0o600 });

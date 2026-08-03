@@ -59,11 +59,11 @@ describe('production bootstrap', () => {
         'utf8',
       ).trim();
       const signer = readFileSync(
-        join(output, 'secrets-staging', 'control_signer_private_key.pem'),
+        join(output, 'signing-staging', 'control_signer_private_key.pem'),
         'utf8',
       );
       const keyring = JSON.parse(readFileSync(
-        join(output, 'secrets-staging', 'control_signer_keyring.json'),
+        join(output, 'signing-staging', 'control_signer_keyring.json'),
         'utf8',
       )) as { version: number; keys: Array<{ privateKeyFile: string }> };
       expect(environment).toContain('CONTROL_PUBLIC_BASE_URL=https://control.example.test');
@@ -76,7 +76,7 @@ describe('production bootstrap', () => {
       expect(environment).toContain('ETCD_IMAGE=quay.io/coreos/etcd:v3.5.21');
       expect(environment).toContain('CONTROL_ADMIN_TOKEN_FILE=/run/secrets/control_admin_token');
       expect(environment).toContain(
-        'CONTROL_SIGNER_KEYRING_FILE=/run/secrets/control_signer_keyring.json',
+        'CONTROL_SIGNER_KEYRING_FILE=/run/otto-runtime-secrets/control_signer_keyring.json',
       );
       expect(environment).toContain('CONTROL_BACKUP_OFFSITE_REQUIRED=false');
       expect(environment).toContain(
@@ -161,6 +161,21 @@ describe('production bootstrap', () => {
     expect(result.stderr).toContain('reserved example/test domains');
   });
 
+  it('rejects production bootstrap without a KMS signing identity', () => {
+    const result = spawnSync(process.execPath, [
+      'scripts/bootstrap-production.mjs',
+      '--environment', 'production',
+      '--public-url', 'https://control.otto.cn',
+      '--federation-public-url', 'https://federation.otto.cn',
+      '--acme-email', 'operations@otto.cn',
+      '--privacy-controller', 'Otto Technology Co., Ltd.',
+      '--privacy-contact', 'privacy@otto.cn',
+      '--data-region', 'CN-BJ',
+    ], { cwd: process.cwd(), encoding: 'utf8' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('production requires --aws-kms-key-arns');
+  });
+
   it('creates an explicit production identity with no development defaults', () => {
     const output = mkdtempSync(join(tmpdir(), 'otto-control-production-bootstrap-'));
     try {
@@ -180,15 +195,48 @@ describe('production bootstrap', () => {
         'privacy@otto.cn',
         '--data-region',
         'CN-BJ',
+        '--allow-local-signing-for-test',
         '--output',
         output,
-      ], { cwd: process.cwd(), encoding: 'utf8' });
+      ], { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, CI: 'true' } });
       expect(result.status, result.stderr).toBe(0);
       const environment = readFileSync(join(output, '.env.production'), 'utf8');
       expect(environment).toContain('ACME_EMAIL=operations@otto.cn');
       expect(environment).toContain('CONTROL_PRIVACY_CONTROLLER=Otto Technology Co., Ltd.');
       expect(environment).toContain('CONTROL_DATA_REGION=CN-BJ');
       expect(environment).not.toContain('staging operator');
+    } finally {
+      rmSync(output, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a KMS-only production identity without a local signing private key', () => {
+    const output = mkdtempSync(join(tmpdir(), 'otto-control-production-kms-bootstrap-'));
+    try {
+      const keyArn = `arn:aws:kms:cn-north-1:111122223333:key/mrk-${'a'.repeat(32)}`;
+      const result = spawnSync(process.execPath, [
+        'scripts/bootstrap-production.mjs',
+        '--environment', 'production',
+        '--public-url', 'https://control.otto.cn',
+        '--federation-public-url', 'https://federation.otto.cn',
+        '--acme-email', 'operations@otto.cn',
+        '--privacy-controller', 'Otto Technology Co., Ltd.',
+        '--privacy-contact', 'privacy@otto.cn',
+        '--data-region', 'CN-BJ',
+        '--aws-kms-key-arns', keyArn,
+        '--output', output,
+      ], { cwd: process.cwd(), encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      const environment = readFileSync(join(output, '.env.production'), 'utf8');
+      const keyring = JSON.parse(readFileSync(
+        join(output, 'signing', 'control_signer_keyring.json'),
+        'utf8',
+      )) as { keys: Array<Record<string, unknown>> };
+      expect(environment).toContain('OTTO_CONTROL_SIGNING_DIR=./signing');
+      expect(keyring.keys).toEqual([expect.objectContaining({
+        provider: 'kms', backend: 'aws_kms', keyArns: [keyArn],
+      })]);
+      expect(existsSync(join(output, 'signing', 'control_signer_private_key.pem'))).toBe(false);
     } finally {
       rmSync(output, { recursive: true, force: true });
     }

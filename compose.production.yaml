@@ -58,16 +58,13 @@ x-control-common: &control-common
     - control_admin_token
     - control_token_secret
     - control_metrics_token
-    - source: control_signer_private_key
-      target: control_signer_private_key.pem
-    - source: control_signer_keyring
-      target: control_signer_keyring.json
     - postgres_password
     - postgres_tls_ca
     - alert_webhook_secret
     - audit_anchor_token
   volumes:
     - ${OTTO_CONTROL_BACKUP_DIR:-./backups}/reports:/var/lib/otto-control/backup-reports:ro
+    - ${OTTO_CONTROL_SIGNING_DIR:-./signing}:/run/otto-secrets:ro
   read_only: true
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=32m
@@ -396,10 +393,6 @@ secrets:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/federation_admin_token
   federation_metrics_token:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/federation_metrics_token
-  control_signer_private_key:
-    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_signer_private_key.pem
-  control_signer_keyring:
-    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/control_signer_keyring.json
   postgres_password:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_password
   postgres_superuser_password:

@@ -1,6 +1,10 @@
+import { generateKeyPairSync } from 'node:crypto';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
 import { runSigningProviderDrill } from '../scripts/drill-signing-provider.mjs';
+import { runSigningRevocationDrill } from '../scripts/drill-signing-revocation.mjs';
 import { runSigningRotationDrill } from '../scripts/drill-signing-rotation.mjs';
 
 function response(value: unknown, status = 200): Response {
@@ -114,5 +118,115 @@ describe('production signing drills', () => {
     });
     expect(JSON.stringify(report)).not.toContain(requesterToken);
     expect(JSON.stringify(report)).not.toContain(approverToken);
+  });
+
+  it('verifies a legacy License before and after its signing key is retired', async () => {
+    const previous = new LocalEd25519Signer(
+      generateKeyPairSync('ed25519').privateKey
+        .export({ format: 'pem', type: 'pkcs8' }).toString(),
+    );
+    const target = new LocalEd25519Signer(
+      generateKeyPairSync('ed25519').privateKey
+        .export({ format: 'pem', type: 'pkcs8' }).toString(),
+    );
+    const license = { id: 'lic_legacy', plan: 'enterprise', revision: 1 };
+    const legacyEnvelope = {
+      license,
+      signingKeyId: previous.keyId,
+      signature: await previous.sign(license),
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ signingKeys: [
+        { keyId: previous.keyId, state: 'active', canSign: true, publicKeyPem: previous.publicKeyPem },
+        { keyId: target.keyId, state: 'standby', canSign: true, publicKeyPem: target.publicKeyPem },
+      ] }))
+      .mockResolvedValueOnce(response(legacyEnvelope))
+      .mockResolvedValueOnce(response({ probe: { verified: true, providerHealth: {} } }))
+      .mockResolvedValueOnce(response({ approval: { id: 'approval-legacy-rotation' } }, 201))
+      .mockResolvedValueOnce(response({ approval: { status: 'approved' } }))
+      .mockResolvedValueOnce(response({ signingKeys: [
+        { keyId: previous.keyId, state: 'retired', publicKeyPem: previous.publicKeyPem },
+        { keyId: target.keyId, state: 'active', publicKeyPem: target.publicKeyPem },
+      ] }))
+      .mockResolvedValueOnce(response(legacyEnvelope));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const report = await runSigningRotationDrill({
+      controlUrl: new URL('https://control.example.test'),
+      requesterToken: 'requester-session-token-that-is-long-enough',
+      approverToken: 'approver-session-token-that-is-long-enough',
+      targetKeyId: target.keyId,
+      legacyLicenseId: license.id,
+    });
+
+    expect(report.legacyLicenseVerification).toEqual({
+      licenseId: license.id,
+      signingKeyId: previous.keyId,
+      keyState: 'retired',
+      verifiedBeforeRotation: true,
+      verifiedAfterRotation: true,
+    });
+  });
+
+  it('performs dual-approved emergency revocation and verifies the public keyring', async () => {
+    const target = new LocalEd25519Signer(
+      generateKeyPairSync('ed25519').privateKey
+        .export({ format: 'pem', type: 'pkcs8' }).toString(),
+    );
+    const replacement = new LocalEd25519Signer(
+      generateKeyPairSync('ed25519').privateKey
+        .export({ format: 'pem', type: 'pkcs8' }).toString(),
+    );
+    const keyring = {
+      version: 1,
+      activeKeyId: replacement.keyId,
+      keys: [
+        { keyId: target.keyId, state: 'revoked' },
+        { keyId: replacement.keyId, state: 'active' },
+      ],
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ signingKeys: [
+        { keyId: target.keyId, state: 'active', canSign: true, publicKeyPem: target.publicKeyPem },
+        { keyId: replacement.keyId, state: 'standby', canSign: true, publicKeyPem: replacement.publicKeyPem },
+      ] }))
+      .mockResolvedValueOnce(response({ probe: { verified: true } }))
+      .mockResolvedValueOnce(response({ approval: { id: 'approval-emergency-revoke' } }, 201))
+      .mockResolvedValueOnce(response({ approval: { status: 'approved' } }))
+      .mockResolvedValueOnce(response({ signingKeys: [
+        { keyId: target.keyId, state: 'revoked', publicKeyPem: target.publicKeyPem },
+        { keyId: replacement.keyId, state: 'active', publicKeyPem: replacement.publicKeyPem },
+      ] }))
+      .mockResolvedValueOnce(response({
+        keyring,
+        signingKeyId: replacement.keyId,
+        signature: await replacement.sign(keyring),
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const report = await runSigningRevocationDrill({
+      controlUrl: new URL('https://control.example.test'),
+      requesterToken: 'requester-session-token-that-is-long-enough',
+      approverToken: 'approver-session-token-that-is-long-enough',
+      keyId: target.keyId,
+      replacementKeyId: replacement.keyId,
+      reason: 'simulated key compromise',
+    });
+
+    expect(report).toMatchObject({
+      result: 'passed',
+      revokedKeyId: target.keyId,
+      activeKeyId: replacement.keyId,
+      approvalId: 'approval-emergency-revoke',
+      publicKeyringVerified: true,
+    });
+    expect(fetchMock.mock.calls.map((call) => new URL(call[0].toString()).pathname)).toEqual([
+      '/v1/admin/signing-keys',
+      `/v1/admin/signing-keys/${replacement.keyId}/probe`,
+      '/v1/admin/approvals',
+      '/v1/admin/approvals/approval-emergency-revoke/decide',
+      `/v1/admin/signing-keys/${target.keyId}/revoke`,
+      '/v1/signing-keyring',
+    ]);
   });
 });

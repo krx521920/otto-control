@@ -1,0 +1,43 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Otto Control replica of a multi-Region Ed25519 signing key
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedPattern: "^[a-z0-9-]{2,32}$"
+  PrimaryKeyArn:
+    Type: String
+    AllowedPattern: "^arn:(aws|aws-cn|aws-us-gov):kms:[a-z0-9-]{3,32}:[0-9]{12}:key/mrk-[a-f0-9]{32}$"
+
+Resources:
+  SigningReplica:
+    Type: AWS::KMS::ReplicaKey
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub Otto Control ${EnvironmentName} Ed25519 signing replica
+      Enabled: true
+      PrimaryKeyArn: !Ref PrimaryKeyArn
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+
+  SigningReplicaAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/otto-control-${EnvironmentName}-signing-replica
+      TargetKeyId: !Ref SigningReplica
+
+Outputs:
+  ReplicaKeyArn:
+    Value: !GetAtt SigningReplica.Arn
+  ReplicaKeyId:
+    Value: !Ref SigningReplica

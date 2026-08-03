@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Least-privilege GitHub OIDC role for Otto Control KMS signing drills
+
+Parameters:
+  GitHubOidcProviderArn:
+    Type: String
+    AllowedPattern: "^arn:(aws|aws-cn|aws-us-gov):iam::[0-9]{12}:oidc-provider/token.actions.githubusercontent.com$"
+  GitHubRepository:
+    Type: String
+    Default: krx521920/otto-control
+    AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+  GitHubEnvironment:
+    Type: String
+    Default: production-signing
+    AllowedPattern: "^[A-Za-z0-9_.-]{2,64}$"
+  SigningKeyArns:
+    Type: CommaDelimitedList
+
+Resources:
+  SigningDrillRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub otto-control-${GitHubEnvironment}-kms-drill
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepository}:environment:${GitHubEnvironment}
+      Policies:
+        - PolicyName: OttoControlSignOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadSigningKeyMetadata
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:GetPublicKey
+                Resource: !Ref SigningKeyArns
+              - Sid: SignOttoControlPayload
+                Effect: Allow
+                Action: kms:Sign
+                Resource: !Ref SigningKeyArns
+                Condition:
+                  StringEquals:
+                    kms:SigningAlgorithm: ED25519_SHA_512
+                    kms:MessageType: RAW
+
+Outputs:
+  SigningDrillRoleArn:
+    Value: !GetAtt SigningDrillRole.Arn

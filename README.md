@@ -276,7 +276,8 @@ npm run bootstrap:production -- \
   --acme-email operations@company.cn \
   --privacy-controller "Your Company Ltd." \
   --privacy-contact privacy@company.cn \
-  --data-region CN-BJ
+  --data-region CN-BJ \
+  --aws-kms-key-arns "$PRIMARY_KMS_ARN,$REPLICA_KMS_ARN"
 npm run preflight:deployment -- --env-file .env.production
 docker compose -f compose.production.yaml --env-file .env.production up -d --build
 docker compose -f compose.production.yaml --env-file .env.production ps
@@ -295,7 +296,7 @@ the Control, Federation, operations, and replication clients validate the
 deployment CA instead of accepting an unauthenticated internal connection.
 
 Staging uses `--environment staging`, `.env.staging`, `secrets-staging/`,
-`backups-staging/`, and a distinct Compose project name. Run it on a separate
+`signing-staging/`, `backups-staging/`, and a distinct Compose project name. Run it on a separate
 host and separate domains; never copy production identity files into staging.
 
 This Compose topology provides **process-level high availability on one Linux
@@ -307,9 +308,10 @@ external load balancer or floating IP, and the pgBackRest repository on encrypte
 off-host object or replicated storage. Do not market the single-host profile as
 datacenter or cross-region HA.
 
-Back up the pgBackRest repository, encrypted logical backups, and the `secrets/`
-directory under separate access controls. Never overwrite an existing private
-key. Add a new key to `control_signer_keyring.json`, restart
+Back up the pgBackRest repository, encrypted logical backups, `secrets/`, and
+the separately mounted `signing/` directory under separate access controls.
+Never overwrite an existing signing identity. Add a new key to
+`signing/control_signer_keyring.json`, restart
 the control service so it is registered as `standby`, distribute the signed
 public keyring, and only then activate it. The old key becomes `retired` and
 continues to verify historical License envelopes. Use `revoked` only for a
@@ -879,6 +881,10 @@ customer contract.
 
 ### Native AWS KMS Ed25519 signing
 
+The production provisioning, ownership, rotation, emergency revocation, and
+recovery procedure is documented in
+[`docs/production-signing-operations.zh-CN.md`](docs/production-signing-operations.zh-CN.md).
+
 AWS KMS can be used directly with `provider: "kms"` and
 `backend: "aws_kms"`. The complete manifest is
 `deploy/control_signer_keyring.aws-kms.example.json`; replace both example ARNs
@@ -923,6 +929,7 @@ npm run drill:signing:rotation -- \
   --requester-token-file ./secrets/requester-session \
   --approver-token-file ./secrets/security-session \
   --target-key-id 0123456789abcdef \
+  --legacy-license-id lic_existing_license \
   --output ./backups/drills/signing-rotation.json \
   --confirm=ROTATE_OTTO_SIGNING_KEY
 ```

@@ -5,10 +5,11 @@ import {
 } from 'node:crypto';
 import {
   lstatSync,
+  readdirSync,
   readFileSync,
 } from 'node:fs';
 import { lookup } from 'node:dns/promises';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -80,6 +81,162 @@ function readRequiredFile(path, errors, { privateFile = true } = {}) {
   }
 }
 
+function signingFile(signingDirectory, configuredPath, errors, options) {
+  if (typeof configuredPath !== 'string' || !configuredPath.trim()) {
+    errors.push('signing provider file path must be a non-empty string');
+    return '';
+  }
+  if (isAbsolute(configuredPath)) {
+    errors.push(`signing provider file must be relative to OTTO_CONTROL_SIGNING_DIR: ${configuredPath}`);
+    return '';
+  }
+  if (basename(configuredPath) !== configuredPath) {
+    errors.push(`signing provider files must be direct children of OTTO_CONTROL_SIGNING_DIR: ${configuredPath}`);
+    return '';
+  }
+  const path = resolve(signingDirectory, configuredPath);
+  const relativePath = relative(signingDirectory, path);
+  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    errors.push(`signing provider file escapes OTTO_CONTROL_SIGNING_DIR: ${configuredPath}`);
+    return '';
+  }
+  return readRequiredFile(path, errors, options);
+}
+
+function validateSigningIdentity(signingDirectory, deploymentEnvironment, allowLocal, errors) {
+  const manifestText = readRequiredFile(
+    resolve(signingDirectory, 'control_signer_keyring.json'),
+    errors,
+  );
+  if (!manifestText) return;
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestText);
+  } catch {
+    errors.push('control_signer_keyring.json must contain valid JSON');
+    return;
+  }
+  if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.keys)
+    || manifest.keys.length < 1) {
+    errors.push('control_signer_keyring.json must use version 1 and contain keys');
+    return;
+  }
+  let externalProviderCount = 0;
+  let awsKmsProviderCount = 0;
+  const awsArnPattern = /^arn:(aws|aws-cn|aws-us-gov):kms:([a-z0-9-]{3,32}):(\d{12}):key\/(mrk-[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/u;
+  for (const entry of manifest.keys) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push('signing keyring contains an invalid provider entry');
+      continue;
+    }
+    if (entry.provider === 'local' || entry.provider === undefined) {
+      if (deploymentEnvironment === 'production' && !allowLocal) {
+        errors.push('production signing keyring must not contain a local signing private key');
+      }
+      const privateKeyPem = signingFile(signingDirectory, entry.privateKeyFile, errors);
+      if (privateKeyPem) {
+        try {
+          if (createPrivateKey(privateKeyPem).asymmetricKeyType !== 'ed25519') {
+            errors.push('local Control signing key must be Ed25519');
+          }
+        } catch (error) {
+          errors.push(`local Control signing key is invalid: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      continue;
+    }
+    externalProviderCount += 1;
+    if (entry.provider === 'kms' && entry.backend === 'aws_kms') {
+      awsKmsProviderCount += 1;
+      const parsed = Array.isArray(entry.keyArns)
+        ? entry.keyArns.map((arn) => ({ arn, match: typeof arn === 'string' ? awsArnPattern.exec(arn) : null }))
+        : [];
+      if (parsed.length < 1 || parsed.length > 3 || parsed.some(({ match }) => !match)) {
+        errors.push('AWS KMS signing provider must contain one to three immutable key ARNs');
+        continue;
+      }
+      if (new Set(parsed.map(({ arn }) => arn)).size !== parsed.length) {
+        errors.push('AWS KMS signing provider contains duplicate key ARNs');
+      }
+      if (parsed.length > 1) {
+        const identities = parsed.map(({ match }) => `${match[1]}:${match[3]}:${match[4]}`);
+        const regions = parsed.map(({ match }) => match[2]);
+        if (!parsed.every(({ match }) => match[4].startsWith('mrk-'))
+          || new Set(identities).size !== 1
+          || new Set(regions).size !== regions.length) {
+          errors.push('AWS KMS replicas must be one multi-Region key in distinct regions');
+        }
+      }
+      if (entry.validateSignPermission !== true) {
+        errors.push('production AWS KMS provider must validate Sign permission at startup');
+      }
+      continue;
+    }
+    if ((entry.provider !== 'kms' && entry.provider !== 'hsm')
+      || entry.backend && entry.backend !== 'remote') {
+      errors.push('signing keyring contains an unsupported external provider');
+      continue;
+    }
+    try {
+      const endpoint = new URL(entry.endpoint);
+      if (endpoint.protocol !== 'https:' || endpoint.origin + endpoint.pathname !== entry.endpoint) {
+        errors.push('remote KMS/HSM endpoint must be an HTTPS URL without query or fragment');
+      }
+    } catch {
+      errors.push('remote KMS/HSM endpoint must be a valid HTTPS URL');
+    }
+    if (typeof entry.keyRef !== 'string' || !entry.keyRef.trim()) {
+      errors.push('remote KMS/HSM keyRef is required');
+    }
+    const publicKeyPem = signingFile(
+      signingDirectory,
+      entry.publicKeyFile,
+      errors,
+      { privateFile: false },
+    );
+    if (publicKeyPem) {
+      try {
+        if (createPublicKey(publicKeyPem).asymmetricKeyType !== 'ed25519') {
+          errors.push('remote Control signing public key must be Ed25519');
+        }
+      } catch (error) {
+        errors.push(`remote Control signing public key is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const hasToken = typeof entry.bearerTokenFile === 'string' && entry.bearerTokenFile.trim();
+    const hasCertificate = typeof entry.clientCertificateFile === 'string'
+      && entry.clientCertificateFile.trim();
+    const hasClientKey = typeof entry.clientKeyFile === 'string' && entry.clientKeyFile.trim();
+    if (!hasToken && !(hasCertificate && hasClientKey)) {
+      errors.push('remote KMS/HSM provider requires a bearer token or mTLS identity');
+    }
+    if (hasToken) signingFile(signingDirectory, entry.bearerTokenFile, errors);
+    if (hasCertificate) signingFile(signingDirectory, entry.clientCertificateFile, errors);
+    if (hasClientKey) signingFile(signingDirectory, entry.clientKeyFile, errors);
+    if (entry.caFile) signingFile(signingDirectory, entry.caFile, errors, { privateFile: false });
+  }
+  if (deploymentEnvironment === 'production' && !allowLocal && externalProviderCount === 0) {
+    errors.push('production signing keyring requires at least one KMS or HSM provider');
+  }
+  if (deploymentEnvironment === 'production'
+    && !allowLocal
+    && awsKmsProviderCount === manifest.keys.length) {
+    try {
+      const unexpectedFiles = readdirSync(signingDirectory)
+        .filter((name) => name !== 'control_signer_keyring.json');
+      if (unexpectedFiles.length > 0) {
+        errors.push(
+          `AWS KMS-only signing directory contains unexpected files: ${unexpectedFiles.join(', ')}`,
+        );
+      }
+    } catch (error) {
+      errors.push(
+        `AWS KMS-only signing directory cannot be listed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}
+
 function validatePostgresIdentity(secretDirectory, errors) {
   const caPath = resolve(secretDirectory, 'postgres_tls_ca.pem');
   const certificatePath = resolve(secretDirectory, 'postgres_tls_cert.pem');
@@ -148,6 +305,9 @@ async function main() {
     || environment.get('OTTO_CONTROL_DEPLOYMENT_ENVIRONMENT')
     || 'production';
   const errors = [];
+  const allowLocalSigningForTest = deploymentEnvironment === 'production'
+    && hasFlag('--allow-local-signing-for-test')
+    && process.env.CI === 'true';
   const requireValue = (name) => {
     const value = environment.get(name)?.trim();
     if (!value) errors.push(`${name} is required`);
@@ -203,6 +363,13 @@ async function main() {
   if (environment.get('NODE_EXTRA_CA_CERTS') !== '/run/secrets/postgres_tls_ca') {
     errors.push('NODE_EXTRA_CA_CERTS must trust the mounted PostgreSQL CA');
   }
+  if (environment.get('CONTROL_SIGNER_KEYRING_FILE')
+    !== '/run/otto-runtime-secrets/control_signer_keyring.json') {
+    errors.push('CONTROL_SIGNER_KEYRING_FILE must reference the staged signing keyring');
+  }
+  if (environment.get('CONTROL_SIGNER_PRIVATE_KEY_FILE')?.trim()) {
+    errors.push('CONTROL_SIGNER_PRIVATE_KEY_FILE must not be used by production Compose');
+  }
 
   const forbiddenInlineSecrets = [
     'CONTROL_ADMIN_TOKEN',
@@ -221,6 +388,20 @@ async function main() {
   const secretDirectory = isAbsolute(secretDirectoryValue)
     ? secretDirectoryValue
     : resolve(dirname(environmentFile), secretDirectoryValue);
+  const signingDirectoryValue = requireValue('OTTO_CONTROL_SIGNING_DIR');
+  const signingDirectory = isAbsolute(signingDirectoryValue)
+    ? signingDirectoryValue
+    : resolve(dirname(environmentFile), signingDirectoryValue);
+  try {
+    const signingStat = lstatSync(signingDirectory);
+    if (signingStat.isSymbolicLink() || !signingStat.isDirectory()) {
+      errors.push(`${signingDirectory} must be a real directory`);
+    } else if (process.platform !== 'win32' && (signingStat.mode & 0o077) !== 0) {
+      errors.push(`${signingDirectory} must not be accessible by group/other users`);
+    }
+  } catch (error) {
+    errors.push(`${signingDirectory} cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const backupDirectoryValue = requireValue('OTTO_CONTROL_BACKUP_DIR');
   const backupDirectory = isAbsolute(backupDirectoryValue)
     ? backupDirectoryValue
@@ -251,8 +432,12 @@ async function main() {
     const value = readRequiredFile(resolve(secretDirectory, name), errors);
     if (value && value.length < 32) errors.push(`${name} must contain at least 32 characters`);
   }
-  readRequiredFile(resolve(secretDirectory, 'control_signer_private_key.pem'), errors);
-  readRequiredFile(resolve(secretDirectory, 'control_signer_keyring.json'), errors);
+  validateSigningIdentity(
+    signingDirectory,
+    deploymentEnvironment,
+    allowLocalSigningForTest,
+    errors,
+  );
   validatePostgresIdentity(secretDirectory, errors);
 
   if (deploymentEnvironment === 'production') {
