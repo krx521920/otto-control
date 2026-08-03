@@ -1,7 +1,10 @@
+import type { SigningAuditEvidence } from './signing-audit-evidence.mjs';
+
 export interface SigningRevocationDrillInput {
   controlUrl: URL;
   requesterToken: string;
   approverToken: string;
+  auditorToken?: string;
   keyId: string;
   replacementKeyId: string;
   reason: string;
@@ -18,6 +21,7 @@ export interface SigningRevocationDrillReport {
   approvalId: string;
   reason: string;
   publicKeyringVerified: true;
+  auditEvidence: SigningAuditEvidence | null;
 }
 
 export function runSigningRevocationDrill(

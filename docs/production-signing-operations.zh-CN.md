@@ -78,7 +78,7 @@ npm run preflight:deployment -- --env-file .env.production
 1. 创建新的 KMS 主密钥和灾备副本，将两组 ARN 同时加入 keyring，重启 Control。
 2. 对新 keyId 执行 provider 探测，确保真实签名和本地验签成功。
 3. 准备一份由旧 active key 签发且仍有效的 License ID。
-4. 使用两个不同的 MFA 管理员会话执行：
+4. 使用两个不同的 MFA 管理员会话，并由第三个仅具备 `audit.read`、`audit.verify` 权限的独立审计会话执行证据核验：
 
 ```bash
 npm run drill:signing:rotation -- \
@@ -86,12 +86,13 @@ npm run drill:signing:rotation -- \
   --control-url https://control.company.cn \
   --requester-token-file ./requester.session \
   --approver-token-file ./approver.session \
+  --auditor-token-file ./auditor.session \
   --target-key-id NEW_KEY_ID \
   --legacy-license-id LEGACY_LICENSE_ID \
   --output ./backups/drills/signing-rotation-YYYYMMDD.json
 ```
 
-演练必须证明旧 key 变为 `retired`、新 key 变为 `active`，并且旧 License 在轮换前后均能由退休公钥验证。退休公钥应至少保留到其签发的最后一份 License、离线授权和审计证据全部过期。
+演练必须证明旧 key 变为 `retired`、新 key 变为 `active`，并且旧 License 在轮换前后均能由退休公钥验证。报告还必须列出探测、审批申请、独立批准、审批消费和密钥切换的审计链序号与事件哈希，并保存完整性回执的签名摘要。退休公钥应至少保留到其签发的最后一份 License、离线授权和审计证据全部过期。
 
 ## 紧急吊销
 
@@ -103,13 +104,14 @@ npm run drill:signing:revoke -- \
   --control-url https://control.company.cn \
   --requester-token-file ./requester.session \
   --approver-token-file ./approver.session \
+  --auditor-token-file ./auditor.session \
   --key-id COMPROMISED_KEY_ID \
   --replacement-key-id VERIFIED_REPLACEMENT_KEY_ID \
   --reason "incident IR-2026-001" \
   --output ./backups/drills/signing-revocation-YYYYMMDD.json
 ```
 
-脚本会验证公开 keyring 已标记旧 key 为 `revoked`、备用 key 已激活且 keyring 由备用 key 正确签名。随后立即停止受影响 key 的 `kms:Sign` 权限，通知 Otto Server 刷新 keyring，并按事故流程处理仍引用被吊销 key 的 License。
+脚本会验证公开 keyring 已标记旧 key 为 `revoked`、备用 key 已激活且 keyring 由备用 key 正确签名，同时核验探测、双人审批、审批消费和吊销事件已进入完整审计链。随后立即停止受影响 key 的 `kms:Sign` 权限，通知 Otto Server 刷新 keyring，并按事故流程处理仍引用被吊销 key 的 License。
 
 ## 区域故障和全部凭据丢失
 

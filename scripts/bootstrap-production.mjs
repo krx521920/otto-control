@@ -480,7 +480,7 @@ function main() {
     `OTTO_CONTROL_SIGNING_DIR=./${signingDirectoryName}`,
     `OTTO_CONTROL_ATTESTATION_DIR=./${attestationDirectoryName}`,
     `OTTO_CONTROL_BACKUP_DIR=./${backupDirectoryName}`,
-    'OTTO_CONTROL_VERSION=0.32.0',
+    'OTTO_CONTROL_VERSION=0.33.0',
     `ACME_EMAIL=${acmeEmail || `operations@${publicUrl.hostname}`}`,
     `ACME_CA=${environmentName === 'production'
       ? 'https://acme-v02.api.letsencrypt.org/directory'

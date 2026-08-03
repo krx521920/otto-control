@@ -3,6 +3,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { collectSigningAuditEvidence } from './signing-audit-evidence.mjs';
+
 function argumentsMap(argv) {
   const values = new Map();
   for (let index = 0; index < argv.length; index += 1) {
@@ -155,6 +157,24 @@ export async function runSigningRevocationDrill(input) {
     throw new Error('public signing keyring did not publish the emergency revocation');
   }
   verifyKeyring(keyring, activeKey.publicKeyPem);
+  const auditEvidence = input.auditorToken
+    ? await collectSigningAuditEvidence({
+      controlUrl: input.controlUrl,
+      auditorToken: input.auditorToken,
+      startedAt,
+      expectedEvents: [
+        {
+          action: 'signing_key.probed',
+          targetType: 'signing_key',
+          targetId: replacement.keyId,
+        },
+        { action: 'admin.approval.request', targetType: 'admin_approval', targetId: approvalId },
+        { action: 'admin.approval.approve', targetType: 'admin_approval', targetId: approvalId },
+        { action: 'admin.approval.consume', targetType: 'admin_approval', targetId: approvalId },
+        { action: 'signing_key.revoked', targetType: 'signing_key', targetId: target.keyId },
+      ],
+    })
+    : null;
   return {
     version: 1,
     drill: 'signing_key_emergency_revocation',
@@ -166,6 +186,7 @@ export async function runSigningRevocationDrill(input) {
     approvalId,
     reason: input.reason,
     publicKeyringVerified: true,
+    auditEvidence,
   };
 }
 
@@ -178,6 +199,7 @@ async function main() {
     controlUrl: httpsOrigin(required(values, 'control-url')),
     requesterToken: readToken(required(values, 'requester-token-file')),
     approverToken: readToken(required(values, 'approver-token-file')),
+    auditorToken: readToken(required(values, 'auditor-token-file')),
     keyId: required(values, 'key-id'),
     replacementKeyId: required(values, 'replacement-key-id'),
     reason: required(values, 'reason'),

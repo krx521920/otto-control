@@ -6,6 +6,7 @@ import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
 import { runSigningProviderDrill } from '../scripts/drill-signing-provider.mjs';
 import { runSigningRevocationDrill } from '../scripts/drill-signing-revocation.mjs';
 import { runSigningRotationDrill } from '../scripts/drill-signing-rotation.mjs';
+import { collectSigningAuditEvidence } from '../scripts/signing-audit-evidence.mjs';
 
 function response(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -16,6 +17,81 @@ function response(value: unknown, status = 200): Response {
 
 describe('production signing drills', () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it('proves every expected drill action is covered by a valid audit-chain receipt', async () => {
+    const eventHash = 'a'.repeat(64);
+    const previousHash = 'b'.repeat(64);
+    const expectedEvents = [
+      { action: 'signing_key.probed', targetType: 'signing_key', targetId: '0123456789abcdef' },
+      { action: 'signing_key.activated', targetType: 'signing_key', targetId: '0123456789abcdef' },
+    ];
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ events: [{
+        id: 41,
+        ...expectedEvents[0],
+        chainSequence: 101,
+        previousHash,
+        eventHash,
+        createdAt: '2026-08-03T00:00:01.000Z',
+      }] }))
+      .mockResolvedValueOnce(response({ events: [{
+        id: 42,
+        ...expectedEvents[1],
+        chainSequence: 105,
+        previousHash: eventHash,
+        eventHash: 'c'.repeat(64),
+        createdAt: '2026-08-03T00:00:02.000Z',
+      }] }))
+      .mockResolvedValueOnce(response({
+        receipt: {
+          valid: true,
+          brokenAtSequence: null,
+          checkedEvents: 105,
+          lastSequence: 105,
+          headHash: 'd'.repeat(64),
+          generatedAt: '2026-08-03T00:00:03.000Z',
+        },
+        signingKeyId: 'fedcba9876543210',
+        signature: `ed25519:${'e'.repeat(86)}`,
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const evidence = await collectSigningAuditEvidence({
+      controlUrl: new URL('https://control.example.test'),
+      auditorToken: 'auditor-session-token-that-must-not-enter-reports',
+      startedAt: '2026-08-03T00:00:00.000Z',
+      expectedEvents,
+    });
+
+    expect(evidence).toMatchObject({
+      verified: true,
+      events: [
+        { action: 'signing_key.probed', chainSequence: 101 },
+        { action: 'signing_key.activated', chainSequence: 105 },
+      ],
+      integrity: { lastSequence: 105, signingKeyId: 'fedcba9876543210' },
+    });
+    expect(evidence.integrity.signatureSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(JSON.stringify(evidence)).not.toContain('auditor-session-token');
+    expect(fetchMock.mock.calls.map((call) => new URL(call[0].toString()).pathname)).toEqual([
+      '/v1/admin/audit/events',
+      '/v1/admin/audit/events',
+      '/v1/admin/audit/verify',
+    ]);
+  });
+
+  it('fails closed when a signing drill event is missing from the audit chain', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ events: [] })));
+
+    await expect(collectSigningAuditEvidence({
+      controlUrl: new URL('https://control.example.test'),
+      auditorToken: 'auditor-session-token-that-is-long-enough',
+      startedAt: '2026-08-03T00:00:00.000Z',
+      expectedEvents: [
+        { action: 'signing_key.revoked', targetType: 'signing_key', targetId: '0123456789abcdef' },
+      ],
+    })).rejects.toThrow('audit evidence is incomplete for signing_key.revoked');
+  });
 
   it('proves multi-Region provider failover without leaking the administrator token', async () => {
     const token = 'requester-session-token-that-must-not-enter-reports';

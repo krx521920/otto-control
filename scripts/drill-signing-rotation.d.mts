@@ -1,7 +1,10 @@
+import type { SigningAuditEvidence } from './signing-audit-evidence.mjs';
+
 export interface SigningRotationDrillInput {
   controlUrl: URL;
   requesterToken: string;
   approverToken: string;
+  auditorToken?: string;
   targetKeyId: string;
   legacyLicenseId?: string | null;
 }
@@ -25,6 +28,7 @@ export interface SigningRotationDrillReport {
     verifiedBeforeRotation: true;
     verifiedAfterRotation: true;
   } | null;
+  auditEvidence: SigningAuditEvidence | null;
 }
 
 export function runSigningRotationDrill(

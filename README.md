@@ -678,7 +678,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.32.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.33.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -1035,13 +1035,15 @@ activation endpoint repeats this probe before changing database state. Probe
 audit records contain only the key ID, backend health, and active region, never
 the challenge or signature.
 
-Use two separate MFA administrator sessions for a production rotation:
+Use two separate MFA administrator sessions plus an independent read-only
+auditor session for a production rotation:
 
 ```bash
 npm run drill:signing:rotation -- \
   --control-url https://control.example.com \
   --requester-token-file ./secrets/requester-session \
   --approver-token-file ./secrets/security-session \
+  --auditor-token-file ./secrets/auditor-session \
   --target-key-id 0123456789abcdef \
   --legacy-license-id lic_existing_license \
   --output ./backups/drills/signing-rotation.json \
@@ -1050,7 +1052,10 @@ npm run drill:signing:rotation -- \
 
 The command probes the standby key, creates a request-bound approval, has the
 second administrator approve it, activates the key, verifies that the previous
-key is retired, and writes a `0600` report without tokens or signatures. First
+key is retired, and uses an independent `audit.read`/`audit.verify` session to
+prove every drill action is present in the tamper-evident chain. The `0600`
+report contains event sequence/hash evidence plus a digest of the signed
+integrity receipt, without tokens or raw signatures. First
 distribute and verify the signed public keyring on Otto deployments. Keep the
 old key available for the full License/update overlap period, then remove its
 signing provider while retaining the retired public database record.
