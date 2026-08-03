@@ -1039,6 +1039,66 @@ const MIGRATIONS: Migration[] = [
        VALIDATE CONSTRAINT control_alert_deliveries_event_type_check`,
     ],
   },
+  {
+    id: '025_signed_execution_receipts',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_execution_receipt_keys (
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id) ON DELETE CASCADE,
+        key_id TEXT NOT NULL CHECK (key_id ~ '^[a-f0-9]{16}$'),
+        public_key_pem TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+        not_before TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (deployment_id, key_id),
+        CHECK (expires_at IS NULL OR expires_at > not_before),
+        CHECK ((status = 'revoked') = (revoked_at IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_execution_receipt_keys_active
+       ON control_execution_receipt_keys(deployment_id, not_before, expires_at)
+       WHERE status = 'active'`,
+      `CREATE TABLE IF NOT EXISTS control_execution_receipt_sequences (
+        deployment_id TEXT PRIMARY KEY REFERENCES control_deployments(id) ON DELETE CASCADE,
+        last_sequence BIGINT NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
+        updated_at TIMESTAMPTZ NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_execution_receipts (
+        receipt_id TEXT PRIMARY KEY CHECK (receipt_id ~ '^exec_[a-f0-9]{32}$'),
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id),
+        organization_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        module TEXT NOT NULL CHECK (module IN (
+          'model_gateway', 'meeting_agent', 'park_service', 'atoa', 'feishu',
+          'enterprise_knowledge', 'skill_market', 'data_visualization',
+          'document_generation'
+        )),
+        units BIGINT NOT NULL CHECK (units > 0),
+        model TEXT,
+        issued_at_ms BIGINT NOT NULL CHECK (issued_at_ms > 0),
+        expires_at_ms BIGINT NOT NULL CHECK (expires_at_ms > issued_at_ms),
+        sequence BIGINT NOT NULL CHECK (sequence > 0),
+        policy_version TEXT NOT NULL,
+        signing_key_id TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        transaction_id TEXT NOT NULL UNIQUE REFERENCES control_credit_transactions(id),
+        verification_status TEXT NOT NULL DEFAULT 'verified'
+          CHECK (verification_status = 'verified'),
+        received_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (deployment_id, sequence),
+        UNIQUE (deployment_id, task_id),
+        FOREIGN KEY (deployment_id, signing_key_id)
+          REFERENCES control_execution_receipt_keys(deployment_id, key_id),
+        CHECK (jsonb_typeof(payload) = 'object')
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_execution_receipts_customer_time
+       ON control_execution_receipts(customer_id, received_at DESC, receipt_id DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_execution_receipts_dispute
+       ON control_execution_receipts(customer_id, organization_id, module, received_at DESC)`,
+    ],
+  },
 ];
 
 export const CONTROL_SCHEMA_MIGRATION_IDS = Object.freeze(

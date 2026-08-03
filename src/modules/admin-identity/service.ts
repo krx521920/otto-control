@@ -70,6 +70,10 @@ const APPROVAL_REQUEST_FIELDS: Readonly<Record<string, readonly string[]>> = {
   'billing.rate.set': ['module', 'unitSize', 'creditsPerUnit'],
   'billing.topup': ['amount', 'idempotencyKey', 'referenceId', 'description'],
   'billing.refund': ['amount', 'idempotencyKey', 'transactionId', 'referenceId', 'description'],
+  'billing.execution_receipt_key.register': [
+    'publicKeyPem', 'keyId', 'notBefore', 'expiresAt',
+  ],
+  'billing.execution_receipt_key.revoke': [],
   'customer_erasure.execute': [],
   'legal_hold.create': ['customerId', 'scope', 'reason', 'expiresAt'],
   'legal_hold.release': ['reason'],

@@ -160,7 +160,12 @@ export async function createCommercialControlRuntime(
     return {
       adminToken: config.adminToken!,
       identity,
-      billing: new BillingService({ store, tokenIssuer }),
+      billing: new BillingService({
+        store,
+        tokenIssuer,
+        allowLegacyUsageReports: config.legacyUsageReportsAllowed
+          ?? config.environment !== 'production',
+      }),
       releaseArtifacts,
       backupStatus,
       alerts,

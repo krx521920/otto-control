@@ -65,6 +65,10 @@ import type {
   CreditStatement,
   CreditTransactionRecord,
   CreditTransactionType,
+  ExecutionReceiptKeyRecord,
+  ExecutionReceiptMutationResult,
+  ExecutionReceiptRecord,
+  SignedExecutionReceiptV2,
   OttoBillingModule,
 } from '../contracts/billing.js';
 import type {
@@ -345,6 +349,37 @@ interface CreditTransactionRow {
   metadata: Record<string, unknown>;
   occurred_at: Date;
   created_at: Date;
+}
+
+interface ExecutionReceiptKeyRow {
+  deployment_id: string;
+  key_id: string;
+  public_key_pem: string;
+  status: ExecutionReceiptKeyRecord['status'];
+  not_before: Date;
+  expires_at: Date | null;
+  revoked_at: Date | null;
+  created_at: Date;
+}
+
+interface ExecutionReceiptRow {
+  receipt_id: string;
+  customer_id: string;
+  deployment_id: string;
+  organization_id: string;
+  task_id: string;
+  module: OttoBillingModule;
+  units: string;
+  model: string | null;
+  issued_at_ms: string;
+  expires_at_ms: string;
+  sequence: string;
+  policy_version: string;
+  signing_key_id: string;
+  signature: string;
+  transaction_id: string;
+  verification_status: 'verified';
+  received_at: Date;
 }
 
 interface LatestTelemetryRow {
@@ -1002,6 +1037,42 @@ function creditTransactionFromRow(row: CreditTransactionRow): CreditTransactionR
     metadata: row.metadata,
     occurredAt: row.occurred_at,
     createdAt: row.created_at,
+  };
+}
+
+function executionReceiptKeyFromRow(row: ExecutionReceiptKeyRow): ExecutionReceiptKeyRecord {
+  return {
+    deploymentId: row.deployment_id,
+    keyId: row.key_id,
+    publicKeyPem: row.public_key_pem,
+    status: row.status,
+    notBefore: row.not_before,
+    expiresAt: row.expires_at,
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+  };
+}
+
+function executionReceiptFromRow(row: ExecutionReceiptRow): ExecutionReceiptRecord {
+  return {
+    version: 2,
+    receiptId: row.receipt_id,
+    customerId: row.customer_id,
+    deploymentId: row.deployment_id,
+    organizationId: row.organization_id,
+    taskId: row.task_id,
+    moduleId: row.module,
+    units: Number(row.units),
+    model: row.model,
+    issuedAtMs: Number(row.issued_at_ms),
+    expiresAtMs: Number(row.expires_at_ms),
+    sequence: Number(row.sequence),
+    policyVersion: row.policy_version,
+    signingKeyId: row.signing_key_id,
+    signature: row.signature,
+    transactionId: row.transaction_id,
+    verificationStatus: row.verification_status,
+    receivedAt: row.received_at,
   };
 }
 
@@ -3442,6 +3513,267 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     }
   }
 
+  async registerExecutionReceiptKey(input: {
+    deploymentId: string;
+    keyId: string;
+    publicKeyPem: string;
+    notBefore: Date;
+    expiresAt: Date | null;
+    createdAt: Date;
+  }): Promise<ExecutionReceiptKeyRecord> {
+    try {
+      await this.#pool.query(
+        `INSERT INTO control_execution_receipt_keys
+          (deployment_id, key_id, public_key_pem, status, not_before, expires_at, created_at)
+         VALUES ($1, $2, $3, 'active', $4, $5, $6)
+         ON CONFLICT (deployment_id, key_id) DO NOTHING`,
+        [input.deploymentId, input.keyId, input.publicKeyPem, input.notBefore,
+          input.expiresAt, input.createdAt],
+      );
+    } catch (error) {
+      if (postgresCode(error) === '23503') throw conflict('deployment does not exist');
+      throw error;
+    }
+    const record = await this.getExecutionReceiptKey(input.deploymentId, input.keyId);
+    if (!record) throw new Error('execution receipt key registration did not persist');
+    if (record.publicKeyPem !== input.publicKeyPem
+      || record.notBefore.getTime() !== input.notBefore.getTime()
+      || record.expiresAt?.getTime() !== input.expiresAt?.getTime()) {
+      throw conflict('execution receipt key id is already bound to different key material');
+    }
+    if (record.status !== 'active') throw conflict('revoked execution receipt key cannot be reused');
+    return record;
+  }
+
+  async revokeExecutionReceiptKey(input: {
+    deploymentId: string;
+    keyId: string;
+    revokedAt: Date;
+  }): Promise<ExecutionReceiptKeyRecord | null> {
+    const result = await this.#pool.query<ExecutionReceiptKeyRow>(
+      `UPDATE control_execution_receipt_keys
+       SET status = 'revoked', revoked_at = $3
+       WHERE deployment_id = $1 AND key_id = $2 AND status = 'active'
+       RETURNING *`,
+      [input.deploymentId, input.keyId, input.revokedAt],
+    );
+    if (result.rows[0]) return executionReceiptKeyFromRow(result.rows[0]);
+    return this.getExecutionReceiptKey(input.deploymentId, input.keyId);
+  }
+
+  async getExecutionReceiptKey(
+    deploymentId: string,
+    keyId: string,
+  ): Promise<ExecutionReceiptKeyRecord | null> {
+    const result = await this.#pool.query<ExecutionReceiptKeyRow>(
+      `SELECT * FROM control_execution_receipt_keys
+       WHERE deployment_id = $1 AND key_id = $2`,
+      [deploymentId, keyId],
+    );
+    return result.rows[0] ? executionReceiptKeyFromRow(result.rows[0]) : null;
+  }
+
+  async listExecutionReceiptKeys(deploymentId: string): Promise<ExecutionReceiptKeyRecord[]> {
+    const result = await this.#pool.query<ExecutionReceiptKeyRow>(
+      `SELECT * FROM control_execution_receipt_keys
+       WHERE deployment_id = $1 ORDER BY created_at DESC, key_id`,
+      [deploymentId],
+    );
+    return result.rows.map(executionReceiptKeyFromRow);
+  }
+
+  async ingestExecutionReceipt(input: {
+    transactionId: string;
+    customerId: string;
+    amount: number;
+    envelope: SignedExecutionReceiptV2;
+    metadata: Record<string, unknown>;
+    receivedAt: Date;
+  }): Promise<ExecutionReceiptMutationResult> {
+    const receipt = input.envelope.receipt;
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'INSERT INTO control_credit_accounts (customer_id) VALUES ($1) ON CONFLICT DO NOTHING',
+        [input.customerId],
+      );
+      const accountResult = await client.query<CreditAccountRow>(
+        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
+        [input.customerId],
+      );
+      const current = accountResult.rows[0];
+      if (!current) throw conflict('customer does not exist');
+
+      const replayResult = await client.query<ExecutionReceiptRow>(
+        'SELECT * FROM control_execution_receipts WHERE receipt_id = $1',
+        [receipt.receiptId],
+      );
+      if (replayResult.rows[0]) {
+        const replay = executionReceiptFromRow(replayResult.rows[0]);
+        if (replay.customerId !== input.customerId
+          || replay.deploymentId !== receipt.deploymentId
+          || replay.organizationId !== receipt.organizationId
+          || replay.taskId !== receipt.taskId
+          || replay.moduleId !== receipt.moduleId
+          || replay.units !== receipt.units
+          || replay.model !== receipt.model
+          || replay.issuedAtMs !== receipt.issuedAtMs
+          || replay.expiresAtMs !== receipt.expiresAtMs
+          || replay.sequence !== receipt.sequence
+          || replay.policyVersion !== receipt.policyVersion
+          || replay.signingKeyId !== input.envelope.signingKeyId
+          || replay.signature !== input.envelope.signature) {
+          throw conflict('execution receipt id was already used for different evidence');
+        }
+        const transactionResult = await client.query<CreditTransactionRow>(
+          'SELECT * FROM control_credit_transactions WHERE id = $1',
+          [replay.transactionId],
+        );
+        if (!transactionResult.rows[0]) throw new Error('execution receipt transaction is missing');
+        await client.query('COMMIT');
+        return {
+          account: creditAccountFromRow(current),
+          transaction: creditTransactionFromRow(transactionResult.rows[0]),
+          receipt: replay,
+          replayed: true,
+        };
+      }
+
+      const keyResult = await client.query<ExecutionReceiptKeyRow>(
+        `SELECT * FROM control_execution_receipt_keys
+         WHERE deployment_id = $1 AND key_id = $2 FOR SHARE`,
+        [receipt.deploymentId, input.envelope.signingKeyId],
+      );
+      const key = keyResult.rows[0];
+      if (!key || key.status !== 'active') throw conflict('execution receipt signing key is inactive');
+
+      await client.query(
+        `INSERT INTO control_execution_receipt_sequences (deployment_id, last_sequence, updated_at)
+         VALUES ($1, 0, $2) ON CONFLICT DO NOTHING`,
+        [receipt.deploymentId, input.receivedAt],
+      );
+      const sequenceResult = await client.query<{ last_sequence: string }>(
+        `SELECT last_sequence FROM control_execution_receipt_sequences
+         WHERE deployment_id = $1 FOR UPDATE`,
+        [receipt.deploymentId],
+      );
+      const expectedSequence = Number(sequenceResult.rows[0]!.last_sequence) + 1;
+      if (receipt.sequence !== expectedSequence) {
+        throw conflict(`execution receipt sequence must be ${expectedSequence}`);
+      }
+      const existingTask = await client.query<{ receipt_id: string }>(
+        `SELECT receipt_id FROM control_execution_receipts
+         WHERE deployment_id = $1 AND task_id = $2`,
+        [receipt.deploymentId, receipt.taskId],
+      );
+      if (existingTask.rows[0]) throw conflict('task already has a billed execution receipt');
+      if (Number(current.available_balance) < input.amount) {
+        throw conflict('insufficient available credits');
+      }
+
+      const updated = await client.query<CreditAccountRow>(
+        `UPDATE control_credit_accounts SET
+           available_balance = available_balance - $2,
+           total_consumed = total_consumed + $2,
+           version = version + 1,
+           updated_at = $3
+         WHERE customer_id = $1 RETURNING *`,
+        [input.customerId, input.amount, input.receivedAt],
+      );
+      const account = creditAccountFromRow(updated.rows[0]!);
+      const transactionResult = await client.query<CreditTransactionRow>(
+        `INSERT INTO control_credit_transactions
+          (id, customer_id, organization_id, deployment_id, module, type,
+           available_delta, frozen_delta, billed_amount, available_after, frozen_after,
+           idempotency_key, reference_id, description, metadata, occurred_at)
+         VALUES ($1, $2, $3, $4, $5, 'consume', $6, 0, $7, $8, $9,
+                 $10, $11, $12, $13::jsonb, $14)
+         RETURNING *`,
+        [input.transactionId, input.customerId, receipt.organizationId, receipt.deploymentId,
+          receipt.moduleId, -input.amount, input.amount, account.availableBalance,
+          account.frozenBalance, `receipt:${receipt.receiptId}`, receipt.taskId,
+          'Verified signed execution receipt', JSON.stringify(input.metadata),
+          new Date(receipt.issuedAtMs)],
+      );
+      const inserted = await client.query<ExecutionReceiptRow>(
+        `INSERT INTO control_execution_receipts
+          (receipt_id, customer_id, deployment_id, organization_id, task_id, module,
+           units, model, issued_at_ms, expires_at_ms, sequence, policy_version,
+           signing_key_id, signature, payload, transaction_id, received_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                 $13, $14, $15::jsonb, $16, $17)
+         RETURNING *`,
+        [receipt.receiptId, input.customerId, receipt.deploymentId, receipt.organizationId,
+          receipt.taskId, receipt.moduleId, receipt.units, receipt.model, receipt.issuedAtMs,
+          receipt.expiresAtMs, receipt.sequence, receipt.policyVersion,
+          input.envelope.signingKeyId, input.envelope.signature, JSON.stringify(receipt),
+          input.transactionId, input.receivedAt],
+      );
+      await client.query(
+        `UPDATE control_execution_receipt_sequences
+         SET last_sequence = $2, updated_at = $3 WHERE deployment_id = $1`,
+        [receipt.deploymentId, receipt.sequence, input.receivedAt],
+      );
+      await client.query('COMMIT');
+      return {
+        account,
+        transaction: creditTransactionFromRow(transactionResult.rows[0]!),
+        receipt: executionReceiptFromRow(inserted.rows[0]!),
+        replayed: false,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23503') throw conflict('execution receipt binding is invalid');
+      if (postgresCode(error) === '23505') throw conflict('execution receipt was already consumed');
+      if (postgresCode(error) === '23514') throw conflict('execution receipt violates billing limits');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getExecutionReceipt(receiptId: string): Promise<ExecutionReceiptRecord | null> {
+    const result = await this.#pool.query<ExecutionReceiptRow>(
+      'SELECT * FROM control_execution_receipts WHERE receipt_id = $1',
+      [receiptId],
+    );
+    return result.rows[0] ? executionReceiptFromRow(result.rows[0]) : null;
+  }
+
+  async listExecutionReceipts(input: {
+    customerId: string;
+    from: Date;
+    to: Date;
+    organizationId?: string;
+    deploymentId?: string;
+    module?: OttoBillingModule;
+    limit: number;
+  }): Promise<ExecutionReceiptRecord[]> {
+    const values: unknown[] = [input.customerId, input.from, input.to];
+    const conditions = ['customer_id = $1', 'received_at >= $2', 'received_at < $3'];
+    if (input.organizationId) {
+      values.push(input.organizationId);
+      conditions.push(`organization_id = $${values.length}`);
+    }
+    if (input.deploymentId) {
+      values.push(input.deploymentId);
+      conditions.push(`deployment_id = $${values.length}`);
+    }
+    if (input.module) {
+      values.push(input.module);
+      conditions.push(`module = $${values.length}`);
+    }
+    values.push(input.limit);
+    const result = await this.#pool.query<ExecutionReceiptRow>(
+      `SELECT * FROM control_execution_receipts
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY received_at DESC, receipt_id DESC LIMIT $${values.length}`,
+      values,
+    );
+    return result.rows.map(executionReceiptFromRow);
+  }
+
   async refundCredits(input: {
     transactionId: string;
     customerId: string;
@@ -3521,7 +3853,11 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         [input.transactionId, input.customerId, original.organization_id,
           original.deployment_id, original.module, input.amount, account.availableBalance,
           account.frozenBalance, input.idempotencyKey, input.referenceId,
-          input.relatedTransactionId, input.description, JSON.stringify(input.metadata),
+          input.relatedTransactionId, input.description, JSON.stringify({
+            ...input.metadata,
+            executionReceiptId: original.metadata.executionReceiptId,
+            receiptVerificationStatus: original.metadata.receiptVerificationStatus,
+          }),
           input.occurredAt],
       );
       await client.query('COMMIT');

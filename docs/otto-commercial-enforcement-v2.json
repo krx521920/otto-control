@@ -1,0 +1,57 @@
+{
+  "version": 2,
+  "name": "execution_receipt_v2",
+  "algorithm": "Ed25519",
+  "canonicalization": "recursive object-key sort followed by UTF-8 JSON",
+  "requestEndpoint": "/v1/billing/execution-receipts",
+  "keyAdministration": {
+    "list": "/v1/admin/deployments/{deploymentId}/execution-receipt-keys",
+    "register": "/v1/admin/deployments/{deploymentId}/execution-receipt-keys",
+    "revoke": "/v1/admin/deployments/{deploymentId}/execution-receipt-keys/{keyId}/revoke",
+    "dualApproval": true
+  },
+  "receiptFields": [
+    "version",
+    "receiptId",
+    "deploymentId",
+    "organizationId",
+    "taskId",
+    "moduleId",
+    "units",
+    "model",
+    "issuedAtMs",
+    "expiresAtMs",
+    "sequence",
+    "policyVersion"
+  ],
+  "privacyBoundary": {
+    "unknownFieldsRejected": true,
+    "prohibited": [
+      "prompt",
+      "response",
+      "chat",
+      "file",
+      "filename",
+      "meetingContent",
+      "personalIdentifier"
+    ]
+  },
+  "antiReplay": {
+    "receiptIdUnique": true,
+    "sameTaskChargedOnce": true,
+    "strictContiguousSequencePerDeployment": true,
+    "maximumValidityMs": 604800000,
+    "maximumFutureSkewMs": 300000
+  },
+  "settlement": {
+    "priceAuthority": "control_plane",
+    "atomicWithReceiptPersistence": true,
+    "evidenceTrust": "deployment_signed_receipt_v2",
+    "csvEvidenceColumns": [
+      "executionReceiptId",
+      "receiptVerificationStatus"
+    ]
+  },
+  "legacyUsageReportsAllowedInProductionByDefault": false
+}
+

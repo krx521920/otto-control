@@ -46,7 +46,11 @@ import type {
   CreditMutationResult,
   CreditStatement,
   CreditTransactionRecord,
+  ExecutionReceiptKeyRecord,
+  ExecutionReceiptMutationResult,
+  ExecutionReceiptRecord,
   OttoBillingModule,
+  SignedExecutionReceiptV2,
 } from '../../src/contracts/billing.js';
 import type {
   AlertDeliveryPayload,
@@ -127,6 +131,9 @@ export class MemoryControlStore implements ControlStore {
   readonly billingRates = new Map<string, BillingRateRecord>();
   readonly creditHolds = new Map<string, CreditHoldRecord>();
   readonly creditTransactions = new Map<string, CreditTransactionRecord>();
+  readonly executionReceiptKeys = new Map<string, ExecutionReceiptKeyRecord>();
+  readonly executionReceipts = new Map<string, ExecutionReceiptRecord>();
+  readonly executionReceiptSequences = new Map<string, number>();
   readonly alertDeliveries = new Map<string, AlertDeliveryRecord>();
   readonly auditAnchors = new Map<string, AuditAnchorRecord>();
   readonly auditWitnessReceipts: AuditWitnessReceiptRecord[] = [];
@@ -1498,6 +1505,182 @@ export class MemoryControlStore implements ControlStore {
     return { account, transaction, replayed: false };
   }
 
+  async registerExecutionReceiptKey(input: {
+    deploymentId: string;
+    keyId: string;
+    publicKeyPem: string;
+    notBefore: Date;
+    expiresAt: Date | null;
+    createdAt: Date;
+  }): Promise<ExecutionReceiptKeyRecord> {
+    if (!this.deployments.has(input.deploymentId)) throw conflict('deployment does not exist');
+    const mapKey = `${input.deploymentId}\0${input.keyId}`;
+    const existing = this.executionReceiptKeys.get(mapKey);
+    if (existing) {
+      if (existing.publicKeyPem !== input.publicKeyPem
+        || existing.notBefore.getTime() !== input.notBefore.getTime()
+        || existing.expiresAt?.getTime() !== input.expiresAt?.getTime()) {
+        throw conflict('execution receipt key id is already bound to different key material');
+      }
+      if (existing.status !== 'active') {
+        throw conflict('revoked execution receipt key cannot be reused');
+      }
+      return existing;
+    }
+    const record: ExecutionReceiptKeyRecord = {
+      ...input,
+      status: 'active',
+      revokedAt: null,
+    };
+    this.executionReceiptKeys.set(mapKey, record);
+    return record;
+  }
+
+  async revokeExecutionReceiptKey(input: {
+    deploymentId: string;
+    keyId: string;
+    revokedAt: Date;
+  }): Promise<ExecutionReceiptKeyRecord | null> {
+    const mapKey = `${input.deploymentId}\0${input.keyId}`;
+    const existing = this.executionReceiptKeys.get(mapKey);
+    if (!existing) return null;
+    if (existing.status === 'revoked') return existing;
+    const record: ExecutionReceiptKeyRecord = {
+      ...existing,
+      status: 'revoked',
+      revokedAt: input.revokedAt,
+    };
+    this.executionReceiptKeys.set(mapKey, record);
+    return record;
+  }
+
+  async getExecutionReceiptKey(
+    deploymentId: string,
+    keyId: string,
+  ): Promise<ExecutionReceiptKeyRecord | null> {
+    return this.executionReceiptKeys.get(`${deploymentId}\0${keyId}`) ?? null;
+  }
+
+  async listExecutionReceiptKeys(deploymentId: string): Promise<ExecutionReceiptKeyRecord[]> {
+    return [...this.executionReceiptKeys.values()]
+      .filter((record) => record.deploymentId === deploymentId)
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
+  }
+
+  async ingestExecutionReceipt(input: {
+    transactionId: string;
+    customerId: string;
+    amount: number;
+    envelope: SignedExecutionReceiptV2;
+    metadata: Record<string, unknown>;
+    receivedAt: Date;
+  }): Promise<ExecutionReceiptMutationResult> {
+    const evidence = input.envelope.receipt;
+    const current = this.#creditAccount(input.customerId, true)!;
+    const replay = this.executionReceipts.get(evidence.receiptId);
+    if (replay) {
+      const replayEvidence = {
+        receipt: {
+          version: replay.version,
+          receiptId: replay.receiptId,
+          deploymentId: replay.deploymentId,
+          organizationId: replay.organizationId,
+          taskId: replay.taskId,
+          moduleId: replay.moduleId,
+          units: replay.units,
+          model: replay.model,
+          issuedAtMs: replay.issuedAtMs,
+          expiresAtMs: replay.expiresAtMs,
+          sequence: replay.sequence,
+          policyVersion: replay.policyVersion,
+        },
+        signingKeyId: replay.signingKeyId,
+        signature: replay.signature,
+      };
+      if (replay.customerId !== input.customerId
+        || JSON.stringify(replayEvidence) !== JSON.stringify(input.envelope)) {
+        throw conflict('execution receipt id was already used for different evidence');
+      }
+      const transaction = this.creditTransactions.get(replay.transactionId);
+      if (!transaction) throw new Error('execution receipt transaction is missing');
+      return { account: current, transaction, receipt: replay, replayed: true };
+    }
+    const key = await this.getExecutionReceiptKey(evidence.deploymentId, input.envelope.signingKeyId);
+    if (!key || key.status !== 'active') throw conflict('execution receipt signing key is inactive');
+    const expectedSequence = (this.executionReceiptSequences.get(evidence.deploymentId) ?? 0) + 1;
+    if (evidence.sequence !== expectedSequence) {
+      throw conflict(`execution receipt sequence must be ${expectedSequence}`);
+    }
+    if ([...this.executionReceipts.values()].some((record) => (
+      record.deploymentId === evidence.deploymentId && record.taskId === evidence.taskId
+    ))) throw conflict('task already has a billed execution receipt');
+    if (current.availableBalance < input.amount) throw conflict('insufficient available credits');
+
+    const account = this.#updateCreditAccount(current, {
+      availableBalance: current.availableBalance - input.amount,
+      totalConsumed: current.totalConsumed + input.amount,
+    }, input.receivedAt);
+    const transaction: CreditTransactionRecord = {
+      id: input.transactionId,
+      customerId: input.customerId,
+      organizationId: evidence.organizationId,
+      deploymentId: evidence.deploymentId,
+      module: evidence.moduleId,
+      type: 'consume',
+      availableDelta: -input.amount,
+      frozenDelta: 0,
+      billedAmount: input.amount,
+      availableAfter: account.availableBalance,
+      frozenAfter: account.frozenBalance,
+      idempotencyKey: `receipt:${evidence.receiptId}`,
+      referenceId: evidence.taskId,
+      relatedTransactionId: null,
+      description: 'Verified signed execution receipt',
+      metadata: input.metadata,
+      occurredAt: new Date(evidence.issuedAtMs),
+      createdAt: input.receivedAt,
+    };
+    const receipt: ExecutionReceiptRecord = {
+      ...evidence,
+      customerId: input.customerId,
+      signingKeyId: input.envelope.signingKeyId,
+      signature: input.envelope.signature,
+      transactionId: input.transactionId,
+      verificationStatus: 'verified',
+      receivedAt: input.receivedAt,
+    };
+    this.creditTransactions.set(transaction.id, transaction);
+    this.executionReceipts.set(receipt.receiptId, receipt);
+    this.executionReceiptSequences.set(receipt.deploymentId, receipt.sequence);
+    return { account, transaction, receipt, replayed: false };
+  }
+
+  async getExecutionReceipt(receiptId: string): Promise<ExecutionReceiptRecord | null> {
+    return this.executionReceipts.get(receiptId) ?? null;
+  }
+
+  async listExecutionReceipts(input: {
+    customerId: string;
+    from: Date;
+    to: Date;
+    organizationId?: string;
+    deploymentId?: string;
+    module?: OttoBillingModule;
+    limit: number;
+  }): Promise<ExecutionReceiptRecord[]> {
+    return [...this.executionReceipts.values()]
+      .filter((receipt) => (
+        receipt.customerId === input.customerId
+        && receipt.receivedAt >= input.from
+        && receipt.receivedAt < input.to
+        && (!input.organizationId || receipt.organizationId === input.organizationId)
+        && (!input.deploymentId || receipt.deploymentId === input.deploymentId)
+        && (!input.module || receipt.moduleId === input.module)
+      ))
+      .sort((left, right) => right.receivedAt.getTime() - left.receivedAt.getTime())
+      .slice(0, input.limit);
+  }
+
   async refundCredits(input: {
     transactionId: string;
     customerId: string;
@@ -1550,7 +1733,11 @@ export class MemoryControlStore implements ControlStore {
       referenceId: input.referenceId,
       relatedTransactionId: original.id,
       description: input.description,
-      metadata: input.metadata,
+      metadata: {
+        ...input.metadata,
+        executionReceiptId: original.metadata.executionReceiptId,
+        receiptVerificationStatus: original.metadata.receiptVerificationStatus,
+      },
       occurredAt: input.occurredAt,
       createdAt: input.occurredAt,
     };

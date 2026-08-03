@@ -644,7 +644,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.27.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.28.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -663,6 +663,7 @@ a misleading success report.
 | `CONTROL_LEASE_DURATION_MS` | `600000` | Online lease lifetime; Otto refreshes every two minutes |
 | `CONTROL_TELEMETRY_RETENTION_DAYS` | `90` | Central operational telemetry retention, from 1 to 3650 days |
 | `CONTROL_UPDATE_POLICY_DURATION_MS` | `300000` | Signed update decision lifetime, from one minute to one hour |
+| `CONTROL_LEGACY_USAGE_REPORTS_ALLOWED` | `false` in production | Temporary migration switch for the unsigned v1 usage endpoint; keep disabled for commercial settlement |
 | `CONTROL_DATA_REGION` | `CN-BJ` | Persistently bound primary data region; explicitly required in production |
 | `CONTROL_ALLOWED_DATA_REGIONS` | primary region | Comma-separated approved storage/processing regions |
 | `CONTROL_CROSS_BORDER_ENABLED` | `false` | Explicit cross-border processing gate; never enabled by a UI-only flag |
@@ -789,6 +790,16 @@ opaque request reference. The control plane calculates the charge, so a customer
 server cannot submit a lower price. Prompts, replies, chats, files, filenames, and
 meeting content are not part of the billing protocol.
 
+Commercial settlement uses signed execution receipts. Each deployment registers
+an Ed25519 public key through a second-administrator-approved operation, signs a
+strict content-free receipt, and submits it to
+`POST /v1/billing/execution-receipts`. Control verifies the deployment binding,
+lease, key validity, signature, expiry, contiguous sequence, task uniqueness,
+rate, and balance before persisting the receipt and debit atomically. Production
+disables the legacy unsigned `/v1/billing/usage/consume` endpoint by default.
+The complete privacy and replay contract is documented in
+[`docs/otto-commercial-enforcement-v2.md`](docs/otto-commercial-enforcement-v2.md).
+
 `POST /v1/billing/holds` freezes estimated credits before long work. Capture
 settles the actual amount and immediately releases any remainder; explicit
 release and automatic expiry both return unused credits. Direct usage calls and
@@ -851,6 +862,8 @@ release_artifact.revoke
 billing.rate.set
 billing.topup
 billing.refund
+billing.execution_receipt_key.register
+billing.execution_receipt_key.revoke
 ```
 
 ### Operator console

@@ -30,6 +30,10 @@ import type {
   CreditMutationResult,
   CreditStatement,
   CreditTransactionRecord,
+  ExecutionReceiptKeyRecord,
+  ExecutionReceiptMutationResult,
+  ExecutionReceiptRecord,
+  SignedExecutionReceiptV2,
   OttoBillingModule,
 } from '../contracts/billing.js';
 import type {
@@ -548,6 +552,42 @@ export interface ControlStore {
     metadata: Record<string, unknown>;
     occurredAt: Date;
   }): Promise<CreditMutationResult>;
+  registerExecutionReceiptKey(input: {
+    deploymentId: string;
+    keyId: string;
+    publicKeyPem: string;
+    notBefore: Date;
+    expiresAt: Date | null;
+    createdAt: Date;
+  }): Promise<ExecutionReceiptKeyRecord>;
+  revokeExecutionReceiptKey(input: {
+    deploymentId: string;
+    keyId: string;
+    revokedAt: Date;
+  }): Promise<ExecutionReceiptKeyRecord | null>;
+  getExecutionReceiptKey(
+    deploymentId: string,
+    keyId: string,
+  ): Promise<ExecutionReceiptKeyRecord | null>;
+  listExecutionReceiptKeys(deploymentId: string): Promise<ExecutionReceiptKeyRecord[]>;
+  ingestExecutionReceipt(input: {
+    transactionId: string;
+    customerId: string;
+    amount: number;
+    envelope: SignedExecutionReceiptV2;
+    metadata: Record<string, unknown>;
+    receivedAt: Date;
+  }): Promise<ExecutionReceiptMutationResult>;
+  getExecutionReceipt(receiptId: string): Promise<ExecutionReceiptRecord | null>;
+  listExecutionReceipts(input: {
+    customerId: string;
+    from: Date;
+    to: Date;
+    organizationId?: string;
+    deploymentId?: string;
+    module?: OttoBillingModule;
+    limit: number;
+  }): Promise<ExecutionReceiptRecord[]>;
   refundCredits(input: {
     transactionId: string;
     customerId: string;

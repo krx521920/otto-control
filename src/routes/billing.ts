@@ -22,6 +22,55 @@ export async function registerBillingRoutes(
       },
     );
 
+    admin.get<{ Params: { deploymentId: string } }>(
+      '/deployments/:deploymentId/execution-receipt-keys',
+      async (request) => {
+        await authenticateAdmin(request, options, 'billing.read');
+        return {
+          keys: await options.service.executionReceiptKeys(request.params.deploymentId),
+        };
+      },
+    );
+
+    admin.post<{ Params: { deploymentId: string } }>(
+      '/deployments/:deploymentId/execution-receipt-keys',
+      async (request, reply) => {
+        const auth = await authenticateAdmin(request, options, 'billing.manage');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'billing.execution_receipt_key.register',
+          targetType: 'deployment',
+          targetId: request.params.deploymentId,
+          request: request.body ?? {},
+        });
+        const key = await options.service.registerExecutionReceiptKey(
+          request.params.deploymentId,
+          request.body,
+          auth.actorId,
+        );
+        return reply.code(201).send({ key });
+      },
+    );
+
+    admin.post<{ Params: { deploymentId: string; keyId: string } }>(
+      '/deployments/:deploymentId/execution-receipt-keys/:keyId/revoke',
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'billing.manage');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'billing.execution_receipt_key.revoke',
+          targetType: 'execution_receipt_key',
+          targetId: `${request.params.deploymentId}:${request.params.keyId}`,
+          request: {},
+        });
+        return {
+          key: await options.service.revokeExecutionReceiptKey(
+            request.params.deploymentId,
+            request.params.keyId,
+            auth.actorId,
+          ),
+        };
+      },
+    );
+
     admin.get<{ Params: { customerId: string } }>(
       '/billing/customers/:customerId/rates',
       async (request) => {
@@ -101,6 +150,30 @@ export async function registerBillingRoutes(
     admin.get<{
       Params: { customerId: string };
       Querystring: Record<string, string | undefined>;
+    }>('/billing/customers/:customerId/execution-receipts', async (request) => {
+      await authenticateAdmin(request, options, 'billing.read');
+      return { receipts: await options.service.executionReceipts(
+        request.params.customerId,
+        request.query,
+      ) };
+    });
+
+    admin.get<{ Params: { customerId: string; receiptId: string } }>(
+      '/billing/customers/:customerId/execution-receipts/:receiptId',
+      async (request) => {
+        await authenticateAdmin(request, options, 'billing.read');
+        return {
+          receipt: await options.service.executionReceipt(
+            request.params.customerId,
+            request.params.receiptId,
+          ),
+        };
+      },
+    );
+
+    admin.get<{
+      Params: { customerId: string };
+      Querystring: Record<string, string | undefined>;
     }>('/billing/customers/:customerId/statement', async (request) => {
       await authenticateAdmin(request, options, 'billing.read');
       return { statement: await options.service.statement(request.params.customerId, request.query) };
@@ -123,6 +196,16 @@ export async function registerBillingRoutes(
     config: { rateLimit: { max: 600, timeWindow: '1 minute', ban: 20 } },
   }, async (request, reply) => {
     const result = await options.service.consumeUsage(request.body, bearerToken(request));
+    return reply.code(result.replayed ? 200 : 201).send(result);
+  });
+
+  app.post('/v1/billing/execution-receipts', {
+    config: { rateLimit: { max: 600, timeWindow: '1 minute', ban: 20 } },
+  }, async (request, reply) => {
+    const result = await options.service.consumeExecutionReceipt(
+      request.body,
+      bearerToken(request),
+    );
     return reply.code(result.replayed ? 200 : 201).send(result);
   });
 

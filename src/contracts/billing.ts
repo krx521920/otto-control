@@ -112,6 +112,53 @@ export interface CreditStatement {
   lines: CreditStatementLine[];
 }
 
+export type ExecutionReceiptKeyStatus = 'active' | 'revoked';
+
+export interface ExecutionReceiptKeyRecord {
+  deploymentId: string;
+  keyId: string;
+  publicKeyPem: string;
+  status: ExecutionReceiptKeyStatus;
+  notBefore: Date;
+  expiresAt: Date | null;
+  revokedAt: Date | null;
+  createdAt: Date;
+}
+
+export interface ExecutionReceiptV2Payload {
+  version: 2;
+  receiptId: string;
+  deploymentId: string;
+  organizationId: string;
+  taskId: string;
+  moduleId: OttoBillingModule;
+  units: number;
+  model: string | null;
+  issuedAtMs: number;
+  expiresAtMs: number;
+  sequence: number;
+  policyVersion: string;
+}
+
+export interface SignedExecutionReceiptV2 {
+  receipt: ExecutionReceiptV2Payload;
+  signingKeyId: string;
+  signature: string;
+}
+
+export interface ExecutionReceiptRecord extends ExecutionReceiptV2Payload {
+  customerId: string;
+  signingKeyId: string;
+  signature: string;
+  transactionId: string;
+  verificationStatus: 'verified';
+  receivedAt: Date;
+}
+
+export interface ExecutionReceiptMutationResult extends CreditMutationResult {
+  receipt: ExecutionReceiptRecord;
+}
+
 export function isOttoBillingModule(value: string): value is OttoBillingModule {
   return (OTTO_BILLING_MODULES as readonly string[]).includes(value);
 }

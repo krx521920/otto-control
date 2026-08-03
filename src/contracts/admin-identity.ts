@@ -56,6 +56,8 @@ export const ADMIN_APPROVAL_OPERATIONS = [
   'billing.rate.set',
   'billing.topup',
   'billing.refund',
+  'billing.execution_receipt_key.register',
+  'billing.execution_receipt_key.revoke',
   'customer_erasure.execute',
   'legal_hold.create',
   'legal_hold.release',

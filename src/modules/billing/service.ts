@@ -5,17 +5,26 @@ import type {
   CreditMutationResult,
   CreditStatement,
   CreditTransactionRecord,
+  ExecutionReceiptMutationResult,
+  ExecutionReceiptRecord,
   OttoBillingModule,
 } from '../../contracts/billing.js';
 import { isOttoBillingModule } from '../../contracts/billing.js';
 import { conflict, invalidRequest, notFound, unauthorized } from '../../errors.js';
 import type { ControlStore, LicenseRecord } from '../../storage/control-store.js';
 import type { ControlTokenIssuer } from '../commercial-control/token-issuer.js';
+import {
+  normalizeExecutionReceiptEnvelope,
+  normalizeExecutionReceiptPublicKey,
+  verifyExecutionReceipt,
+} from './execution-receipt.js';
 
 const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,159}$/u;
 const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_CREDITS = 9_000_000_000_000_000;
 const MAX_UNITS = 9_000_000_000_000;
+const MAX_RECEIPT_KEY_LIFETIME_MS = 400 * 24 * 60 * 60 * 1000;
+const RECEIPT_REQUEST_FIELDS = new Set(['licenseId', 'machineFingerprint', 'envelope']);
 
 interface AuthenticatedDeployment {
   customerId: string;
@@ -39,6 +48,18 @@ function requiredString(
   const value = typeof body[field] === 'string' ? body[field].trim() : '';
   if (!value || value.length > maxLength) throw invalidRequest(`${field} is invalid`);
   return value;
+}
+
+function exactFields(body: Record<string, unknown>, expected: Set<string>, name: string): void {
+  const unknown = Object.keys(body).filter((field) => !expected.has(field));
+  if (unknown.length > 0) throw invalidRequest(`${name} contains unsupported fields`);
+}
+
+function optionalDate(value: unknown, field: string): Date | null {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = new Date(String(value));
+  if (!Number.isFinite(parsed.getTime())) throw invalidRequest(`${field} is invalid`);
+  return parsed;
 }
 
 function positiveInteger(value: unknown, field: string, maximum = MAX_CREDITS): number {
@@ -100,17 +121,20 @@ export interface BillingServiceOptions {
   store: ControlStore;
   tokenIssuer: ControlTokenIssuer;
   now?: () => number;
+  allowLegacyUsageReports?: boolean;
 }
 
 export class BillingService {
   readonly #store: ControlStore;
   readonly #tokens: ControlTokenIssuer;
   readonly #now: () => number;
+  readonly #allowLegacyUsageReports: boolean;
 
   constructor(options: BillingServiceOptions) {
     this.#store = options.store;
     this.#tokens = options.tokenIssuer;
     this.#now = options.now ?? Date.now;
+    this.#allowLegacyUsageReports = options.allowLegacyUsageReports ?? true;
   }
 
   async account(customerId: string) {
@@ -145,6 +169,80 @@ export class BillingService {
 
   async rates(customerId: string) {
     return this.#store.listBillingRates(customerId);
+  }
+
+  async registerExecutionReceiptKey(
+    deploymentId: string,
+    raw: unknown,
+    actorId: string,
+  ) {
+    const body = objectValue(raw);
+    const normalized = normalizeExecutionReceiptPublicKey(body.publicKeyPem);
+    if (body.keyId !== undefined && String(body.keyId).trim().toLowerCase() !== normalized.keyId) {
+      throw invalidRequest('keyId does not match the Ed25519 public key');
+    }
+    const now = this.#now();
+    const existing = await this.#store.getExecutionReceiptKey(deploymentId, normalized.keyId);
+    const notBefore = optionalDate(body.notBefore, 'notBefore')
+      ?? existing?.notBefore
+      ?? new Date(now - 5 * 60 * 1000);
+    const expiresAt = optionalDate(body.expiresAt, 'expiresAt') ?? existing?.expiresAt ?? null;
+    if (!expiresAt || expiresAt.getTime() <= Math.max(now, notBefore.getTime())) {
+      throw invalidRequest('expiresAt must be later than the current time and notBefore');
+    }
+    if (expiresAt.getTime() - notBefore.getTime() > MAX_RECEIPT_KEY_LIFETIME_MS) {
+      throw invalidRequest('execution receipt key lifetime cannot exceed 400 days');
+    }
+    const deployment = await this.#store.getDeployment(deploymentId);
+    if (!deployment) throw notFound('deployment not found');
+    const key = await this.#store.registerExecutionReceiptKey({
+      deploymentId,
+      keyId: normalized.keyId,
+      publicKeyPem: normalized.publicKeyPem,
+      notBefore,
+      expiresAt,
+      createdAt: existing?.createdAt ?? new Date(now),
+    });
+    if (!existing) {
+      await this.#store.appendAuditEvent({
+        actorId,
+        action: 'billing.execution_receipt_key.registered',
+        targetType: 'deployment',
+        targetId: deploymentId,
+        detail: {
+          keyId: key.keyId,
+          notBefore: key.notBefore.toISOString(),
+          expiresAt: key.expiresAt?.toISOString() ?? null,
+        },
+      });
+    }
+    return key;
+  }
+
+  async revokeExecutionReceiptKey(deploymentId: string, keyId: string, actorId: string) {
+    const normalizedKeyId = keyId.trim().toLowerCase();
+    const existing = await this.#store.getExecutionReceiptKey(deploymentId, normalizedKeyId);
+    if (!existing) throw notFound('execution receipt key not found');
+    const key = await this.#store.revokeExecutionReceiptKey({
+      deploymentId,
+      keyId: normalizedKeyId,
+      revokedAt: new Date(this.#now()),
+    });
+    if (!key) throw notFound('execution receipt key not found');
+    if (existing.status === 'active') {
+      await this.#store.appendAuditEvent({
+        actorId,
+        action: 'billing.execution_receipt_key.revoked',
+        targetType: 'deployment',
+        targetId: deploymentId,
+        detail: { keyId: key.keyId },
+      });
+    }
+    return key;
+  }
+
+  async executionReceiptKeys(deploymentId: string) {
+    return this.#store.listExecutionReceiptKeys(deploymentId);
   }
 
   async topUp(customerId: string, raw: unknown, actorId: string): Promise<CreditMutationResult> {
@@ -287,6 +385,9 @@ export class BillingService {
   }
 
   async consumeUsage(raw: unknown, bearerToken: string): Promise<CreditMutationResult> {
+    if (!this.#allowLegacyUsageReports) {
+      throw conflict('legacy usage reports are disabled; submit a signed execution receipt');
+    }
     const body = objectValue(raw);
     const authenticated = await this.#authenticateDeployment(body, bearerToken);
     await this.#releaseExpiredHolds(authenticated.customerId);
@@ -313,6 +414,70 @@ export class BillingService {
     });
   }
 
+  async consumeExecutionReceipt(
+    raw: unknown,
+    bearerToken: string,
+  ): Promise<ExecutionReceiptMutationResult> {
+    const body = objectValue(raw);
+    exactFields(body, RECEIPT_REQUEST_FIELDS, 'execution receipt request');
+    const now = this.#now();
+    const envelope = normalizeExecutionReceiptEnvelope(body.envelope, now);
+    const authenticated = await this.#authenticateDeployment({
+      licenseId: body.licenseId,
+      machineFingerprint: body.machineFingerprint,
+      deploymentId: envelope.receipt.deploymentId,
+      organizationId: envelope.receipt.organizationId,
+    }, bearerToken);
+    await this.#releaseExpiredHolds(authenticated.customerId);
+    const key = await this.#store.getExecutionReceiptKey(
+      authenticated.deploymentId,
+      envelope.signingKeyId,
+    );
+    if (!key) throw unauthorized('execution receipt signing key is unknown');
+    verifyExecutionReceipt(envelope, key);
+    const amount = await this.#price(
+      authenticated.customerId,
+      envelope.receipt.moduleId,
+      envelope.receipt.units,
+    );
+    const result = await this.#store.ingestExecutionReceipt({
+      transactionId: transactionId(),
+      customerId: authenticated.customerId,
+      amount,
+      envelope,
+      metadata: {
+        evidenceTrust: 'deployment_signed_receipt_v2',
+        executionReceiptId: envelope.receipt.receiptId,
+        receiptVerificationStatus: 'verified',
+        signingKeyId: envelope.signingKeyId,
+        sequence: envelope.receipt.sequence,
+        policyVersion: envelope.receipt.policyVersion,
+        units: envelope.receipt.units,
+        model: envelope.receipt.model,
+      },
+      receivedAt: new Date(now),
+    });
+    if (!result.replayed) {
+      await this.#store.appendAuditEvent({
+        actorId: `deployment:${authenticated.deploymentId}`,
+        action: 'billing.execution_receipt.consumed',
+        targetType: 'execution_receipt',
+        targetId: result.receipt.receiptId,
+        detail: {
+          customerId: authenticated.customerId,
+          organizationId: authenticated.organizationId,
+          deploymentId: authenticated.deploymentId,
+          taskId: result.receipt.taskId,
+          module: result.receipt.moduleId,
+          units: result.receipt.units,
+          sequence: result.receipt.sequence,
+          transactionId: result.transaction.id,
+        },
+      });
+    }
+    return result;
+  }
+
   async transactions(customerId: string, raw: Record<string, unknown>) {
     const { from, to } = parseRange(raw.from, raw.to);
     const organizationId = raw.organizationId === undefined
@@ -323,6 +488,27 @@ export class BillingService {
     return this.#store.listCreditTransactions({
       customerId, from, to, organizationId, module, limit,
     });
+  }
+
+  async executionReceipts(customerId: string, raw: Record<string, unknown>) {
+    const { from, to } = parseRange(raw.from, raw.to);
+    const organizationId = raw.organizationId === undefined
+      ? undefined
+      : requiredString(raw, 'organizationId');
+    const deploymentId = raw.deploymentId === undefined
+      ? undefined
+      : requiredString(raw, 'deploymentId');
+    const module = raw.module === undefined ? undefined : moduleValue(raw);
+    const limit = raw.limit === undefined ? 500 : positiveInteger(raw.limit, 'limit', 10_000);
+    return this.#store.listExecutionReceipts({
+      customerId, from, to, organizationId, deploymentId, module, limit,
+    });
+  }
+
+  async executionReceipt(customerId: string, receiptId: string): Promise<ExecutionReceiptRecord> {
+    const receipt = await this.#store.getExecutionReceipt(receiptId);
+    if (!receipt || receipt.customerId !== customerId) throw notFound('execution receipt not found');
+    return receipt;
   }
 
   async statement(customerId: string, raw: Record<string, unknown>): Promise<CreditStatement> {
@@ -339,13 +525,15 @@ export class BillingService {
       'transactionId', 'occurredAt', 'customerId', 'organizationId', 'deploymentId',
       'module', 'type', 'billedAmount', 'availableDelta', 'frozenDelta',
       'availableAfter', 'frozenAfter', 'idempotencyKey', 'referenceId',
-      'relatedTransactionId', 'description',
+      'relatedTransactionId', 'description', 'executionReceiptId',
+      'receiptVerificationStatus',
     ];
     const rows = transactions.map((item: CreditTransactionRecord) => [
       item.id, item.occurredAt.toISOString(), item.customerId, item.organizationId,
       item.deploymentId, item.module, item.type, item.billedAmount, item.availableDelta,
       item.frozenDelta, item.availableAfter, item.frozenAfter, item.idempotencyKey,
       item.referenceId, item.relatedTransactionId, item.description,
+      item.metadata.executionReceiptId, item.metadata.receiptVerificationStatus,
     ]);
     return `\uFEFF${[header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`;
   }

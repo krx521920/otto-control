@@ -81,6 +81,7 @@ describe('commercial control HTTP routes', () => {
   let securitySessionToken: string;
   let auditorSessionToken: string;
   let auditService: AuditService;
+  let receiptSigner: LocalEd25519Signer;
 
   beforeEach(async () => {
     const keys = generateKeyPairSync('ed25519');
@@ -88,6 +89,7 @@ describe('commercial control HTTP routes', () => {
     const signer = new LocalEd25519Signer(
       keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
     );
+    receiptSigner = signer;
     const standbyKeys = generateKeyPairSync('ed25519');
     const standbySigner = new LocalEd25519Signer(
       standbyKeys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
@@ -303,6 +305,7 @@ describe('commercial control HTTP routes', () => {
       'external_audit_witness',
       'credit_billing',
       'billing_statement_export',
+      'signed_execution_receipts_v2',
     ]);
 
     const backupStatus = await app.inject({
@@ -581,6 +584,71 @@ describe('commercial control HTTP routes', () => {
     expect(replay.statusCode).toBe(200);
     expect(replay.json().replayed).toBe(true);
 
+    const keyRequest = {
+      publicKeyPem: receiptSigner.publicKeyPem,
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+    const keyApproval = await approvedOperation(
+      'billing.execution_receipt_key.register',
+      'deployment',
+      deploymentId,
+      keyRequest,
+    );
+    const registeredKey = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/deployments/${deploymentId}/execution-receipt-keys`,
+      headers: { ...authorization, 'x-otto-approval-id': keyApproval },
+      payload: keyRequest,
+    });
+    expect(registeredKey.statusCode).toBe(201);
+    expect(registeredKey.json().key).toMatchObject({
+      keyId: receiptSigner.keyId,
+      status: 'active',
+    });
+    const issuedAtMs = Date.now();
+    const receipt = {
+      version: 2,
+      receiptId: 'exec_77777777777777777777777777777777',
+      deploymentId,
+      organizationId: 'org_billing_route',
+      taskId: 'task_route_receipt_1',
+      moduleId: 'model_gateway',
+      units: 1_001,
+      model: 'deepseek-v3',
+      issuedAtMs,
+      expiresAtMs: issuedAtMs + 60 * 60 * 1000,
+      sequence: 1,
+      policyVersion: 'commercial-v2',
+    } as const;
+    const receiptResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/billing/execution-receipts',
+      headers: { authorization: `Bearer ${license.leaseToken as string}` },
+      payload: {
+        licenseId: license.id,
+        machineFingerprint: fingerprint,
+        envelope: {
+          receipt,
+          signingKeyId: receiptSigner.keyId,
+          signature: await receiptSigner.sign(receipt),
+        },
+      },
+    });
+    expect(receiptResponse.statusCode).toBe(201);
+    expect(receiptResponse.json()).toMatchObject({
+      account: { availableBalance: 42 },
+      transaction: { billedAmount: 4 },
+      receipt: { verificationStatus: 'verified', sequence: 1 },
+    });
+
+    const receiptList = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/billing/customers/${customerId}/execution-receipts`,
+      headers: authorization,
+    });
+    expect(receiptList.statusCode).toBe(200);
+    expect(receiptList.json().receipts).toHaveLength(1);
+
     const exported = await app.inject({
       method: 'GET',
       url: `/v1/admin/billing/customers/${customerId}/export.csv`,
@@ -589,6 +657,7 @@ describe('commercial control HTTP routes', () => {
     expect(exported.statusCode).toBe(200);
     expect(exported.headers['content-type']).toContain('text/csv');
     expect(exported.body).toContain('usage:route-1');
+    expect(exported.body).toContain(receipt.receiptId);
   });
 
   it('creates a deployment, issues a License, and serves Otto lease refreshes', async () => {

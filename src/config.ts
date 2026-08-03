@@ -31,6 +31,7 @@ export interface ControlConfig {
   leaseDurationMs: number;
   telemetryRetentionDays: number;
   updatePolicyDurationMs: number;
+  legacyUsageReportsAllowed?: boolean;
   backupReportDirectory: string | null;
   backupStatusMaximumAgeHours: number;
   alertChannelsFile: string | null;
@@ -369,7 +370,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.27.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.28.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -383,6 +384,11 @@ export function loadControlConfig(
     leaseDurationMs: parseLeaseDuration(env.CONTROL_LEASE_DURATION_MS),
     telemetryRetentionDays: parseRetentionDays(env.CONTROL_TELEMETRY_RETENTION_DAYS),
     updatePolicyDurationMs: parseUpdatePolicyDuration(env.CONTROL_UPDATE_POLICY_DURATION_MS),
+    legacyUsageReportsAllowed: parseBoolean(
+      env.CONTROL_LEGACY_USAGE_REPORTS_ALLOWED,
+      environment !== 'production',
+      'CONTROL_LEGACY_USAGE_REPORTS_ALLOWED',
+    ),
     backupReportDirectory: env.CONTROL_BACKUP_REPORT_DIR?.trim() || null,
     backupStatusMaximumAgeHours: parseBackupStatusMaximumAgeHours(
       env.CONTROL_BACKUP_STATUS_MAX_AGE_HOURS,

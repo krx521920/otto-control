@@ -210,7 +210,11 @@ export async function buildControlApp(
       });
     }
     if (commercialControl.billing) {
-      capabilities.push('credit_billing', 'billing_statement_export');
+      capabilities.push(
+        'credit_billing',
+        'billing_statement_export',
+        'signed_execution_receipts_v2',
+      );
       await registerBillingRoutes(app, {
         service: commercialControl.billing,
         identity: commercialControl.identity,

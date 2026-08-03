@@ -41,6 +41,7 @@ describe('control configuration', () => {
       artifactStorage: null,
       artifactStorageRequired: false,
       artifactAttestationKeysFile: null,
+      legacyUsageReportsAllowed: true,
     });
   });
 
@@ -50,6 +51,9 @@ describe('control configuration', () => {
     );
     expect(() => loadControlConfig({ CONTROL_TRUST_PROXY: 'yes' })).toThrow(
       'CONTROL_TRUST_PROXY must be true or false',
+    );
+    expect(() => loadControlConfig({ CONTROL_LEGACY_USAGE_REPORTS_ALLOWED: 'yes' })).toThrow(
+      'CONTROL_LEGACY_USAGE_REPORTS_ALLOWED must be true or false',
     );
     expect(() => loadControlConfig({ CONTROL_ADMIN_TOKEN: 'short' })).toThrow(
       'CONTROL_ADMIN_TOKEN must contain at least 32 bytes',
@@ -250,6 +254,16 @@ describe('control configuration', () => {
     expect(() => loadControlConfig({ NODE_ENV: 'production' })).toThrow(
       'CONTROL_METRICS_TOKEN or CONTROL_METRICS_TOKEN_FILE is required in production',
     );
+  });
+
+  it('disables unsigned legacy usage reports in production by default', () => {
+    expect(loadControlConfig({
+      NODE_ENV: 'production',
+      CONTROL_METRICS_TOKEN: 'm'.repeat(48),
+      CONTROL_DATA_REGION: 'CN-BJ',
+      CONTROL_PRIVACY_CONTROLLER: 'Otto Technology',
+      CONTROL_PRIVACY_CONTACT: 'privacy@otto.example',
+    }).legacyUsageReportsAllowed).toBe(false);
   });
 
   it('loads production secrets and database credentials from mounted files', () => {

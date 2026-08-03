@@ -43,3 +43,8 @@ Its v1 SHA-256 fingerprint is
 Control and Otto validate this same immutable fingerprint in their own private
 repository CI. This detects protocol drift without granting either repository's
 workflow token access to the other private repository.
+
+For production usage settlement, this contract is superseded by
+[`otto-commercial-enforcement-v2.md`](./otto-commercial-enforcement-v2.md),
+which adds registered Ed25519 execution-receipt keys, strict replay protection,
+and receipt-linked billing evidence.

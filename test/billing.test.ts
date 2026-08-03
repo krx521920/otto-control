@@ -62,6 +62,23 @@ async function fixture() {
 }
 
 describe('commercial credit billing', () => {
+  it('fails closed for unsigned usage when legacy migration mode is disabled', async () => {
+    const { store, token, binding, now } = await fixture();
+    const service = new BillingService({
+      store,
+      tokenIssuer: new ControlTokenIssuer(TOKEN_SECRET),
+      now: () => now,
+      allowLegacyUsageReports: false,
+    });
+    await expect(service.consumeUsage({
+      ...binding,
+      module: 'model_gateway',
+      units: 1,
+      idempotencyKey: 'legacy:disabled',
+      referenceId: 'legacy:disabled',
+    }, token)).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
   it('prices usage centrally and prevents duplicate charges', async () => {
     const { service, token, binding } = await fixture();
     await service.setRate(CUSTOMER_ID, {

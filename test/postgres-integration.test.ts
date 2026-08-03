@@ -144,6 +144,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       const tables = await pool.query<{
         licenses: string;
         billing: string;
+        execution_receipts: string;
         witness: string;
         artifact_evidence: string;
         witness_evidence: string;
@@ -151,6 +152,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
         `SELECT
           to_regclass('public.control_licenses')::text AS licenses,
           to_regclass('public.control_credit_transactions')::text AS billing,
+          to_regclass('public.control_execution_receipts')::text AS execution_receipts,
           to_regclass('public.control_audit_witness_receipts')::text AS witness,
           to_regclass('public.control_release_artifact_evidence')::text AS artifact_evidence,
           to_regclass('public.control_audit_witness_evidence')::text AS witness_evidence`,
@@ -158,6 +160,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       expect(tables.rows[0]).toEqual({
         licenses: 'control_licenses',
         billing: 'control_credit_transactions',
+        execution_receipts: 'control_execution_receipts',
         witness: 'control_audit_witness_receipts',
         artifact_evidence: 'control_release_artifact_evidence',
         witness_evidence: 'control_audit_witness_evidence',
@@ -476,6 +479,93 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
         [customer.id, request.idempotencyKey],
       );
       expect(count.rows[0]?.count).toBe('1');
+    } finally {
+      await raw.end();
+    }
+  });
+
+  it('atomically verifies one signed execution receipt under concurrent delivery', async () => {
+    await resetDatabase(DATABASE_URL!);
+    const store = await openStore();
+    const control = service(store);
+    const customer = await control.createCustomer({ name: 'Receipt Customer' }, 'admin:test');
+    await control.createDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      customerId: customer.id,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: FINGERPRINT,
+      name: 'Receipt deployment',
+    }, 'admin:test');
+    const issued = await control.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'enterprise',
+      expiresAt: '2027-08-01T10:00:00.000Z',
+      seatLimit: 25,
+      modules: ['enterprise_tree'],
+    }, 'admin:test');
+    const billing = new BillingService({
+      store,
+      tokenIssuer: new ControlTokenIssuer(TOKEN_SECRET),
+      now: () => NOW,
+    });
+    const receiptSigner = signer();
+    await billing.registerExecutionReceiptKey(DEPLOYMENT_ID, {
+      publicKeyPem: receiptSigner.publicKeyPem,
+      expiresAt: '2027-08-01T00:00:00.000Z',
+    }, 'security:test');
+    await billing.setRate(customer.id, {
+      module: 'model_gateway', unitSize: 1_000, creditsPerUnit: 3,
+    }, 'admin:test');
+    await billing.topUp(customer.id, {
+      amount: 100,
+      idempotencyKey: 'topup:postgres-receipt',
+      referenceId: 'invoice:postgres-receipt',
+    }, 'admin:test');
+    const receipt = {
+      version: 2 as const,
+      receiptId: 'exec_88888888888888888888888888888888',
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      taskId: 'task_postgres_receipt',
+      moduleId: 'model_gateway' as const,
+      units: 1_001,
+      model: 'deepseek-v3',
+      issuedAtMs: NOW,
+      expiresAtMs: NOW + 60 * 60 * 1000,
+      sequence: 1,
+      policyVersion: 'commercial-v2',
+    };
+    const request = {
+      licenseId: issued.license.id,
+      machineFingerprint: FINGERPRINT,
+      envelope: {
+        receipt,
+        signingKeyId: receiptSigner.keyId,
+        signature: await receiptSigner.sign(receipt),
+      },
+    };
+    const results = await Promise.all(Array.from(
+      { length: 8 },
+      () => billing.consumeExecutionReceipt(request, issued.license.leaseToken!),
+    ));
+    expect(new Set(results.map((result) => result.transaction.id)).size).toBe(1);
+    expect(results.filter((result) => !result.replayed)).toHaveLength(1);
+    expect(await billing.account(customer.id)).toMatchObject({
+      availableBalance: 94,
+      totalConsumed: 6,
+    });
+
+    const raw = new Pool({ connectionString: DATABASE_URL!, ssl: false, max: 1 });
+    try {
+      const counts = await raw.query<{ receipts: string; transactions: string }>(
+        `SELECT
+          (SELECT COUNT(*) FROM control_execution_receipts WHERE customer_id = $1)::text
+            AS receipts,
+          (SELECT COUNT(*) FROM control_credit_transactions
+             WHERE customer_id = $1 AND idempotency_key = $2)::text AS transactions`,
+        [customer.id, `receipt:${receipt.receiptId}`],
+      );
+      expect(counts.rows[0]).toEqual({ receipts: '1', transactions: '1' });
     } finally {
       await raw.end();
     }
