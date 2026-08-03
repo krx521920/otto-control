@@ -15,6 +15,7 @@ import type { ControlStore, LicenseRecord } from '../../storage/control-store.js
 import type { ControlTokenIssuer } from '../commercial-control/token-issuer.js';
 import {
   normalizeExecutionReceiptEnvelope,
+  normalizeExecutionReceiptKeyBootstrap,
   normalizeExecutionReceiptPublicKey,
   verifyExecutionReceipt,
 } from './execution-receipt.js';
@@ -219,6 +220,44 @@ export class BillingService {
     return key;
   }
 
+  async bootstrapExecutionReceiptKey(raw: unknown, bearerToken: string) {
+    const now = this.#now();
+    const { claim } = normalizeExecutionReceiptKeyBootstrap(raw, now);
+    const authenticated = await this.#authenticateDeployment({
+      licenseId: claim.licenseId,
+      deploymentId: claim.deploymentId,
+      organizationId: claim.organizationId,
+      machineFingerprint: claim.machineFingerprint,
+    }, bearerToken);
+    const notBefore = new Date(claim.issuedAtMs - 5 * 60 * 1000);
+    const expiresAt = new Date(claim.expiresAtMs);
+    if (expiresAt.getTime() - notBefore.getTime() > MAX_RECEIPT_KEY_LIFETIME_MS) {
+      throw invalidRequest('execution receipt key lifetime cannot exceed 400 days');
+    }
+    const result = await this.#store.bootstrapExecutionReceiptKey({
+      deploymentId: authenticated.deploymentId,
+      keyId: claim.keyId,
+      publicKeyPem: claim.publicKeyPem,
+      notBefore,
+      expiresAt,
+      createdAt: new Date(now),
+    });
+    if (!result.replayed) {
+      await this.#store.appendAuditEvent({
+        actorId: `deployment:${authenticated.deploymentId}`,
+        action: 'billing.execution_receipt_key.bootstrapped',
+        targetType: 'deployment',
+        targetId: authenticated.deploymentId,
+        detail: {
+          keyId: result.key.keyId,
+          notBefore: result.key.notBefore.toISOString(),
+          expiresAt: result.key.expiresAt?.toISOString() ?? null,
+        },
+      });
+    }
+    return result;
+  }
+
   async revokeExecutionReceiptKey(deploymentId: string, keyId: string, actorId: string) {
     const normalizedKeyId = keyId.trim().toLowerCase();
     const existing = await this.#store.getExecutionReceiptKey(deploymentId, normalizedKeyId);
@@ -304,7 +343,7 @@ export class BillingService {
 
   async createHold(raw: unknown, bearerToken: string): Promise<CreditHoldMutationResult> {
     const body = objectValue(raw);
-    const authenticated = await this.#authenticateDeployment(body, bearerToken);
+    const authenticated = await this.#authenticateDeployment(body, bearerToken, true);
     await this.#releaseExpiredHolds(authenticated.customerId);
     const module = moduleValue(body);
     const units = positiveInteger(body.units, 'units', MAX_UNITS);
@@ -333,7 +372,7 @@ export class BillingService {
     bearerToken: string,
   ): Promise<CreditHoldMutationResult> {
     const body = objectValue(raw);
-    const authenticated = await this.#authenticateDeployment(body, bearerToken);
+    const authenticated = await this.#authenticateDeployment(body, bearerToken, true);
     const hold = await this.#store.getCreditHold(id);
     if (!hold || hold.customerId !== authenticated.customerId) throw notFound('credit hold not found');
     if (
@@ -362,7 +401,7 @@ export class BillingService {
     bearerToken: string,
   ): Promise<CreditHoldMutationResult> {
     const body = objectValue(raw);
-    const authenticated = await this.#authenticateDeployment(body, bearerToken);
+    const authenticated = await this.#authenticateDeployment(body, bearerToken, true);
     const hold = await this.#store.getCreditHold(id);
     if (!hold || hold.customerId !== authenticated.customerId) throw notFound('credit hold not found');
     if (
@@ -389,7 +428,7 @@ export class BillingService {
       throw conflict('legacy usage reports are disabled; submit a signed execution receipt');
     }
     const body = objectValue(raw);
-    const authenticated = await this.#authenticateDeployment(body, bearerToken);
+    const authenticated = await this.#authenticateDeployment(body, bearerToken, true);
     await this.#releaseExpiredHolds(authenticated.customerId);
     const module = moduleValue(body);
     const units = positiveInteger(body.units, 'units', MAX_UNITS);
@@ -427,7 +466,7 @@ export class BillingService {
       machineFingerprint: body.machineFingerprint,
       deploymentId: envelope.receipt.deploymentId,
       organizationId: envelope.receipt.organizationId,
-    }, bearerToken);
+    }, bearerToken, true);
     await this.#releaseExpiredHolds(authenticated.customerId);
     const key = await this.#store.getExecutionReceiptKey(
       authenticated.deploymentId,
@@ -575,10 +614,12 @@ export class BillingService {
   async #authenticateDeployment(
     body: Record<string, unknown>,
     bearerToken: string,
+    allowDeploymentOrganization = false,
   ): Promise<AuthenticatedDeployment> {
     const licenseId = requiredString(body, 'licenseId');
     const deploymentId = requiredString(body, 'deploymentId');
     const organizationId = requiredString(body, 'organizationId');
+    if (!ID_PATTERN.test(organizationId)) throw invalidRequest('organizationId is invalid');
     const machineFingerprint = requiredString(body, 'machineFingerprint', 64).toLowerCase();
     if (!FINGERPRINT_PATTERN.test(machineFingerprint)) {
       throw invalidRequest('machineFingerprint is invalid');
@@ -590,7 +631,8 @@ export class BillingService {
       throw unauthorized('License is revoked or expired');
     }
     if (
-      license.deploymentId !== deploymentId || license.organizationId !== organizationId ||
+      license.deploymentId !== deploymentId ||
+      (!allowDeploymentOrganization && license.organizationId !== organizationId) ||
       license.machineFingerprint !== machineFingerprint
     ) throw unauthorized('billing request binding is invalid');
     const expected = this.#tokens.issue({

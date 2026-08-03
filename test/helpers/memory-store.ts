@@ -1537,6 +1537,36 @@ export class MemoryControlStore implements ControlStore {
     return record;
   }
 
+  async bootstrapExecutionReceiptKey(input: {
+    deploymentId: string;
+    keyId: string;
+    publicKeyPem: string;
+    notBefore: Date;
+    expiresAt: Date;
+    createdAt: Date;
+  }): Promise<{ key: ExecutionReceiptKeyRecord; replayed: boolean }> {
+    if (!this.deployments.has(input.deploymentId)) throw conflict('deployment does not exist');
+    const deploymentKeys = [...this.executionReceiptKeys.values()]
+      .filter((key) => key.deploymentId === input.deploymentId);
+    const sameKey = deploymentKeys.find((key) => key.keyId === input.keyId);
+    if (sameKey) {
+      if (sameKey.status !== 'active' || sameKey.publicKeyPem !== input.publicKeyPem) {
+        throw conflict('execution receipt key is not active');
+      }
+      return { key: sameKey, replayed: true };
+    }
+    if (deploymentKeys.length > 0) {
+      throw conflict('execution receipt key rotation requires administrator approval');
+    }
+    const key: ExecutionReceiptKeyRecord = {
+      ...input,
+      status: 'active',
+      revokedAt: null,
+    };
+    this.executionReceiptKeys.set(`${input.deploymentId}\0${input.keyId}`, key);
+    return { key, replayed: false };
+  }
+
   async revokeExecutionReceiptKey(input: {
     deploymentId: string;
     keyId: string;

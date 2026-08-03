@@ -5,10 +5,18 @@
   "canonicalization": "recursive object-key sort followed by UTF-8 JSON",
   "requestEndpoint": "/v1/billing/execution-receipts",
   "keyAdministration": {
+    "bootstrap": "/v1/billing/execution-receipt-keys/bootstrap",
     "list": "/v1/admin/deployments/{deploymentId}/execution-receipt-keys",
     "register": "/v1/admin/deployments/{deploymentId}/execution-receipt-keys",
     "revoke": "/v1/admin/deployments/{deploymentId}/execution-receipt-keys/{keyId}/revoke",
+    "firstKeyRequiresPossessionProof": true,
+    "replacementRequiresDualApproval": true,
     "dualApproval": true
+  },
+  "tenantAttribution": {
+    "multipleOrganizationsPerDeployment": true,
+    "creditOwner": "deployment_customer",
+    "organizationIdIsCredential": false
   },
   "receiptFields": [
     "version",
@@ -26,6 +34,7 @@
   ],
   "privacyBoundary": {
     "unknownFieldsRejected": true,
+    "businessContentAccepted": false,
     "prohibited": [
       "prompt",
       "response",
@@ -54,4 +63,3 @@
   },
   "legacyUsageReportsAllowedInProductionByDefault": false
 }
-

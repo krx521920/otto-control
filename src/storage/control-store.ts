@@ -560,6 +560,14 @@ export interface ControlStore {
     expiresAt: Date | null;
     createdAt: Date;
   }): Promise<ExecutionReceiptKeyRecord>;
+  bootstrapExecutionReceiptKey(input: {
+    deploymentId: string;
+    keyId: string;
+    publicKeyPem: string;
+    notBefore: Date;
+    expiresAt: Date;
+    createdAt: Date;
+  }): Promise<{ key: ExecutionReceiptKeyRecord; replayed: boolean }>;
   revokeExecutionReceiptKey(input: {
     deploymentId: string;
     keyId: string;

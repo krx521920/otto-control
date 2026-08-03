@@ -38,6 +38,8 @@ export interface OttoLicensePayload {
   leaseEndpoint?: string;
   billingEndpoint?: string;
   billingHoldEndpoint?: string;
+  executionReceiptEndpoint?: string;
+  executionReceiptKeyEndpoint?: string;
   leaseToken?: string;
   telemetryToken?: string;
 }

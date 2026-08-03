@@ -7,9 +7,14 @@ a registered customer deployment without uploading the task's business content.
 ## Trust boundary
 
 Each deployment creates an Ed25519 execution-receipt key. Control stores only
-the public key. Registering or revoking a key requires `billing.manage` and a
-request-bound approval from a second administrator. A revoked key cannot sign
-new receipts and cannot be registered again under the same key ID.
+the public key. The first key may be bootstrapped by the deployment at
+`POST /v1/billing/execution-receipt-keys/bootstrap`: the request is bound to the
+online License, deployment ID, primary organization, machine fingerprint and
+short lease, and must contain a fresh claim signed by the private key being
+registered. Control permits only the first key or an idempotent replay of that
+same active key. Replacing, rotating, or revoking a key still requires
+`billing.manage` and request-bound approval from a second administrator. A
+revoked key cannot be bootstrapped again.
 
 This proves that a receipt came from the registered deployment key and that its
 fields were not modified in transit. It does not prove that a customer with
@@ -44,6 +49,12 @@ fingerprint, signing key ID, and lease bearer token. Unknown receipt or envelope
 fields are rejected. Prompts, replies, chat messages, filenames, files, meeting
 content, user names, and personal identifiers are not accepted by this schema.
 
+A private deployment may host multiple customer organizations. All receipts
+remain bound to the same licensed deployment and customer credit account, while
+`organizationId` provides per-enterprise attribution for statements and cost
+reports. It does not grant access to an organization's business data and is not
+used as an authentication credential.
+
 ## Verification and settlement
 
 Control validates the License binding, active deployment, short lease, receipt
@@ -76,4 +87,3 @@ content.
 
 The machine-readable contract is
 [`otto-commercial-enforcement-v2.json`](./otto-commercial-enforcement-v2.json).
-

@@ -196,6 +196,14 @@ function licensePayload(
     payload.leaseEndpoint = license.leaseEndpoint!;
     payload.billingEndpoint = new URL('/v1/billing/usage/consume', license.leaseEndpoint!).toString();
     payload.billingHoldEndpoint = new URL('/v1/billing/holds', license.leaseEndpoint!).toString();
+    payload.executionReceiptEndpoint = new URL(
+      '/v1/billing/execution-receipts',
+      license.leaseEndpoint!,
+    ).toString();
+    payload.executionReceiptKeyEndpoint = new URL(
+      '/v1/billing/execution-receipt-keys/bootstrap',
+      license.leaseEndpoint!,
+    ).toString();
     payload.leaseToken = tokens.issue({
       purpose: 'lease',
       licenseId: license.id,

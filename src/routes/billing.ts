@@ -209,6 +209,16 @@ export async function registerBillingRoutes(
     return reply.code(result.replayed ? 200 : 201).send(result);
   });
 
+  app.post('/v1/billing/execution-receipt-keys/bootstrap', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute', ban: 20 } },
+  }, async (request, reply) => {
+    const result = await options.service.bootstrapExecutionReceiptKey(
+      request.body,
+      bearerToken(request),
+    );
+    return reply.code(result.replayed ? 200 : 201).send(result);
+  });
+
   app.post('/v1/billing/holds', async (request, reply) => {
     const result = await options.service.createHold(request.body, bearerToken(request));
     return reply.code(result.replayed ? 200 : 201).send(result);

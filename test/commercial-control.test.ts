@@ -84,6 +84,12 @@ describe('commercial control service', () => {
     expect(envelope.license.billingHoldEndpoint).toBe(
       'https://control.otto.test/v1/billing/holds',
     );
+    expect(envelope.license.executionReceiptEndpoint).toBe(
+      'https://control.otto.test/v1/billing/execution-receipts',
+    );
+    expect(envelope.license.executionReceiptKeyEndpoint).toBe(
+      'https://control.otto.test/v1/billing/execution-receipt-keys/bootstrap',
+    );
     expect(envelope.license.leaseToken).toHaveLength(43);
     expect(envelope.license.telemetryToken).toHaveLength(43);
     expect(envelope.signature).toMatch(/^ed25519:/u);

@@ -3547,6 +3547,57 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     return record;
   }
 
+  async bootstrapExecutionReceiptKey(input: {
+    deploymentId: string;
+    keyId: string;
+    publicKeyPem: string;
+    notBefore: Date;
+    expiresAt: Date;
+    createdAt: Date;
+  }): Promise<{ key: ExecutionReceiptKeyRecord; replayed: boolean }> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`execution-receipt-key:${input.deploymentId}`],
+      );
+      const existing = await client.query<ExecutionReceiptKeyRow>(
+        `SELECT * FROM control_execution_receipt_keys
+         WHERE deployment_id = $1 ORDER BY created_at, key_id FOR UPDATE`,
+        [input.deploymentId],
+      );
+      const sameKey = existing.rows.find((row) => row.key_id === input.keyId);
+      if (sameKey) {
+        const key = executionReceiptKeyFromRow(sameKey);
+        if (key.status !== 'active' || key.publicKeyPem !== input.publicKeyPem) {
+          throw conflict('execution receipt key is not active');
+        }
+        await client.query('COMMIT');
+        return { key, replayed: true };
+      }
+      if (existing.rows.length > 0) {
+        throw conflict('execution receipt key rotation requires administrator approval');
+      }
+      const inserted = await client.query<ExecutionReceiptKeyRow>(
+        `INSERT INTO control_execution_receipt_keys
+          (deployment_id, key_id, public_key_pem, status, not_before, expires_at, created_at)
+         VALUES ($1, $2, $3, 'active', $4, $5, $6)
+         RETURNING *`,
+        [input.deploymentId, input.keyId, input.publicKeyPem, input.notBefore,
+          input.expiresAt, input.createdAt],
+      );
+      await client.query('COMMIT');
+      return { key: executionReceiptKeyFromRow(inserted.rows[0]!), replayed: false };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23503') throw conflict('deployment does not exist');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async revokeExecutionReceiptKey(input: {
     deploymentId: string;
     keyId: string;

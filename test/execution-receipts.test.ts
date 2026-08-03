@@ -15,7 +15,7 @@ const LICENSE_ID = 'lic_receipts';
 const FINGERPRINT = 'c'.repeat(64);
 const TOKEN_SECRET = 'receipt-control-token-secret-that-is-long-enough';
 
-async function fixture() {
+async function fixture(options: { registerReceiptKey?: boolean } = {}) {
   const store = new MemoryControlStore();
   let clock = Date.parse('2026-08-03T04:00:00.000Z');
   await store.createCustomer({ id: CUSTOMER_ID, name: 'Receipt customer' });
@@ -60,10 +60,12 @@ async function fixture() {
   const signer = new LocalEd25519Signer(
     privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
   );
-  await service.registerExecutionReceiptKey(DEPLOYMENT_ID, {
-    publicKeyPem: signer.publicKeyPem,
-    expiresAt: new Date(clock + 30 * 24 * 60 * 60 * 1000).toISOString(),
-  }, 'security-admin');
+  if (options.registerReceiptKey !== false) {
+    await service.registerExecutionReceiptKey(DEPLOYMENT_ID, {
+      publicKeyPem: signer.publicKeyPem,
+      expiresAt: new Date(clock + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    }, 'security-admin');
+  }
   await service.setRate(CUSTOMER_ID, {
     module: 'model_gateway',
     unitSize: 1_000,
@@ -115,6 +117,49 @@ async function fixture() {
 }
 
 describe('signed execution receipt v2', () => {
+  it('bootstraps only the first deployment key with proof of possession', async () => {
+    const { service, signer, token, now } = await fixture({ registerReceiptKey: false });
+    const claim = {
+      version: 1 as const,
+      licenseId: LICENSE_ID,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: FINGERPRINT,
+      keyId: signer.keyId,
+      publicKeyPem: signer.publicKeyPem,
+      issuedAtMs: now,
+      expiresAtMs: now + 365 * 24 * 60 * 60 * 1000,
+      nonce: 'bootstrap-proof-0001',
+    };
+    const signed = { ...claim, signature: await signer.sign(claim) };
+
+    await expect(service.bootstrapExecutionReceiptKey(signed, token)).resolves
+      .toMatchObject({ replayed: false, key: { keyId: signer.keyId, status: 'active' } });
+    await expect(service.bootstrapExecutionReceiptKey(signed, token)).resolves
+      .toMatchObject({ replayed: true, key: { keyId: signer.keyId, status: 'active' } });
+    expect(await service.executionReceiptKeys(DEPLOYMENT_ID)).toHaveLength(1);
+
+    await expect(service.bootstrapExecutionReceiptKey({
+      ...signed,
+      prompt: 'must never reach Control',
+    }, token)).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+
+    const { privateKey } = generateKeyPairSync('ed25519');
+    const replacement = new LocalEd25519Signer(
+      privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+    );
+    const replacementClaim = {
+      ...claim,
+      keyId: replacement.keyId,
+      publicKeyPem: replacement.publicKeyPem,
+      nonce: 'bootstrap-proof-0002',
+    };
+    await expect(service.bootstrapExecutionReceiptKey({
+      ...replacementClaim,
+      signature: await replacement.sign(replacementClaim),
+    }, token)).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
   it('verifies, charges once, and preserves auditable evidence', async () => {
     const { service, token, signReceipt, request } = await fixture();
     const envelope = await signReceipt();
@@ -148,6 +193,27 @@ describe('signed execution receipt v2', () => {
     const csv = await service.exportCsv(CUSTOMER_ID, {});
     expect(csv).toContain(envelope.receipt.receiptId);
     expect(csv).toContain('receiptVerificationStatus');
+  });
+
+  it('keeps per-enterprise attribution inside a shared licensed deployment', async () => {
+    const { service, token, signReceipt, request } = await fixture();
+    const envelope = await signReceipt({
+      organizationId: 'org_shared_tenant_beta',
+      receiptId: 'exec_99999999999999999999999999999999',
+      taskId: 'task_shared_tenant_beta',
+    });
+
+    const result = await service.consumeExecutionReceipt(request(envelope), token);
+
+    expect(result.replayed).toBe(false);
+    expect(result.receipt).toMatchObject({
+      organizationId: 'org_shared_tenant_beta',
+      deploymentId: DEPLOYMENT_ID,
+      verificationStatus: 'verified',
+    });
+    expect(await service.executionReceipts(CUSTOMER_ID, {})).toEqual([
+      expect.objectContaining({ organizationId: 'org_shared_tenant_beta' }),
+    ]);
   });
 
   it('rejects forged, out-of-order, duplicate-task, expired, and revoked evidence', async () => {

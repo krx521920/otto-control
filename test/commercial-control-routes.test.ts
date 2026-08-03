@@ -605,12 +605,39 @@ describe('commercial control HTTP routes', () => {
       keyId: receiptSigner.keyId,
       status: 'active',
     });
+    const bootstrapIssuedAtMs = Date.now();
+    const bootstrapClaim = {
+      version: 1,
+      licenseId: license.id,
+      deploymentId,
+      organizationId: 'org_billing_route',
+      machineFingerprint: fingerprint,
+      keyId: receiptSigner.keyId,
+      publicKeyPem: receiptSigner.publicKeyPem,
+      issuedAtMs: bootstrapIssuedAtMs,
+      expiresAtMs: bootstrapIssuedAtMs + 30 * 24 * 60 * 60 * 1000,
+      nonce: 'route-bootstrap-proof-0001',
+    } as const;
+    const bootstrapResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/billing/execution-receipt-keys/bootstrap',
+      headers: { authorization: `Bearer ${license.leaseToken as string}` },
+      payload: {
+        ...bootstrapClaim,
+        signature: await receiptSigner.sign(bootstrapClaim),
+      },
+    });
+    expect(bootstrapResponse.statusCode).toBe(200);
+    expect(bootstrapResponse.json()).toMatchObject({
+      replayed: true,
+      key: { keyId: receiptSigner.keyId, status: 'active' },
+    });
     const issuedAtMs = Date.now();
     const receipt = {
       version: 2,
       receiptId: 'exec_77777777777777777777777777777777',
       deploymentId,
-      organizationId: 'org_billing_route',
+      organizationId: 'org_billing_route_tenant_beta',
       taskId: 'task_route_receipt_1',
       moduleId: 'model_gateway',
       units: 1_001,

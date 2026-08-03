@@ -19,11 +19,29 @@ const SIGNATURE = /^[a-zA-Z0-9_-]{86}$/u;
 const MAX_UNITS = 9_000_000_000_000;
 const MAX_OFFLINE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+const KEY_BOOTSTRAP_NONCE = /^[a-zA-Z0-9_-]{16,160}$/u;
 const RECEIPT_FIELDS = new Set([
   'version', 'receiptId', 'deploymentId', 'organizationId', 'taskId', 'moduleId',
   'units', 'model', 'issuedAtMs', 'expiresAtMs', 'sequence', 'policyVersion',
 ]);
 const ENVELOPE_FIELDS = new Set(['receipt', 'signingKeyId', 'signature']);
+const KEY_BOOTSTRAP_FIELDS = new Set([
+  'version', 'licenseId', 'deploymentId', 'organizationId', 'machineFingerprint',
+  'keyId', 'publicKeyPem', 'issuedAtMs', 'expiresAtMs', 'nonce', 'signature',
+]);
+
+export interface ExecutionReceiptKeyBootstrapClaim {
+  version: 1;
+  licenseId: string;
+  deploymentId: string;
+  organizationId: string;
+  machineFingerprint: string;
+  keyId: string;
+  publicKeyPem: string;
+  issuedAtMs: number;
+  expiresAtMs: number;
+  nonce: string;
+}
 
 function objectValue(value: unknown, name: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -123,6 +141,60 @@ export function normalizeExecutionReceiptPublicKey(publicKeyPem: unknown): {
   } catch {
     throw invalidRequest('execution receipt public key must be Ed25519');
   }
+}
+
+export function normalizeExecutionReceiptKeyBootstrap(
+  raw: unknown,
+  now: number,
+): { claim: ExecutionReceiptKeyBootstrapClaim; signature: string } {
+  const body = objectValue(raw, 'execution receipt key bootstrap');
+  exactFields(body, KEY_BOOTSTRAP_FIELDS, 'execution receipt key bootstrap');
+  if (body.version !== 1) throw invalidRequest('key bootstrap version must be 1');
+  const normalized = normalizeExecutionReceiptPublicKey(body.publicKeyPem);
+  const keyId = typeof body.keyId === 'string' ? body.keyId.trim().toLowerCase() : '';
+  if (keyId !== normalized.keyId) throw invalidRequest('keyId does not match publicKeyPem');
+  const machineFingerprint = typeof body.machineFingerprint === 'string'
+    ? body.machineFingerprint.trim().toLowerCase()
+    : '';
+  if (!/^[a-f0-9]{64}$/u.test(machineFingerprint)) {
+    throw invalidRequest('machineFingerprint is invalid');
+  }
+  const issuedAtMs = safeInteger(body.issuedAtMs, 'issuedAtMs', Number.MAX_SAFE_INTEGER);
+  const expiresAtMs = safeInteger(body.expiresAtMs, 'expiresAtMs', Number.MAX_SAFE_INTEGER);
+  if (Math.abs(now - issuedAtMs) > MAX_FUTURE_SKEW_MS) {
+    throw unauthorized('execution receipt key bootstrap is outside the allowed time window');
+  }
+  if (expiresAtMs <= now) throw invalidRequest('execution receipt key has already expired');
+  const nonce = typeof body.nonce === 'string' ? body.nonce.trim() : '';
+  if (!KEY_BOOTSTRAP_NONCE.test(nonce)) throw invalidRequest('bootstrap nonce is invalid');
+  const signature = typeof body.signature === 'string' ? body.signature.trim() : '';
+  if (!signature.startsWith(ED25519_SIGNATURE_PREFIX)
+    || !SIGNATURE.test(signature.slice(ED25519_SIGNATURE_PREFIX.length))) {
+    throw invalidRequest('execution receipt key bootstrap signature is malformed');
+  }
+  const claim: ExecutionReceiptKeyBootstrapClaim = {
+    version: 1,
+    licenseId: identifier(body, 'licenseId'),
+    deploymentId: identifier(body, 'deploymentId'),
+    organizationId: identifier(body, 'organizationId'),
+    machineFingerprint,
+    keyId,
+    publicKeyPem: normalized.publicKeyPem,
+    issuedAtMs,
+    expiresAtMs,
+    nonce,
+  };
+  const decoded = Buffer.from(
+    signature.slice(ED25519_SIGNATURE_PREFIX.length),
+    'base64url',
+  );
+  if (decoded.length !== 64 || !verify(
+    null,
+    Buffer.from(canonicalJson(claim), 'utf8'),
+    createPublicKey(claim.publicKeyPem),
+    decoded,
+  )) throw unauthorized('execution receipt key possession proof is invalid');
+  return { claim, signature };
 }
 
 export function verifyExecutionReceipt(
