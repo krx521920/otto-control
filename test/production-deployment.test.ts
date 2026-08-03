@@ -24,6 +24,7 @@ describe('production deployment assets', () => {
     expect(workflow).toContain('scripts/smoke-federation.mjs');
     expect(workflow).toContain('Prove the edge survives every Control replica failure');
     expect(workflow).toContain('compose.ci.resolved.yaml');
+    expect(workflow).toContain('--env-file .env.production --profile ops config');
     expect(workflow).toContain('git diff --check');
     expect(workflow).toContain('needs: [quality, postgres-integration]');
     expect(workflow).toContain('docker build --tag otto-control:ci .');

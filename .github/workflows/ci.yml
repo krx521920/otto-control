@@ -149,7 +149,7 @@ jobs:
       - name: Start database quorum, Control, and Federation instances
         run: |
           docker compose -f compose.production.yaml -f compose.ci.yaml \
-            --env-file .env.production config > compose.ci.resolved.yaml
+            --env-file .env.production --profile ops config > compose.ci.resolved.yaml
           trap 'docker compose -f compose.ci.resolved.yaml logs --no-color' ERR
           docker compose -f compose.ci.resolved.yaml \
             up --detach --build --wait --wait-timeout 300 \
