@@ -644,7 +644,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.28.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.29.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -673,6 +673,7 @@ a misleading success report.
 | `CONTROL_PRIVACY_CONTROLLER` | development placeholder | Legal operator/controller name; explicitly required in production |
 | `CONTROL_PRIVACY_CONTACT` | development placeholder | Privacy request contact; explicitly required in production |
 | `CONTROL_CUSTOMER_ERASURE_GRACE_DAYS` | `14` | Cooling-off period before approved customer erasure can execute |
+| `CONTROL_PRIVACY_REQUEST_SLA_DAYS` | `15` | Maximum calendar-day handling target recorded on every privacy request |
 | `CONTROL_BILLING_RETENTION_DAYS` | `1095` | Product baseline for restricted minimum billing evidence; legal review required |
 | `CONTROL_GOVERNANCE_AUDIT_RETENTION_DAYS` | `2555` | Product baseline for restricted security evidence; legal review required |
 | `CONTROL_DATA_EXPORT_RECORD_RETENTION_DAYS` | `30` | Days before delivered export result detail is restricted to its minimal hash record |
@@ -811,6 +812,30 @@ under `/v1/admin/billing/customers/:customerId/*`. The `export.csv` endpoint
 includes balances, deltas, references, related refund transactions, and
 idempotency keys for reconciliation. Refunds must reference a consume/capture
 transaction, and cumulative refunds cannot exceed its billed amount.
+
+### Commercial plans and customer delivery
+
+`GET /v1/commercial/plans` is the single signed catalog for the Basic,
+Enterprise, Park, and Government plans. License issuance rejects unknown plans,
+modules outside the selected plan, missing required modules, and offline use on
+plans that do not allow it. Enforcement defaults remain backward compatible:
+seat and billing blocking must be selected explicitly, while the signed plan
+still defines the permitted module and overage boundary.
+
+Administrators with `customer_delivery.read` can download a signed JSON package
+from `/v1/admin/customers/:customerId/delivery-package.json`. It joins the
+current authorization, plan compliance, reporting boundary, privacy/controller
+configuration, retention rules, period statement, customer rate card, and ROI
+evidence into one hash-addressed artifact. The companion `roi-report.csv`
+counts only verified v2 execution receipts. Labor value is left blank unless
+the customer supplies `minutesSavedPerTask` and `laborCostCentsPerHour`; it is
+never presented as guaranteed savings. The existing billing `export.csv`
+remains the detailed reconciliation ledger.
+
+Each privacy request records a durable `dueAt`, SLA state, completion time, and
+manifest hash. The technical deadline is a product target, not a substitute for
+the shorter period required by a customer contract or applicable law. See
+[`docs/commercial-packages.zh-CN.md`](docs/commercial-packages.zh-CN.md).
 
 ### Administrator identity and approvals
 
@@ -1122,6 +1147,7 @@ GET  /health/ready
 GET  /v1
 GET  /v1/privacy/notice
 GET  /v1/privacy/data-map
+GET  /v1/commercial/plans
 POST /v1/admin-auth/bootstrap
 POST /v1/admin-auth/enroll/confirm
 POST /v1/admin-auth/login
@@ -1146,6 +1172,8 @@ POST /v1/admin/data-governance/legal-holds
 POST /v1/admin/data-governance/legal-holds/:id/release
 POST /v1/admin/data-governance/forensic-exports
 POST /v1/admin/data-governance/retention/run
+GET  /v1/admin/customers/:customerId/delivery-package.json
+GET  /v1/admin/customers/:customerId/roi-report.csv
 POST /v1/admin/customers
 POST /v1/admin/deployments
 POST /v1/admin/licenses
@@ -1227,6 +1255,7 @@ Traefik
        -> audit_anchor (implemented durable external evidence delivery)
        -> audit_witness (implemented independent verification and receipt retention)
        -> data_governance (implemented residency, privacy notice, export, erasure, legal hold, and forensics)
+       -> commercial_delivery (implemented signed plans, delivery package, privacy SLA, and verified ROI)
 
 Otto Federation Fastify edge (independently deployable, implemented v1)
   -> deployment_directory

@@ -38,6 +38,7 @@ export const ADMIN_PERMISSIONS = [
   'customer_erasure.manage',
   'legal_hold.manage',
   'forensic_export.create',
+  'customer_delivery.read',
 ] as const;
 
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];

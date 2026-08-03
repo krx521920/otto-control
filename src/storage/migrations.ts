@@ -1099,6 +1099,28 @@ const MIGRATIONS: Migration[] = [
        ON control_execution_receipts(customer_id, organization_id, module, received_at DESC)`,
     ],
   },
+  {
+    id: '026_commercial_delivery_and_privacy_sla',
+    statements: [
+      `ALTER TABLE control_data_governance_requests
+       ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ`,
+      `UPDATE control_data_governance_requests
+       SET due_at = created_at + INTERVAL '15 days'
+       WHERE due_at IS NULL`,
+      `ALTER TABLE control_data_governance_requests
+       ALTER COLUMN due_at SET NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_control_data_governance_requests_sla
+       ON control_data_governance_requests(status, due_at)
+       WHERE status = 'pending'`,
+      `INSERT INTO control_admin_permissions (id) VALUES ('customer_delivery.read')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT role_id, 'customer_delivery.read'
+       FROM control_admin_roles
+       WHERE role_id IN ('super_admin', 'license_admin', 'auditor')
+       ON CONFLICT DO NOTHING`,
+    ],
+  },
 ];
 
 export const CONTROL_SCHEMA_MIGRATION_IDS = Object.freeze(

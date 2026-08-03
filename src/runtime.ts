@@ -18,6 +18,7 @@ import { loadAuditWitnessSources } from './modules/audit-witness/source-config.j
 import { S3AuditWitnessWormObjectStore } from './modules/audit-witness/s3-worm-object-store.js';
 import { DataGovernanceService } from './modules/data-governance/service.js';
 import { loadDataGovernanceConfig } from './modules/data-governance/config.js';
+import { CommercialDeliveryService } from './modules/commercial-delivery/service.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 import type { DatabaseObservabilitySource } from './observability/contracts.js';
 
@@ -34,6 +35,7 @@ export interface CommercialControlRuntime {
   auditAnchors?: AuditAnchorService;
   auditWitness?: AuditWitnessService;
   dataGovernance?: DataGovernanceService;
+  commercialDelivery?: CommercialDeliveryService;
   observability?: DatabaseObservabilitySource;
 }
 
@@ -122,6 +124,19 @@ export async function createCommercialControlRuntime(
       telemetryRetentionDays: config.telemetryRetentionDays,
     });
     await dataGovernance.initialize();
+    const billing = new BillingService({
+      store,
+      tokenIssuer,
+      allowLegacyUsageReports: config.legacyUsageReportsAllowed
+        ?? config.environment !== 'production',
+    });
+    const commercialDelivery = new CommercialDeliveryService({
+      store,
+      billing,
+      governance: dataGovernance,
+      signer,
+      config: config.dataGovernance ?? loadDataGovernanceConfig({}, config.environment),
+    });
     const auditWitness = new AuditWitnessService({
       store,
       sources: loadAuditWitnessSources(config.auditWitnessSourcesFile),
@@ -160,12 +175,8 @@ export async function createCommercialControlRuntime(
     return {
       adminToken: config.adminToken!,
       identity,
-      billing: new BillingService({
-        store,
-        tokenIssuer,
-        allowLegacyUsageReports: config.legacyUsageReportsAllowed
-          ?? config.environment !== 'production',
-      }),
+      billing,
+      commercialDelivery,
       releaseArtifacts,
       backupStatus,
       alerts,

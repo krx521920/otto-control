@@ -150,6 +150,7 @@ interface DataGovernanceRequestRow {
   reason: string;
   requested_by: string;
   earliest_execution_at: Date | null;
+  due_at: Date;
   manifest_sha256: string | null;
   result: Record<string, unknown> | null;
   completed_at: Date | null;
@@ -597,6 +598,7 @@ function dataGovernanceRequestFromRow(row: DataGovernanceRequestRow): DataGovern
     reason: row.reason,
     requestedBy: row.requested_by,
     earliestExecutionAt: row.earliest_execution_at,
+    dueAt: row.due_at,
     manifestSha256: row.manifest_sha256,
     result: row.result,
     completedAt: row.completed_at,
@@ -4839,17 +4841,18 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     reason: string;
     requestedBy: string;
     earliestExecutionAt: Date | null;
+    dueAt: Date;
     createdAt: Date;
   }): Promise<DataGovernanceRequestRecord> {
     try {
       const result = await this.#pool.query<DataGovernanceRequestRow>(
         `INSERT INTO control_data_governance_requests
           (id, customer_id, type, status, reason, requested_by, earliest_execution_at,
-           created_at, updated_at)
-         VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $7)
+           due_at, created_at, updated_at)
+         VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, $8)
          RETURNING *`,
         [input.id, input.customerId, input.type, input.reason, input.requestedBy,
-          input.earliestExecutionAt, input.createdAt],
+          input.earliestExecutionAt, input.dueAt, input.createdAt],
       );
       return dataGovernanceRequestFromRow(result.rows[0]!);
     } catch (error) {
@@ -4911,11 +4914,13 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       const licenses = await client.query<{
         id: string; deployment_id: string; plan: string; issued_at_ms: string; expires_at_ms: string;
         seat_limit: number; modules: string[]; offline: boolean; telemetry_allowed: boolean;
+        seat_enforcement: string; billing_enforcement: string;
         revoked_at_ms: string | null; created_at: Date; updated_at: Date;
       }>(
         `SELECT licenses.id, licenses.deployment_id, licenses.plan, licenses.issued_at_ms,
                 licenses.expires_at_ms, licenses.seat_limit, licenses.modules, licenses.offline,
-                licenses.telemetry_allowed, licenses.revoked_at_ms, licenses.created_at,
+                licenses.telemetry_allowed, licenses.seat_enforcement,
+                licenses.billing_enforcement, licenses.revoked_at_ms, licenses.created_at,
                 licenses.updated_at
          FROM control_licenses AS licenses
          JOIN control_deployments AS deployments ON deployments.id = licenses.deployment_id
@@ -5002,6 +5007,8 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
           modules: row.modules,
           offline: row.offline,
           telemetryAllowed: row.telemetry_allowed,
+          seatEnforcement: row.seat_enforcement,
+          billingEnforcement: row.billing_enforcement,
           revokedAtMs: row.revoked_at_ms === null ? null : Number(row.revoked_at_ms),
           createdAt: row.created_at.toISOString(),
           updatedAt: row.updated_at.toISOString(),

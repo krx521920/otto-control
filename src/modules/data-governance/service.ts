@@ -104,13 +104,31 @@ function sanitize(value: unknown, depth = 0): unknown {
   return value;
 }
 
-function requestView(record: DataGovernanceRequestRecord): Record<string, unknown> {
+function requestView(record: DataGovernanceRequestRecord, nowMs = Date.now()): Record<string, unknown> {
+  const completedWithinSla = record.completedAt
+    ? record.completedAt.getTime() <= record.dueAt.getTime()
+    : null;
+  const slaStatus = completedWithinSla === true
+    ? 'met'
+    : completedWithinSla === false
+      ? 'breached_completed'
+      : nowMs > record.dueAt.getTime() ? 'overdue' : 'open';
   return {
     ...record,
     earliestExecutionAt: record.earliestExecutionAt?.toISOString() ?? null,
+    dueAt: record.dueAt.toISOString(),
     completedAt: record.completedAt?.toISOString() ?? null,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
+    sla: {
+      status: slaStatus,
+      deadline: record.dueAt.toISOString(),
+      completedWithinSla,
+    },
+    evidence: record.manifestSha256 ? {
+      manifestSha256: record.manifestSha256,
+      completedAt: record.completedAt?.toISOString() ?? null,
+    } : null,
   };
 }
 
@@ -160,6 +178,7 @@ export class DataGovernanceService {
         auditDays: options.config.auditRetentionDays,
         exportRecordDays: options.config.exportRecordRetentionDays,
       },
+      requestSlaDays: options.config.privacyRequestSlaDays,
     });
   }
 
@@ -204,6 +223,7 @@ export class DataGovernanceService {
       rights: ['查阅', '复制与导出', '更正', '删除或匿名化', '限制处理', '注销', '投诉与解释说明'],
       dataMapUrl: '/v1/privacy/data-map',
       legalReviewRequired: true,
+      requestSlaDays: this.#config.privacyRequestSlaDays,
     };
   }
 
@@ -221,6 +241,7 @@ export class DataGovernanceService {
         auditDays: this.#config.auditRetentionDays,
         exportRecordDays: this.#config.exportRecordRetentionDays,
       },
+      privacyRequestSlaDays: this.#config.privacyRequestSlaDays,
     };
   }
 
@@ -275,6 +296,7 @@ export class DataGovernanceService {
       reason,
       requestedBy: actorId,
       earliestExecutionAt: null,
+      dueAt: new Date(createdAt.getTime() + this.#config.privacyRequestSlaDays * DAY_MS),
       createdAt,
     });
     const data = sanitize(snapshot) as CustomerDataExportSnapshot;
@@ -314,20 +336,27 @@ export class DataGovernanceService {
     if (!snapshot) throw notFound('customer not found');
     if (snapshot.customer.erasedAt) throw conflict('customer data has already been erased');
     const createdAt = new Date(this.#now());
+    const earliestExecutionAt = new Date(
+      createdAt.getTime() + this.#config.customerErasureGraceDays * DAY_MS,
+    );
     const record = await this.#store.createDataGovernanceRequest({
       id: `dgr_${randomUUID().replaceAll('-', '')}`,
       customerId: id,
       type: 'customer_erasure',
       reason: requiredText(rawReason, 'reason'),
       requestedBy: actorId,
-      earliestExecutionAt: new Date(createdAt.getTime() + this.#config.customerErasureGraceDays * DAY_MS),
+      earliestExecutionAt,
+      dueAt: new Date(Math.max(
+        earliestExecutionAt.getTime(),
+        createdAt.getTime() + this.#config.privacyRequestSlaDays * DAY_MS,
+      )),
       createdAt,
     });
     await this.#auditEvent(actorId, 'customer_erasure.request', 'customer', id, {
       requestId: record.id,
       earliestExecutionAt: record.earliestExecutionAt?.toISOString(),
     });
-    return requestView(record);
+    return requestView(record, this.#now());
   }
 
   async executeCustomerErasure(actorId: string, requestId: string): Promise<Record<string, unknown>> {
@@ -422,6 +451,7 @@ export class DataGovernanceService {
       reason: requiredText(raw.reason, 'reason', 1_000),
       requestedBy: actorId,
       earliestExecutionAt: null,
+      dueAt: new Date(generatedAt.getTime() + this.#config.privacyRequestSlaDays * DAY_MS),
       createdAt: generatedAt,
     });
     const auditReceipt = await this.#audit.verify();
@@ -463,7 +493,7 @@ export class DataGovernanceService {
   async request(id: string): Promise<Record<string, unknown>> {
     const record = await this.#store.getDataGovernanceRequest(requiredText(id, 'requestId', 128));
     if (!record) throw notFound('data governance request not found');
-    return requestView(record);
+    return requestView(record, this.#now());
   }
 
   async runRetention(actorId: string, telemetryRetentionDays: number): Promise<Record<string, unknown>> {

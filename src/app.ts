@@ -19,6 +19,7 @@ import { registerAuditRoutes } from './routes/audit.js';
 import { registerAuditAnchorRoutes } from './routes/audit-anchor.js';
 import { registerAuditWitnessRoutes } from './routes/audit-witness.js';
 import { registerDataGovernanceRoutes } from './routes/data-governance.js';
+import { registerCommercialDeliveryRoutes } from './routes/commercial-delivery.js';
 import { ControlMetrics } from './observability/metrics.js';
 import { traceLogContext } from './observability/tracing.js';
 
@@ -217,6 +218,13 @@ export async function buildControlApp(
       );
       await registerBillingRoutes(app, {
         service: commercialControl.billing,
+        identity: commercialControl.identity,
+      });
+    }
+    if (commercialControl.commercialDelivery) {
+      capabilities.push('signed_customer_delivery_package', 'verified_roi_report');
+      await registerCommercialDeliveryRoutes(app, {
+        service: commercialControl.commercialDelivery,
         identity: commercialControl.identity,
       });
     }

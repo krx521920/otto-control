@@ -1,4 +1,5 @@
 export const OPERATOR_CONSOLE_LICENSE_CSS = `.table-action { min-width: 58px; padding: 7px 10px; color: #075d4b; background: #edf7f3; border: 1px solid #b9d9cd; border-radius: 5px; font-weight: 800; }
+.table-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .table-action:hover:not(:disabled) { background: #dff0e9; }
 .table-action:disabled { color: #8b9692; background: #f1f3f2; border-color: #e0e5e3; cursor: not-allowed; }
 .lifecycle-dialog { max-height: min(880px, calc(100vh - 32px)); overflow-y: auto; }

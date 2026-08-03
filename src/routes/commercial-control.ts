@@ -13,6 +13,8 @@ export async function registerCommercialControlRoutes(
   app: FastifyInstance,
   options: CommercialControlRouteOptions,
 ): Promise<void> {
+  app.get('/v1/commercial/plans', async () => options.service.commercialPlanCatalog());
+
   app.register(async (admin) => {
     admin.get<{ Querystring: { limit?: string } }>('/overview', async (request) => {
       await authenticateAdmin(request, options, 'commercial.read');

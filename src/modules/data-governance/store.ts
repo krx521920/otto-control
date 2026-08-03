@@ -21,6 +21,7 @@ export interface DataGovernanceStore {
     reason: string;
     requestedBy: string;
     earliestExecutionAt: Date | null;
+    dueAt: Date;
     createdAt: Date;
   }): Promise<DataGovernanceRequestRecord>;
   getDataGovernanceRequest(id: string): Promise<DataGovernanceRequestRecord | null>;

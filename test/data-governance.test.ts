@@ -218,6 +218,7 @@ function fixture(now = Date.parse('2026-08-20T00:00:00.000Z')): {
         controllerName: 'Otto Test',
         privacyContact: 'privacy@example.test',
         customerErasureGraceDays: 14,
+        privacyRequestSlaDays: 15,
         billingRetentionDays: 1_095,
         auditRetentionDays: 2_555,
         exportRecordRetentionDays: 30,
@@ -237,6 +238,7 @@ describe('data governance service', () => {
       residency: { primaryRegion: 'CN-BJ', crossBorderEnabled: false },
     });
     expect(service.dataMap()).toMatchObject({ primaryRegion: 'CN-BJ' });
+    expect(service.dataMap()).toMatchObject({ privacyRequestSlaDays: 15 });
   });
 
   it('exports only the allowlisted snapshot and redacts secret-shaped metadata', async () => {
@@ -258,6 +260,11 @@ describe('data governance service', () => {
       'customer_001',
       'contract ended',
     );
+    expect(request).toMatchObject({
+      dueAt: '2026-08-17T00:00:00.000Z',
+      sla: { status: 'open', completedWithinSla: null },
+      evidence: null,
+    });
     await expect(early.service.executeCustomerErasure('admin_001', String(request.id)))
       .rejects.toThrow('grace period');
 

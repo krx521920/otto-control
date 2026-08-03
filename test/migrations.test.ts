@@ -54,6 +54,12 @@ describe('PostgreSQL migrations', () => {
       statement.includes('CREATE TABLE IF NOT EXISTS control_execution_receipt_keys')
     ))).toBe(true);
     expect(statements.some((statement) => (
+      statement.includes('ALTER TABLE control_data_governance_requests')
+      && statement.includes('ADD COLUMN IF NOT EXISTS due_at')
+    ))).toBe(true);
+    expect(statements.some((statement) => statement.includes("VALUES ('customer_delivery.read')")))
+      .toBe(true);
+    expect(statements.some((statement) => (
       statement.includes('CREATE TABLE IF NOT EXISTS control_release_artifacts')
     ))).toBe(true);
     expect(statements.some((statement) => statement.includes("VALUES ('backup.read')"))).toBe(true);

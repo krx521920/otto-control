@@ -94,6 +94,7 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'approval.read', 'approval.decide',
   'billing.read', 'billing.topup', 'billing.manage', 'billing.refund',
   'audit.read', 'audit.export', 'audit.verify', 'audit.anchor.manage',
+  'customer_delivery.read',
 ];
 
 interface StoredTelemetryEvent extends OttoTelemetryEvent {

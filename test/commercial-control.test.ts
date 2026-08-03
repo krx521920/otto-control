@@ -94,6 +94,50 @@ describe('commercial control service', () => {
     expect(JSON.stringify(stored)).not.toContain(envelope.license.telemetryToken!);
   });
 
+  it('publishes one signed plan catalog and enforces it while issuing Licenses', async () => {
+    const signed = await service.commercialPlanCatalog();
+    expect(signed.catalog).toMatchObject({
+      version: '2026-08-03',
+      plans: [
+        { id: 'basic' },
+        { id: 'enterprise' },
+        { id: 'park' },
+        { id: 'government' },
+      ],
+    });
+    expect(verifyEnvelope(publicKey, signed.catalog, String(signed.signature))).toBe(true);
+
+    await expect(service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'basic',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 20,
+      modules: ['enterprise_tree', 'park_service'],
+    }, ADMIN)).rejects.toThrow('does not allow modules');
+
+    await expect(service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'park',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 20,
+      modules: ['enterprise_tree'],
+    }, ADMIN)).rejects.toThrow('requires modules');
+
+    const government = await service.issueLicense({
+      deploymentId: DEPLOYMENT_ID,
+      plan: 'government',
+      expiresAt: '2027-07-31T02:00:00.000Z',
+      seatLimit: 20,
+      offline: true,
+    }, ADMIN);
+    expect(government.license).toMatchObject({
+      offline: true,
+      telemetryAllowed: false,
+      seatEnforcement: 'monitor',
+      billingEnforcement: 'disabled',
+    });
+  });
+
   it('refuses real-time billing enforcement in an offline License', async () => {
     await expect(service.issueLicense({
       deploymentId: DEPLOYMENT_ID,

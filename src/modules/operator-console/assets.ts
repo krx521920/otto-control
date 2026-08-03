@@ -70,7 +70,7 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
         </div>
         <div id="licenses-panel" class="table-panel" role="tabpanel"><table><thead><tr><th>客户</th><th>方案</th><th>席位</th><th>方式</th><th>状态</th><th>到期时间</th><th>操作</th></tr></thead><tbody id="licenses-body"></tbody></table></div>
         <div id="deployments-panel" class="table-panel hidden" role="tabpanel"><table><thead><tr><th>部署</th><th>客户</th><th>企业 ID</th><th>状态</th><th>更新时间</th></tr></thead><tbody id="deployments-body"></tbody></table></div>
-        <div id="customers-panel" class="table-panel hidden" role="tabpanel"><table><thead><tr><th>客户</th><th>客户 ID</th><th>状态</th><th>更新时间</th></tr></thead><tbody id="customers-body"></tbody></table></div>
+        <div id="customers-panel" class="table-panel hidden" role="tabpanel"><table><thead><tr><th>客户</th><th>客户 ID</th><th>状态</th><th>更新时间</th><th>交付资料</th></tr></thead><tbody id="customers-body"></tbody></table></div>
       </section>
 
       <section id="approval-center" class="section-block hidden">
@@ -191,6 +191,19 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
     <div class="issued-summary"><span>License ID</span><strong id="issued-license-id">-</strong><span>客户</span><strong id="issued-customer">-</strong><span>到期时间</span><strong id="issued-expiry">-</strong></div>
     <p class="sensitive-note">授权文件包含部署凭证，仅在本次页面会话中保留。请下载后交付给对应客户。</p>
     <div class="dialog-actions"><button class="secondary" data-close="license-result-dialog" type="button">关闭</button><button id="download-license" class="primary compact" type="button">下载授权文件</button></div>
+  </dialog>
+
+  <dialog id="delivery-dialog" class="action-dialog wide">
+    <div class="dialog-heading"><div><p class="section-label">CUSTOMER DELIVERY</p><h2 id="delivery-title">客户授权与上报范围</h2></div><button class="icon-close" data-close="delivery-dialog" type="button" aria-label="关闭">×</button></div>
+    <dl class="delivery-summary">
+      <div><dt>当前套餐</dt><dd id="delivery-plans">-</dd></div>
+      <div><dt>授权模块</dt><dd id="delivery-modules">-</dd></div>
+      <div><dt>运行上报</dt><dd id="delivery-telemetry">-</dd></div>
+      <div><dt>数据区域</dt><dd id="delivery-region">-</dd></div>
+      <div><dt>隐私联系人</dt><dd id="delivery-contact">-</dd></div>
+      <div><dt>默认不上报</dt><dd id="delivery-prohibited">-</dd></div>
+    </dl>
+    <div class="dialog-actions"><button class="secondary" data-close="delivery-dialog" type="button">关闭</button><button id="download-roi-report" class="secondary" type="button">下载 ROI</button><button id="download-delivery-package" class="primary compact" type="button">下载签名交付包</button></div>
   </dialog>
 
   <dialog id="license-lifecycle-dialog" class="action-dialog wide lifecycle-dialog">
@@ -456,10 +469,22 @@ function renderOverview(data) {
   customerBody.replaceChildren();
   data.recent.customers.slice(0, 12).forEach((customer) => {
     const row = document.createElement('tr');
-    addCells(row, [customer.name, customer.id, badge(customer.status === 'active' ? '正常' : '停用', customer.status === 'active' ? '' : 'warning'), localTime(customer.updatedAt)]);
+    const actions = document.createElement('div');
+    actions.className = 'table-actions';
+    if (hasPermission('customer_delivery.read')) {
+      const delivery = document.createElement('button');
+      delivery.type = 'button';
+      delivery.className = 'table-action';
+      delivery.textContent = '授权与上报';
+      delivery.addEventListener('click', () => openCustomerDelivery(customer));
+      actions.append(delivery);
+    } else {
+      actions.textContent = '无权限';
+    }
+    addCells(row, [customer.name, customer.id, badge(customer.status === 'active' ? '正常' : '停用', customer.status === 'active' ? '' : 'warning'), localTime(customer.updatedAt), actions]);
     customerBody.append(row);
   });
-  if (!data.recent.customers.length) emptyRow(customerBody, 4, '暂无客户');
+  if (!data.recent.customers.length) emptyRow(customerBody, 5, '暂无客户');
   populateWriteOptions(data);
 }
 function renderBackup(data) {
@@ -529,10 +554,30 @@ async function permissionAware(path, render, fallback) {
     if (error.message !== '登录已过期') fallback(error.message);
   }
 }
+async function downloadWithAuth(path, filename) {
+  try {
+    const response = await fetch(path, { headers: { authorization: 'Bearer ' + state.token } });
+    if (response.status === 401) return showLogin('会话已过期，请重新登录。');
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new Error(body && body.error ? body.error.message : '下载失败（' + response.status + '）');
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast('交付资料已下载');
+  } catch (error) { toast(error.message); }
+}
 async function refreshDashboard() {
   if (!state.token) return;
   setStatus(byId('service-state'), '正在刷新', 'neutral');
   await Promise.all([
+    permissionAware('/v1/commercial/plans', renderCommercialPlanCatalog, (message) => toast(message)),
     permissionAware('/v1/admin/overview?limit=50', renderOverview, (message) => {
       setText('generated-at', '无查看权限'); toast(message);
     }),

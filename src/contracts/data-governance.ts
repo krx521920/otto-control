@@ -21,6 +21,7 @@ export interface DataGovernanceConfig {
   controllerName: string;
   privacyContact: string;
   customerErasureGraceDays: number;
+  privacyRequestSlaDays: number;
   billingRetentionDays: number;
   auditRetentionDays: number;
   exportRecordRetentionDays: number;
@@ -49,6 +50,7 @@ export interface DataGovernanceRequestRecord {
   reason: string;
   requestedBy: string;
   earliestExecutionAt: Date | null;
+  dueAt: Date;
   manifestSha256: string | null;
   result: Record<string, unknown> | null;
   completedAt: Date | null;
@@ -108,6 +110,8 @@ export interface CustomerDataExportSnapshot {
     modules: string[];
     offline: boolean;
     telemetryAllowed: boolean;
+    seatEnforcement?: string;
+    billingEnforcement?: string;
     revokedAtMs: number | null;
     createdAt: string;
     updatedAt: string;

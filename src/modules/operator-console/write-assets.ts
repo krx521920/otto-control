@@ -23,6 +23,10 @@ export const OPERATOR_CONSOLE_WRITE_CSS = `.write-actions { display: flex; flex-
 .issued-summary span { color: #71807a; }
 .issued-summary strong { overflow-wrap: anywhere; }
 .sensitive-note { padding: 12px 14px; color: #7c4f08; background: #fff4db; border: 1px solid #f0d49b; border-radius: 6px; font-size: 13px; line-height: 1.6; }
+.delivery-summary { margin: 0 24px 18px; }
+.delivery-summary div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 16px; padding: 11px 0; border-bottom: 1px solid #e4eae7; }
+.delivery-summary dt { color: #71807a; }
+.delivery-summary dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 @media (max-width: 680px) {
   .write-actions { width: 100%; justify-content: stretch; }
   .write-actions button { flex: 1; }
@@ -33,6 +37,29 @@ export const OPERATOR_CONSOLE_WRITE_CSS = `.write-actions { display: flex; flex-
 
 export const OPERATOR_CONSOLE_WRITE_JS = `let latestOverview = null;
 let lastLicenseEnvelope = null;
+let commercialPlanCatalog = null;
+let activeDeliveryCustomer = null;
+function renderCommercialPlanCatalog(result) {
+  commercialPlanCatalog = result.catalog;
+  syncPlanControls(false);
+}
+async function openCustomerDelivery(customer) {
+  activeDeliveryCustomer = customer;
+  setText('delivery-title', customer.name + ' · 授权与上报范围');
+  byId('delivery-dialog').showModal();
+  try {
+    const result = await request('/v1/admin/customers/' + encodeURIComponent(customer.id) + '/delivery-package.json');
+    const bundle = result.bundle;
+    const licenses = bundle.authorization.licenses;
+    const modules = [...new Set(licenses.flatMap((license) => license.modules))];
+    setText('delivery-plans', licenses.length ? licenses.map((license) => license.plan + (license.planCompliant ? '' : '（需复核）')).join(' / ') : '暂无授权');
+    setText('delivery-modules', modules.length ? modules.join('、') : '暂无');
+    setText('delivery-telemetry', bundle.reportingBoundary.enabledByLicense ? '已由至少一个 License 允许，仅上传下列运行元数据' : '当前 License 均未允许');
+    setText('delivery-region', bundle.customer.dataRegion);
+    setText('delivery-contact', bundle.privacyOperations.contact);
+    setText('delivery-prohibited', bundle.reportingBoundary.prohibitedByDefault.join('、'));
+  } catch (error) { toast(error.message); closeDialog('delivery-dialog'); }
+}
 function presentLicenseEnvelope(result, title) {
   lastLicenseEnvelope = result;
   setText('issued-result-title', title || '授权文件已生成');
@@ -89,6 +116,25 @@ function syncOfflineLicenseControls() {
   billingEnforcement.disabled = offline;
   telemetry.disabled = offline;
 }
+function syncPlanControls(resetModules) {
+  if (!commercialPlanCatalog) return syncOfflineLicenseControls();
+  const plan = commercialPlanCatalog.plans.find((item) => item.id === byId('license-plan').value);
+  if (!plan) return;
+  document.querySelectorAll('input[name="license-module"]').forEach((input) => {
+    input.disabled = !plan.allowedModules.includes(input.value);
+    if (resetModules) input.checked = plan.defaultModules.includes(input.value);
+    if (plan.requiredModules.includes(input.value)) input.checked = true;
+  });
+  const offline = byId('license-offline');
+  offline.disabled = !plan.offlineAllowed;
+  if (!plan.offlineAllowed) offline.checked = false;
+  if (resetModules) {
+    byId('license-seat-enforcement').value = plan.defaultSeatEnforcement;
+    byId('license-billing-enforcement').value = plan.defaultBillingEnforcement;
+    byId('license-telemetry').checked = plan.defaultTelemetryAllowed;
+  }
+  syncOfflineLicenseControls();
+}
 function openDialog(id) {
   const dialog = byId(id);
   if (id === 'deployment-dialog') {
@@ -103,7 +149,7 @@ function openDialog(id) {
       byId('license-expiry').value = date.toISOString().slice(0, 10);
     }
     if (latestOverview && latestOverview.recent.deployments.length === 1) byId('license-deployment').value = latestOverview.recent.deployments[0].id;
-    syncOfflineLicenseControls();
+    syncPlanControls(false);
   }
   dialog.showModal();
 }
@@ -111,6 +157,7 @@ function closeDialog(id) {
   const dialog = byId(id);
   if (dialog.open) dialog.close();
   if (id === 'license-result-dialog') lastLicenseEnvelope = null;
+  if (id === 'delivery-dialog') activeDeliveryCustomer = null;
 }
 async function submitAction(form, action) {
   const button = form.querySelector('button[type="submit"]');
@@ -178,6 +225,7 @@ byId('license-form').addEventListener('submit', async (event) => {
   });
 });
 byId('license-offline').addEventListener('change', syncOfflineLicenseControls);
+byId('license-plan').addEventListener('change', () => syncPlanControls(true));
 byId('license-result-dialog').addEventListener('close', () => { lastLicenseEnvelope = null; });
 byId('download-license').addEventListener('click', () => {
   if (!lastLicenseEnvelope) return;
@@ -191,4 +239,12 @@ byId('download-license').addEventListener('click', () => {
   link.remove();
   URL.revokeObjectURL(url);
   toast('授权文件已下载');
+});
+byId('download-delivery-package').addEventListener('click', () => {
+  if (!activeDeliveryCustomer) return;
+  void downloadWithAuth('/v1/admin/customers/' + encodeURIComponent(activeDeliveryCustomer.id) + '/delivery-package.json', 'otto-delivery-' + activeDeliveryCustomer.id + '.json');
+});
+byId('download-roi-report').addEventListener('click', () => {
+  if (!activeDeliveryCustomer) return;
+  void downloadWithAuth('/v1/admin/customers/' + encodeURIComponent(activeDeliveryCustomer.id) + '/roi-report.csv', 'otto-roi-' + activeDeliveryCustomer.id + '.csv');
 });`;

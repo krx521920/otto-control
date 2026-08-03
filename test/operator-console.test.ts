@@ -49,6 +49,8 @@ describe('operator console assets', () => {
     expect(response.body).toContain("request('/v1/admin/customers', { method: 'POST'");
     expect(response.body).toContain("request('/v1/admin/deployments', { method: 'POST'");
     expect(response.body).toContain("request('/v1/admin/licenses', { method: 'POST'");
+    expect(response.body).toContain("/delivery-package.json");
+    expect(response.body).toContain("renderCommercialPlanCatalog");
     expect(response.body).toContain("'/summary'");
     expect(response.body).toContain("'/lifecycle?limit=50'");
     expect(response.body).toContain("'/seats'");

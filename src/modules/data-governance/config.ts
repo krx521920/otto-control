@@ -100,6 +100,13 @@ export function loadDataGovernanceConfig(
       90,
       'CONTROL_CUSTOMER_ERASURE_GRACE_DAYS',
     ),
+    privacyRequestSlaDays: boundedDays(
+      env.CONTROL_PRIVACY_REQUEST_SLA_DAYS,
+      15,
+      1,
+      90,
+      'CONTROL_PRIVACY_REQUEST_SLA_DAYS',
+    ),
     billingRetentionDays: boundedDays(
       env.CONTROL_BILLING_RETENTION_DAYS,
       1_095,

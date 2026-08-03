@@ -24,6 +24,11 @@ import type {
   OperatorOverview,
 } from '../../contracts/operator-console.js';
 import {
+  commercialPlan,
+  OTTO_COMMERCIAL_PLAN_CATALOG,
+  validatePlanModules,
+} from '../../contracts/commercial-package.js';
+import {
   secureTextMatches,
   signTelemetryRequest,
   telemetryIntegrityHash,
@@ -254,6 +259,19 @@ export class CommercialControlService {
 
   async close(): Promise<void> {
     await this.#store.close();
+  }
+
+  async commercialPlanCatalog(): Promise<Record<string, unknown>> {
+    const catalog = {
+      ...OTTO_COMMERCIAL_PLAN_CATALOG,
+      plans: OTTO_COMMERCIAL_PLAN_CATALOG.plans.map((plan) => ({
+        ...plan,
+        requiredModules: [...plan.requiredModules],
+        defaultModules: [...plan.defaultModules],
+        allowedModules: [...plan.allowedModules],
+      })),
+    };
+    return { catalog, ...await signPayload(this.#signer, catalog) };
   }
 
   async operatorOverview(limit = 12): Promise<OperatorOverview> {
@@ -812,17 +830,31 @@ export class CommercialControlService {
     const expiresAt = requiredString(body, 'expiresAt', 64);
     const seatLimit = Number(body.seatLimit);
     if (!DEPLOYMENT_ID_PATTERN.test(deploymentId)) throw invalidRequest('deploymentId is invalid');
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,79}$/u.test(plan)) throw invalidRequest('plan is invalid');
+    const planDefinition = commercialPlan(plan);
+    if (!planDefinition) {
+      throw invalidRequest(
+        `plan must be one of: ${OTTO_COMMERCIAL_PLAN_CATALOG.plans.map((item) => item.id).join(', ')}`,
+      );
+    }
     if (!Number.isInteger(seatLimit) || seatLimit < 1 || seatLimit > 100_000) {
       throw invalidRequest('seatLimit must be an integer between 1 and 100000');
     }
-    if (!Array.isArray(body.modules) || body.modules.length === 0) {
-      throw invalidRequest('modules must contain at least one capability');
-    }
-    const requestedModules = body.modules.map((module) => String(module));
+    const requestedModules = body.modules === undefined
+      ? planDefinition.defaultModules
+      : Array.isArray(body.modules) ? body.modules.map((module) => String(module)) : [];
+    if (requestedModules.length === 0) throw invalidRequest('modules must contain at least one capability');
     const unknownModule = requestedModules.find((module) => !isOttoLicenseCapability(module));
     if (unknownModule) throw invalidRequest(`unknown License capability: ${unknownModule}`);
     const modules = [...new Set(requestedModules)] as IssueLicenseInput['modules'];
+    const modulePolicy = validatePlanModules(planDefinition, modules);
+    if (modulePolicy.missing.length > 0) {
+      throw invalidRequest(`plan ${plan} requires modules: ${modulePolicy.missing.join(', ')}`);
+    }
+    if (modulePolicy.unsupported.length > 0) {
+      throw invalidRequest(
+        `plan ${plan} does not allow modules: ${modulePolicy.unsupported.join(', ')}`,
+      );
+    }
     const issuedAtMs = this.#now();
     const expiresAtMs = Date.parse(expiresAt);
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= issuedAtMs) {
@@ -835,7 +867,12 @@ export class CommercialControlService {
     if (!deployment) throw notFound('deployment not found');
     if (deployment.status !== 'active') throw conflict('deployment is suspended');
     const offline = body.offline === true;
-    const telemetryAllowed = body.telemetryAllowed !== false;
+    if (offline && !planDefinition.offlineAllowed) {
+      throw invalidRequest(`plan ${plan} does not allow offline License`);
+    }
+    const telemetryAllowed = body.telemetryAllowed === undefined
+      ? planDefinition.defaultTelemetryAllowed
+      : body.telemetryAllowed === true;
     const gracePeriodDays = body.gracePeriodDays === undefined
       ? DEFAULT_GRACE_PERIOD_MS / (24 * 60 * 60 * 1000)
       : Number(body.gracePeriodDays);
@@ -844,7 +881,7 @@ export class CommercialControlService {
     }
     const gracePeriodMs = gracePeriodDays * 24 * 60 * 60 * 1000;
     const seatEnforcement: OttoSeatEnforcement = body.seatEnforcement === undefined
-      ? 'monitor'
+      ? offline ? 'monitor' : planDefinition.defaultSeatEnforcement
       : body.seatEnforcement as OttoSeatEnforcement;
     if (!['monitor', 'enforce'].includes(seatEnforcement)) {
       throw invalidRequest('seatEnforcement must be monitor or enforce');
@@ -854,7 +891,7 @@ export class CommercialControlService {
     }
     const billingEnforcement: OttoBillingEnforcement =
       body.billingEnforcement === undefined
-        ? 'disabled'
+        ? offline ? 'disabled' : planDefinition.defaultBillingEnforcement
         : body.billingEnforcement as OttoBillingEnforcement;
     if (!['disabled', 'enforce'].includes(billingEnforcement)) {
       throw invalidRequest('billingEnforcement must be disabled or enforce');
@@ -906,6 +943,7 @@ export class CommercialControlService {
       detail: {
         deploymentId,
         plan,
+        planCatalogVersion: OTTO_COMMERCIAL_PLAN_CATALOG.version,
         seatLimit,
         gracePeriodDays,
         seatEnforcement,

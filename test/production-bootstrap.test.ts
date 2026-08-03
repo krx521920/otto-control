@@ -203,6 +203,7 @@ describe('production bootstrap', () => {
       const environment = readFileSync(join(output, '.env.production'), 'utf8');
       expect(environment).toContain('ACME_EMAIL=operations@otto.cn');
       expect(environment).toContain('CONTROL_PRIVACY_CONTROLLER=Otto Technology Co., Ltd.');
+      expect(environment).toContain('CONTROL_PRIVACY_REQUEST_SLA_DAYS=15');
       expect(environment).toContain('CONTROL_DATA_REGION=CN-BJ');
       expect(environment).not.toContain('staging operator');
     } finally {
