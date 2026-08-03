@@ -139,6 +139,7 @@ Resources:
               AWS: !Ref DrillPrincipalArn
             Action:
               - s3:GetBucketVersioning
+              - s3:GetBucketPolicy
               - s3:GetObjectLockConfiguration
             Resource: !GetAtt AuditEvidenceBucket.Arn
           - Sid: DrillAttemptsRealDeletion
@@ -151,6 +152,7 @@ Resources:
               - s3:GetObject
               - s3:GetObjectRetention
               - s3:GetObjectVersion
+              - s3:PutObjectRetention
             Resource: !Sub ${AuditEvidenceBucket.Arn}/*
 
 Outputs:

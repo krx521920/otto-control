@@ -6,7 +6,16 @@ export interface ObjectLockDrillInput {
   versionId: string;
   expectedSha256: string;
   minimumRetentionDays: number;
+  actualPrincipalArn: string;
+  expectedPrincipalArn: string;
   now: () => number;
+}
+
+export interface ObjectLockDenialEvidence {
+  code: string;
+  httpStatusCode: number;
+  requestId: string | null;
+  extendedRequestId: string | null;
 }
 
 export interface ObjectLockDrillReport {
@@ -23,7 +32,15 @@ export interface ObjectLockDrillReport {
   retainUntil: string;
   serverSideEncryption: 'aws:kms';
   kmsKeyId: string;
-  deleteCapablePrincipalAttested: true;
+  callerIdentity: string;
+  expectedDrillPrincipal: string;
+  bucketPolicyEvidence: {
+    deleteObjectVersionAllowed: true;
+    putObjectRetentionAllowed: true;
+  };
+  retentionReductionDenial: ObjectLockDenialEvidence;
+  deletionDenial: ObjectLockDenialEvidence;
+  retentionReductionDenied: true;
   deletionDenied: true;
   objectIntactAfterDeletionAttempt: true;
 }
@@ -32,3 +49,5 @@ export function runObjectLockDrill(
   input: ObjectLockDrillInput,
   client: S3Client,
 ): Promise<ObjectLockDrillReport>;
+
+export function awsPrincipalMatches(actualArn: string, expectedArn: string): boolean;

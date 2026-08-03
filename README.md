@@ -623,15 +623,19 @@ npm run drill:audit:object-lock -- \
   --key otto-audit-witness/SOURCE/SEQUENCE.json \
   --version-id VERSION_ID \
   --expected-sha256 LOWERCASE_SHA256 \
-  --delete-capable-principal=true \
+  --expected-drill-principal-arn arn:aws:iam::123456789012:role/otto-object-lock-drill \
   --output ./object-lock-drill.json \
   --confirm=DELETE_LOCKED_AUDIT_EVIDENCE
 ```
 
-Run this only with the dedicated drill role. A denial from a principal that did
-not have `s3:DeleteObjectVersion` would not prove COMPLIANCE retention. Preserve
-the `0600` report, CloudTrail event, stack ID, workflow run, and corresponding
-WORM receipt as one quarterly recovery evidence package.
+Run this only with the dedicated drill role. The command verifies its live STS
+identity and confirms the bucket policy explicitly grants that principal both
+`s3:DeleteObjectVersion` and `s3:PutObjectRetention`. It then proves that AWS
+rejects both shortening the COMPLIANCE retention date and deleting the exact
+version, and re-reads the bytes and retention afterward. This prevents an
+ordinary IAM denial from being misreported as Object Lock evidence. Preserve
+the `0600` report, both denied CloudTrail data events, stack ID, workflow run,
+and corresponding WORM receipt as one quarterly recovery evidence package.
 
 Pointing a control plane at itself validates the protocol but does not protect
 against that host's superuser. S3 Object Lock also cannot protect against loss of
@@ -678,7 +682,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.33.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.34.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |

@@ -434,7 +434,9 @@ describe('production deployment assets', () => {
     expect(template).toContain('s3:DeleteObjectVersion');
     expect(template).toContain('DeletionPolicy: Retain');
     expect(drill).toContain('DELETE_LOCKED_AUDIT_EVIDENCE');
-    expect(drill).toContain('delete-capable-principal');
+    expect(drill).toContain('expected-drill-principal-arn');
+    expect(drill).toContain('GetCallerIdentityCommand');
+    expect(drill).toContain('COMPLIANCE retention reduction unexpectedly succeeded');
     expect(drill).toContain('COMPLIANCE object deletion unexpectedly succeeded');
     expect(drill).toContain('objectIntactAfterDeletionAttempt: true');
     expect(manifest).toContain('database_fingerprint_sha256');

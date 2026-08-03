@@ -6,11 +6,15 @@ import { fileURLToPath } from 'node:url';
 import {
   DeleteObjectCommand,
   GetBucketVersioningCommand,
+  GetBucketPolicyCommand,
   GetObjectCommand,
   GetObjectLockConfigurationCommand,
+  GetObjectRetentionCommand,
   HeadObjectCommand,
+  PutObjectRetentionCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 
 function argumentsMap(argv) {
   const values = new Map();
@@ -45,6 +49,66 @@ function deletionDenied(error) {
     || error?.name === 'InvalidRequest';
 }
 
+function values(value) {
+  return Array.isArray(value) ? value : [value];
+}
+
+function policyAllows(policy, input, action) {
+  const objectArn = `arn:${input.partition}:s3:::${input.bucket}/*`;
+  return values(policy.Statement ?? []).some((statement) => {
+    const principals = values(statement?.Principal?.AWS ?? statement?.Principal);
+    const actions = values(statement?.Action);
+    const resources = values(statement?.Resource);
+    return statement?.Effect === 'Allow'
+      && principals.includes(input.expectedPrincipalArn)
+      && actions.some((entry) => entry === action || entry === 's3:*' || entry === '*')
+      && resources.some((entry) => entry === objectArn || entry === '*');
+  });
+}
+
+function bucketPolicyEvidence(raw, input) {
+  let policy;
+  try {
+    policy = JSON.parse(raw);
+  } catch {
+    throw new Error('bucket policy is missing or invalid JSON');
+  }
+  const deleteObjectVersionAllowed = policyAllows(policy, input, 's3:DeleteObjectVersion');
+  const putObjectRetentionAllowed = policyAllows(policy, input, 's3:PutObjectRetention');
+  if (!deleteObjectVersionAllowed || !putObjectRetentionAllowed) {
+    throw new Error('bucket policy does not grant the drill principal destructive test actions');
+  }
+  return { deleteObjectVersionAllowed, putObjectRetentionAllowed };
+}
+
+function denialEvidence(error) {
+  if (!deletionDenied(error)) return null;
+  return {
+    code: typeof error?.name === 'string' ? error.name : 'Unknown',
+    httpStatusCode: Number(error?.$metadata?.httpStatusCode ?? 0),
+    requestId: typeof error?.$metadata?.requestId === 'string'
+      ? error.$metadata.requestId
+      : null,
+    extendedRequestId: typeof error?.$metadata?.extendedRequestId === 'string'
+      ? error.$metadata.extendedRequestId
+      : null,
+  };
+}
+
+export function awsPrincipalMatches(actualArn, expectedArn) {
+  if (actualArn === expectedArn) return true;
+  const expected = expectedArn.match(
+    /^arn:(aws(?:-[a-z]+)?):iam::([0-9]{12}):role\/(.+)$/u,
+  );
+  if (!expected) return false;
+  const [, partition, accountId, expectedPath] = expected;
+  const roleName = expectedPath.split('/').at(-1);
+  const actual = actualArn.match(
+    /^arn:(aws(?:-[a-z]+)?):sts::([0-9]{12}):assumed-role\/([^/]+)\/[^/]+$/u,
+  );
+  return actual?.[1] === partition && actual[2] === accountId && actual[3] === roleName;
+}
+
 async function readVersion(client, input) {
   const response = await client.send(new GetObjectCommand({
     Bucket: input.bucket,
@@ -62,14 +126,24 @@ async function readVersion(client, input) {
 
 export async function runObjectLockDrill(input, client) {
   const startedAt = new Date(input.now()).toISOString();
-  const [versioning, lockConfiguration] = await Promise.all([
+  if (!awsPrincipalMatches(input.actualPrincipalArn, input.expectedPrincipalArn)) {
+    throw new Error('AWS caller identity does not match the approved drill principal');
+  }
+  const partition = input.expectedPrincipalArn.split(':')[1];
+  const [versioning, lockConfiguration, bucketPolicy] = await Promise.all([
     client.send(new GetBucketVersioningCommand({ Bucket: input.bucket })),
     client.send(new GetObjectLockConfigurationCommand({ Bucket: input.bucket })),
+    client.send(new GetBucketPolicyCommand({ Bucket: input.bucket })),
   ]);
   if (versioning.Status !== 'Enabled') throw new Error('bucket versioning is not enabled');
   if (lockConfiguration.ObjectLockConfiguration?.ObjectLockEnabled !== 'Enabled') {
     throw new Error('bucket Object Lock is not enabled');
   }
+  const policyEvidence = bucketPolicyEvidence(bucketPolicy.Policy ?? '', {
+    bucket: input.bucket,
+    partition,
+    expectedPrincipalArn: input.expectedPrincipalArn,
+  });
 
   const headInput = {
     Bucket: input.bucket,
@@ -97,7 +171,34 @@ export async function runObjectLockDrill(input, client) {
     throw new Error('object bytes do not match the expected evidence checksum');
   }
 
-  let denied = false;
+  const retentionBefore = await client.send(new GetObjectRetentionCommand({
+    Bucket: input.bucket,
+    Key: input.key,
+    VersionId: input.versionId,
+  }));
+  if (retentionBefore.Retention?.Mode !== 'COMPLIANCE'
+    || retentionBefore.Retention.RetainUntilDate?.getTime() !== retainUntil) {
+    throw new Error('explicit object retention does not match the immutable version metadata');
+  }
+
+  let retentionDenial = null;
+  try {
+    await client.send(new PutObjectRetentionCommand({
+      Bucket: input.bucket,
+      Key: input.key,
+      VersionId: input.versionId,
+      Retention: {
+        Mode: 'COMPLIANCE',
+        RetainUntilDate: new Date(input.now() + 60_000),
+      },
+    }));
+  } catch (error) {
+    retentionDenial = denialEvidence(error);
+    if (!retentionDenial) throw error;
+  }
+  if (!retentionDenial) throw new Error('COMPLIANCE retention reduction unexpectedly succeeded');
+
+  let deletionDenial = null;
   try {
     await client.send(new DeleteObjectCommand({
       Bucket: input.bucket,
@@ -105,10 +206,10 @@ export async function runObjectLockDrill(input, client) {
       VersionId: input.versionId,
     }));
   } catch (error) {
-    if (!deletionDenied(error)) throw error;
-    denied = true;
+    deletionDenial = denialEvidence(error);
+    if (!deletionDenial) throw error;
   }
-  if (!denied) throw new Error('COMPLIANCE object deletion unexpectedly succeeded');
+  if (!deletionDenial) throw new Error('COMPLIANCE object deletion unexpectedly succeeded');
 
   const after = await client.send(new HeadObjectCommand(headInput));
   if (after.VersionId !== input.versionId || after.ObjectLockMode !== 'COMPLIANCE') {
@@ -117,6 +218,15 @@ export async function runObjectLockDrill(input, client) {
   const contentAfter = await readVersion(client, input);
   if (contentAfter.sha256 !== input.expectedSha256) {
     throw new Error('object bytes changed after the deletion attempt');
+  }
+  const retentionAfter = await client.send(new GetObjectRetentionCommand({
+    Bucket: input.bucket,
+    Key: input.key,
+    VersionId: input.versionId,
+  }));
+  if (retentionAfter.Retention?.Mode !== 'COMPLIANCE'
+    || retentionAfter.Retention.RetainUntilDate?.getTime() !== retainUntil) {
+    throw new Error('object retention changed after the destructive attempts');
   }
 
   return {
@@ -133,7 +243,12 @@ export async function runObjectLockDrill(input, client) {
     retainUntil: before.ObjectLockRetainUntilDate.toISOString(),
     serverSideEncryption: before.ServerSideEncryption,
     kmsKeyId: before.SSEKMSKeyId,
-    deleteCapablePrincipalAttested: true,
+    callerIdentity: input.actualPrincipalArn,
+    expectedDrillPrincipal: input.expectedPrincipalArn,
+    bucketPolicyEvidence: policyEvidence,
+    retentionReductionDenial: retentionDenial,
+    deletionDenial,
+    retentionReductionDenied: true,
     deletionDenied: true,
     objectIntactAfterDeletionAttempt: true,
   };
@@ -144,8 +259,9 @@ async function main() {
   if (required(values, 'confirm') !== 'DELETE_LOCKED_AUDIT_EVIDENCE') {
     throw new Error('--confirm=DELETE_LOCKED_AUDIT_EVIDENCE is required');
   }
-  if (required(values, 'delete-capable-principal') !== 'true') {
-    throw new Error('--delete-capable-principal=true is required');
+  const expectedPrincipalArn = required(values, 'expected-drill-principal-arn');
+  if (!/^arn:aws(?:-[a-z]+)?:iam::[0-9]{12}:(?:role|user)\/.+$/u.test(expectedPrincipalArn)) {
+    throw new Error('--expected-drill-principal-arn must be an IAM role or user ARN');
   }
   const expectedSha256 = required(values, 'expected-sha256').toLowerCase();
   if (!/^[a-f0-9]{64}$/u.test(expectedSha256)) {
@@ -173,17 +289,24 @@ async function main() {
       throw new Error('--endpoint must be a credential-free HTTPS origin');
     }
   }
+  const region = values.get('region')?.trim() || process.env.AWS_REGION || 'us-east-1';
   const client = new S3Client({
-    region: values.get('region')?.trim() || process.env.AWS_REGION || 'us-east-1',
+    region,
     endpoint: endpoint || undefined,
     forcePathStyle: values.get('force-path-style') === 'true',
   });
+  const identity = await new STSClient({ region }).send(new GetCallerIdentityCommand({}));
+  if (!identity.Arn || !awsPrincipalMatches(identity.Arn, expectedPrincipalArn)) {
+    throw new Error('current AWS identity is not the approved drill principal');
+  }
   const report = await runObjectLockDrill({
     bucket,
     key,
     versionId,
     expectedSha256,
     minimumRetentionDays,
+    actualPrincipalArn: identity.Arn,
+    expectedPrincipalArn,
     now: Date.now,
   }, client);
   const output = resolve(required(values, 'output'));

@@ -49,12 +49,12 @@ npm run drill:audit:object-lock -- \
   --key OBJECT_KEY \
   --version-id VERSION_ID \
   --expected-sha256 SHA256 \
-  --delete-capable-principal=true \
+  --expected-drill-principal-arn arn:aws:iam::123456789012:role/otto-object-lock-drill \
   --output ./object-lock-drill-$(date -u +%Y%m%dT%H%M%SZ).json \
   --confirm=DELETE_LOCKED_AUDIT_EVIDENCE
 ```
 
-脚本要求版本控制、Object Lock、COMPLIANCE、SSE-KMS、未来保留期和对象字节校验全部通过；随后发起真实版本删除，只有删除被拒绝且同一版本内容仍一致才通过。
+脚本会先通过 STS 核验当前调用身份，并读取桶策略，确认该身份确实拥有 `s3:DeleteObjectVersion` 和 `s3:PutObjectRetention`，避免把普通 IAM 拒绝误报成 Object Lock 生效。随后分别尝试缩短 COMPLIANCE 保留期和删除真实版本；两次攻击都被拒绝，并且保留日期、版本号和对象字节保持一致时才通过。
 
 ## 5. 证据与频率
 
