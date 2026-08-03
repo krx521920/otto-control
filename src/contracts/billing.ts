@@ -26,6 +26,7 @@ export type CreditHoldStatus = 'active' | 'captured' | 'released' | 'expired';
 
 export interface CreditAccountRecord {
   customerId: string;
+  organizationId: string;
   availableBalance: number;
   frozenBalance: number;
   totalToppedUp: number;

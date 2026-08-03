@@ -1140,6 +1140,140 @@ const MIGRATIONS: Migration[] = [
        ON control_federation_rate_windows(window_started_at)`,
     ],
   },
+  {
+    id: '028_enterprise_credit_accounts',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_enterprise_credit_accounts (
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        organization_id TEXT NOT NULL,
+        available_balance BIGINT NOT NULL DEFAULT 0
+          CHECK (available_balance BETWEEN 0 AND 9000000000000000),
+        frozen_balance BIGINT NOT NULL DEFAULT 0
+          CHECK (frozen_balance BETWEEN 0 AND 9000000000000000),
+        total_topped_up BIGINT NOT NULL DEFAULT 0
+          CHECK (total_topped_up BETWEEN 0 AND 9000000000000000),
+        total_consumed BIGINT NOT NULL DEFAULT 0
+          CHECK (total_consumed BETWEEN 0 AND 9000000000000000),
+        total_refunded BIGINT NOT NULL DEFAULT 0
+          CHECK (total_refunded BETWEEN 0 AND 9000000000000000),
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (customer_id, organization_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS control_legacy_credit_accounts (
+        customer_id TEXT PRIMARY KEY REFERENCES control_customers(id),
+        available_balance BIGINT NOT NULL,
+        frozen_balance BIGINT NOT NULL,
+        total_topped_up BIGINT NOT NULL,
+        total_consumed BIGINT NOT NULL,
+        total_refunded BIGINT NOT NULL,
+        source_version INTEGER NOT NULL,
+        migration_reason TEXT NOT NULL,
+        quarantined_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `WITH organization_candidates AS (
+         SELECT customer_id, MIN(organization_id) AS organization_id
+         FROM (
+           SELECT customer_id, organization_id FROM control_deployments
+           UNION
+           SELECT customer_id, organization_id
+           FROM control_credit_transactions WHERE organization_id IS NOT NULL
+           UNION
+           SELECT customer_id, organization_id FROM control_credit_holds
+         ) candidates
+         GROUP BY customer_id
+         HAVING COUNT(DISTINCT organization_id) = 1
+       )
+       INSERT INTO control_enterprise_credit_accounts
+         (customer_id, organization_id, available_balance, frozen_balance,
+          total_topped_up, total_consumed, total_refunded, version, created_at, updated_at)
+       SELECT account.customer_id, candidate.organization_id, account.available_balance,
+              account.frozen_balance, account.total_topped_up, account.total_consumed,
+              account.total_refunded, account.version, account.created_at, account.updated_at
+       FROM control_credit_accounts account
+       JOIN organization_candidates candidate ON candidate.customer_id = account.customer_id
+       ON CONFLICT (customer_id, organization_id) DO NOTHING`,
+      `WITH organization_candidates AS (
+         SELECT customer_id
+         FROM (
+           SELECT customer_id, organization_id FROM control_deployments
+           UNION
+           SELECT customer_id, organization_id
+           FROM control_credit_transactions WHERE organization_id IS NOT NULL
+           UNION
+           SELECT customer_id, organization_id FROM control_credit_holds
+         ) candidates
+         GROUP BY customer_id
+         HAVING COUNT(DISTINCT organization_id) = 1
+       )
+       INSERT INTO control_legacy_credit_accounts
+         (customer_id, available_balance, frozen_balance, total_topped_up,
+          total_consumed, total_refunded, source_version, migration_reason)
+       SELECT account.customer_id, account.available_balance, account.frozen_balance,
+              account.total_topped_up, account.total_consumed, account.total_refunded,
+              account.version, 'organization_ownership_ambiguous'
+       FROM control_credit_accounts account
+       LEFT JOIN organization_candidates candidate ON candidate.customer_id = account.customer_id
+       WHERE candidate.customer_id IS NULL
+         AND (account.available_balance > 0 OR account.frozen_balance > 0
+              OR account.total_topped_up > 0 OR account.total_consumed > 0
+              OR account.total_refunded > 0)
+       ON CONFLICT (customer_id) DO NOTHING`,
+      `WITH organizations AS (
+         SELECT DISTINCT customer_id, organization_id
+         FROM (
+           SELECT customer_id, organization_id FROM control_deployments
+           UNION
+           SELECT customer_id, organization_id
+           FROM control_credit_transactions WHERE organization_id IS NOT NULL
+           UNION
+           SELECT customer_id, organization_id FROM control_credit_holds
+         ) candidates
+       ), hold_totals AS (
+         SELECT customer_id, organization_id, COALESCE(SUM(amount), 0) AS frozen_balance
+         FROM control_credit_holds
+         WHERE status = 'active'
+         GROUP BY customer_id, organization_id
+       ), transaction_totals AS (
+         SELECT customer_id, organization_id,
+                COALESCE(SUM(billed_amount)
+                  FILTER (WHERE type IN ('consume', 'capture')), 0) AS total_consumed,
+                COALESCE(SUM(billed_amount)
+                  FILTER (WHERE type = 'refund'), 0) AS total_refunded
+         FROM control_credit_transactions
+         WHERE organization_id IS NOT NULL
+         GROUP BY customer_id, organization_id
+       )
+       INSERT INTO control_enterprise_credit_accounts
+         (customer_id, organization_id, available_balance, frozen_balance,
+          total_topped_up, total_consumed, total_refunded, version)
+       SELECT organizations.customer_id, organizations.organization_id, 0,
+              COALESCE(hold_totals.frozen_balance, 0), 0,
+              COALESCE(transaction_totals.total_consumed, 0),
+              COALESCE(transaction_totals.total_refunded, 0), 1
+       FROM organizations
+       JOIN control_credit_accounts legacy
+         ON legacy.customer_id = organizations.customer_id
+       LEFT JOIN hold_totals
+         ON hold_totals.customer_id = organizations.customer_id
+        AND hold_totals.organization_id = organizations.organization_id
+       LEFT JOIN transaction_totals
+         ON transaction_totals.customer_id = organizations.customer_id
+        AND transaction_totals.organization_id = organizations.organization_id
+       ON CONFLICT (customer_id, organization_id) DO NOTHING`,
+      `ALTER TABLE control_credit_transactions
+       DROP CONSTRAINT IF EXISTS control_credit_transactions_customer_id_idempotency_key_key`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_credit_transactions_enterprise_idempotency
+       ON control_credit_transactions(customer_id, organization_id, idempotency_key)`,
+      `ALTER TABLE control_credit_holds
+       DROP CONSTRAINT IF EXISTS control_credit_holds_customer_id_idempotency_key_key`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_credit_holds_enterprise_idempotency
+       ON control_credit_holds(customer_id, organization_id, idempotency_key)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_enterprise_credit_accounts_customer
+       ON control_enterprise_credit_accounts(customer_id, organization_id)`,
+    ],
+  },
 ];
 
 export const CONTROL_SCHEMA_MIGRATION_IDS = Object.freeze(

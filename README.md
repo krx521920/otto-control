@@ -65,7 +65,8 @@ MIT-licensed HTTP foundation; its license does not make this repository MIT.
 - Fail-closed activation and rollback gates requiring a signed installer plus every
   referenced manifest; artifact revocation atomically pauses an active release
 - Audited activation, pause, and rollback to the previous release policy
-- Per-customer integer credit accounts with separate available and frozen balances
+- Per-enterprise integer credit accounts keyed by customer and organization, with
+  separate available and frozen balances
 - Immutable top-up, freeze, capture, release, consumption, and refund transactions
 - Centrally controlled per-module rates; private deployments report units, not prices
 - Request idempotency, original-charge refund limits, and automatic expired-hold release
@@ -817,8 +818,9 @@ the signed contract so frequent reports do not rewrite License history.
 
 ### Credits and billing
 
-Credits are positive integers. PostgreSQL stores an account summary for fast
-reads, but the immutable transaction ledger is the source of truth. Top-ups,
+Credits are positive integers. PostgreSQL stores one account per
+`customerId + organizationId` for fast reads, but the immutable transaction
+ledger is the source of truth. Top-ups,
 rate changes, and refunds are audited; the HTTP routes require RBAC permissions,
 and financial mutations require request-bound second-administrator approval.
 
@@ -842,14 +844,22 @@ The complete privacy and replay contract is documented in
 `POST /v1/billing/holds` freezes estimated credits before long work. Capture
 settles the actual amount and immediately releases any remainder; explicit
 release and automatic expiry both return unused credits. Direct usage calls and
-every hold mutation require a customer-scoped idempotency key. Reusing that key
+every hold mutation require an enterprise-scoped idempotency key. Reusing that key
 with different parameters fails with `409` instead of silently changing money.
 
-Administrators can query the account, rates, transactions, and period statement
-under `/v1/admin/billing/customers/:customerId/*`. The `export.csv` endpoint
+Administrators can query an enterprise account by passing `organizationId` to
+`/v1/admin/billing/customers/:customerId/account`; top-ups must also include the
+target `organizationId`. Rates, transactions, and period statements remain
+available under `/v1/admin/billing/customers/:customerId/*`. The `export.csv` endpoint
 includes balances, deltas, references, related refund transactions, and
 idempotency keys for reconciliation. Refunds must reference a consume/capture
 transaction, and cumulative refunds cannot exceed its billed amount.
+
+Migration `028_enterprise_credit_accounts` moves an old customer-wide balance
+only when exactly one organization can be proven. Ambiguous legacy balances are
+quarantined in `control_legacy_credit_accounts` for explicit reconciliation and
+cannot be consumed by any enterprise. Existing active holds are reconstructed in
+their recorded enterprise accounts so capture or release can still complete.
 
 ### Commercial plans and customer delivery
 

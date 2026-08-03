@@ -118,6 +118,7 @@ export interface CustomerDataExportSnapshot {
   }>;
   billing: {
     account: Record<string, unknown> | null;
+    accounts: Array<Record<string, unknown>>;
     rates: Array<Record<string, unknown>>;
     transactions: Array<Record<string, unknown>>;
   };

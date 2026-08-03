@@ -72,6 +72,7 @@ async function fixture(options: { registerReceiptKey?: boolean } = {}) {
     creditsPerUnit: 3,
   }, 'billing-admin');
   await service.topUp(CUSTOMER_ID, {
+    organizationId: ORGANIZATION_ID,
     amount: 100,
     idempotencyKey: 'topup:receipts',
     referenceId: 'invoice:receipts',
@@ -176,7 +177,7 @@ describe('signed execution receipt v2', () => {
     });
     expect(replay.replayed).toBe(true);
     expect(replay.transaction.id).toBe(first.transaction.id);
-    expect((await service.account(CUSTOMER_ID)).availableBalance).toBe(94);
+    expect((await service.account(CUSTOMER_ID, ORGANIZATION_ID)).availableBalance).toBe(94);
     expect(await service.executionReceipt(CUSTOMER_ID, envelope.receipt.receiptId))
       .toMatchObject({ taskId: 'task_receipt_1', sequence: 1 });
     expect(await service.executionReceipts(CUSTOMER_ID, {})).toHaveLength(1);
@@ -195,24 +196,40 @@ describe('signed execution receipt v2', () => {
     expect(csv).toContain('receiptVerificationStatus');
   });
 
-  it('keeps per-enterprise attribution inside a shared licensed deployment', async () => {
+  it('isolates enterprise wallets inside a shared licensed deployment', async () => {
     const { service, token, signReceipt, request } = await fixture();
+    const secondOrganizationId = 'org_shared_tenant_beta';
     const envelope = await signReceipt({
-      organizationId: 'org_shared_tenant_beta',
+      organizationId: secondOrganizationId,
       receiptId: 'exec_99999999999999999999999999999999',
       taskId: 'task_shared_tenant_beta',
     });
 
+    await expect(service.consumeExecutionReceipt(request(envelope), token))
+      .rejects.toMatchObject({ code: 'CONFLICT' });
+    expect((await service.account(CUSTOMER_ID, ORGANIZATION_ID)).availableBalance).toBe(100);
+
+    await service.topUp(CUSTOMER_ID, {
+      organizationId: secondOrganizationId,
+      amount: 25,
+      idempotencyKey: 'topup:shared-tenant-beta',
+      referenceId: 'invoice:shared-tenant-beta',
+    }, 'billing-admin');
     const result = await service.consumeExecutionReceipt(request(envelope), token);
 
     expect(result.replayed).toBe(false);
     expect(result.receipt).toMatchObject({
-      organizationId: 'org_shared_tenant_beta',
+      organizationId: secondOrganizationId,
       deploymentId: DEPLOYMENT_ID,
       verificationStatus: 'verified',
     });
+    expect(result.account).toMatchObject({
+      organizationId: secondOrganizationId,
+      availableBalance: 19,
+    });
+    expect((await service.account(CUSTOMER_ID, ORGANIZATION_ID)).availableBalance).toBe(100);
     expect(await service.executionReceipts(CUSTOMER_ID, {})).toEqual([
-      expect.objectContaining({ organizationId: 'org_shared_tenant_beta' }),
+      expect.objectContaining({ organizationId: secondOrganizationId }),
     ]);
   });
 

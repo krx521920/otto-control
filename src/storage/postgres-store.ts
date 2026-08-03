@@ -297,6 +297,7 @@ interface TelemetryCountRow {
 
 interface CreditAccountRow {
   customer_id: string;
+  organization_id: string;
   available_balance: string;
   frozen_balance: string;
   total_topped_up: string;
@@ -980,6 +981,7 @@ async function appendChainedAuditEvent(
 function creditAccountFromRow(row: CreditAccountRow): CreditAccountRecord {
   return {
     customerId: row.customer_id,
+    organizationId: row.organization_id,
     availableBalance: Number(row.available_balance),
     frozenBalance: Number(row.frozen_balance),
     totalToppedUp: Number(row.total_topped_up),
@@ -2966,10 +2968,14 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     }
   }
 
-  async getCreditAccount(customerId: string): Promise<CreditAccountRecord | null> {
+  async getCreditAccount(
+    customerId: string,
+    organizationId: string,
+  ): Promise<CreditAccountRecord | null> {
     const result = await this.#pool.query<CreditAccountRow>(
-      'SELECT * FROM control_credit_accounts WHERE customer_id = $1',
-      [customerId],
+      `SELECT * FROM control_enterprise_credit_accounts
+       WHERE customer_id = $1 AND organization_id = $2`,
+      [customerId, organizationId],
     );
     return result.rows[0] ? creditAccountFromRow(result.rows[0]) : null;
   }
@@ -3031,6 +3037,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
   async topUpCredits(input: {
     transactionId: string;
     customerId: string;
+    organizationId: string;
     amount: number;
     idempotencyKey: string;
     referenceId: string;
@@ -3042,20 +3049,21 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     try {
       await client.query('BEGIN');
       await client.query(
-        `INSERT INTO control_credit_accounts (customer_id)
-         VALUES ($1) ON CONFLICT DO NOTHING`,
-        [input.customerId],
+        `INSERT INTO control_enterprise_credit_accounts (customer_id, organization_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [input.customerId, input.organizationId],
       );
       const accountResult = await client.query<CreditAccountRow>(
-        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
-        [input.customerId],
+        `SELECT * FROM control_enterprise_credit_accounts
+         WHERE customer_id = $1 AND organization_id = $2 FOR UPDATE`,
+        [input.customerId, input.organizationId],
       );
       const current = accountResult.rows[0];
       if (!current) throw conflict('customer does not exist');
       const existing = await client.query<CreditTransactionRow>(
         `SELECT * FROM control_credit_transactions
-         WHERE customer_id = $1 AND idempotency_key = $2`,
-        [input.customerId, input.idempotencyKey],
+         WHERE customer_id = $1 AND organization_id = $2 AND idempotency_key = $3`,
+        [input.customerId, input.organizationId, input.idempotencyKey],
       );
       if (existing.rows[0]) {
         const transaction = creditTransactionFromRow(existing.rows[0]);
@@ -3068,23 +3076,23 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         return { account: creditAccountFromRow(current), transaction, replayed: true };
       }
       const updated = await client.query<CreditAccountRow>(
-        `UPDATE control_credit_accounts SET
+        `UPDATE control_enterprise_credit_accounts SET
            available_balance = available_balance + $2,
            total_topped_up = total_topped_up + $2,
            version = version + 1,
            updated_at = $3
-         WHERE customer_id = $1 RETURNING *`,
-        [input.customerId, input.amount, input.occurredAt],
+         WHERE customer_id = $1 AND organization_id = $4 RETURNING *`,
+        [input.customerId, input.amount, input.occurredAt, input.organizationId],
       );
       const account = creditAccountFromRow(updated.rows[0]!);
       const inserted = await client.query<CreditTransactionRow>(
         `INSERT INTO control_credit_transactions
-          (id, customer_id, type, available_delta, frozen_delta, billed_amount,
+          (id, customer_id, organization_id, type, available_delta, frozen_delta, billed_amount,
            available_after, frozen_after, idempotency_key, reference_id,
            description, metadata, occurred_at)
-         VALUES ($1, $2, 'topup', $3, 0, 0, $4, $5, $6, $7, $8, $9::jsonb, $10)
+         VALUES ($1, $2, $3, 'topup', $4, 0, 0, $5, $6, $7, $8, $9, $10::jsonb, $11)
          RETURNING *`,
-        [input.transactionId, input.customerId, input.amount, account.availableBalance,
+        [input.transactionId, input.customerId, input.organizationId, input.amount, account.availableBalance,
           account.frozenBalance, input.idempotencyKey, input.referenceId,
           input.description, JSON.stringify(input.metadata), input.occurredAt],
       );
@@ -3120,19 +3128,21 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     try {
       await client.query('BEGIN');
       await client.query(
-        'INSERT INTO control_credit_accounts (customer_id) VALUES ($1) ON CONFLICT DO NOTHING',
-        [input.customerId],
+        `INSERT INTO control_enterprise_credit_accounts (customer_id, organization_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [input.customerId, input.organizationId],
       );
       const accountResult = await client.query<CreditAccountRow>(
-        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
-        [input.customerId],
+        `SELECT * FROM control_enterprise_credit_accounts
+         WHERE customer_id = $1 AND organization_id = $2 FOR UPDATE`,
+        [input.customerId, input.organizationId],
       );
       const current = accountResult.rows[0];
       if (!current) throw conflict('customer does not exist');
       const existingHold = await client.query<CreditHoldRow>(
         `SELECT * FROM control_credit_holds
-         WHERE customer_id = $1 AND idempotency_key = $2`,
-        [input.customerId, input.idempotencyKey],
+         WHERE customer_id = $1 AND organization_id = $2 AND idempotency_key = $3`,
+        [input.customerId, input.organizationId, input.idempotencyKey],
       );
       if (existingHold.rows[0]) {
         const hold = creditHoldFromRow(existingHold.rows[0]);
@@ -3144,8 +3154,8 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         ) throw conflict('idempotency key was already used for a different hold');
         const transactionResult = await client.query<CreditTransactionRow>(
           `SELECT * FROM control_credit_transactions
-           WHERE customer_id = $1 AND idempotency_key = $2`,
-          [input.customerId, input.idempotencyKey],
+           WHERE customer_id = $1 AND organization_id = $2 AND idempotency_key = $3`,
+          [input.customerId, input.organizationId, input.idempotencyKey],
         );
         await client.query('COMMIT');
         return {
@@ -3159,13 +3169,13 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         throw conflict('insufficient available credits');
       }
       const updated = await client.query<CreditAccountRow>(
-        `UPDATE control_credit_accounts SET
+        `UPDATE control_enterprise_credit_accounts SET
            available_balance = available_balance - $2,
            frozen_balance = frozen_balance + $2,
            version = version + 1,
            updated_at = $3
-         WHERE customer_id = $1 RETURNING *`,
-        [input.customerId, input.amount, input.occurredAt],
+         WHERE customer_id = $1 AND organization_id = $4 RETURNING *`,
+        [input.customerId, input.amount, input.occurredAt, input.organizationId],
       );
       const account = creditAccountFromRow(updated.rows[0]!);
       const holdResult = await client.query<CreditHoldRow>(
@@ -3240,37 +3250,6 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const accountResult = await client.query<CreditAccountRow>(
-        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
-        [input.customerId],
-      );
-      const current = accountResult.rows[0];
-      if (!current) {
-        await client.query('ROLLBACK');
-        return null;
-      }
-      const existing = await client.query<CreditTransactionRow>(
-        `SELECT * FROM control_credit_transactions
-         WHERE customer_id = $1 AND idempotency_key = $2`,
-        [input.customerId, input.idempotencyKey],
-      );
-      if (existing.rows[0]) {
-        const transaction = creditTransactionFromRow(existing.rows[0]);
-        if (
-          transaction.type !== 'capture' || transaction.referenceId !== input.referenceId ||
-          transaction.metadata.holdId !== input.holdId || transaction.billedAmount !== input.amount
-        ) throw conflict('idempotency key was already used for a different operation');
-        const holdResult = await client.query<CreditHoldRow>(
-          'SELECT * FROM control_credit_holds WHERE id = $1', [input.holdId],
-        );
-        await client.query('COMMIT');
-        return {
-          account: creditAccountFromRow(current),
-          hold: creditHoldFromRow(holdResult.rows[0]!),
-          transaction,
-          replayed: true,
-        };
-      }
       const holdResult = await client.query<CreditHoldRow>(
         `SELECT * FROM control_credit_holds
          WHERE id = $1 AND customer_id = $2 FOR UPDATE`,
@@ -3280,6 +3259,35 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       if (!holdRow) {
         await client.query('ROLLBACK');
         return null;
+      }
+      const accountResult = await client.query<CreditAccountRow>(
+        `SELECT * FROM control_enterprise_credit_accounts
+         WHERE customer_id = $1 AND organization_id = $2 FOR UPDATE`,
+        [input.customerId, holdRow.organization_id],
+      );
+      const current = accountResult.rows[0];
+      if (!current) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const existing = await client.query<CreditTransactionRow>(
+        `SELECT * FROM control_credit_transactions
+         WHERE customer_id = $1 AND organization_id = $2 AND idempotency_key = $3`,
+        [input.customerId, holdRow.organization_id, input.idempotencyKey],
+      );
+      if (existing.rows[0]) {
+        const transaction = creditTransactionFromRow(existing.rows[0]);
+        if (
+          transaction.type !== 'capture' || transaction.referenceId !== input.referenceId ||
+          transaction.metadata.holdId !== input.holdId || transaction.billedAmount !== input.amount
+        ) throw conflict('idempotency key was already used for a different operation');
+        await client.query('COMMIT');
+        return {
+          account: creditAccountFromRow(current),
+          hold: creditHoldFromRow(holdResult.rows[0]!),
+          transaction,
+          replayed: true,
+        };
       }
       if (holdRow.status !== 'active') throw conflict('credit hold is no longer active');
       if (holdRow.expires_at.getTime() <= input.occurredAt.getTime()) {
@@ -3291,14 +3299,15 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         throw conflict('insufficient available credits for capture');
       }
       const updated = await client.query<CreditAccountRow>(
-        `UPDATE control_credit_accounts SET
+        `UPDATE control_enterprise_credit_accounts SET
            available_balance = available_balance + $2,
            frozen_balance = frozen_balance - $3,
            total_consumed = total_consumed + $4,
            version = version + 1,
            updated_at = $5
-         WHERE customer_id = $1 RETURNING *`,
-        [input.customerId, availableDelta, heldAmount, input.amount, input.occurredAt],
+         WHERE customer_id = $1 AND organization_id = $6 RETURNING *`,
+        [input.customerId, availableDelta, heldAmount, input.amount, input.occurredAt,
+          holdRow.organization_id],
       );
       const account = creditAccountFromRow(updated.rows[0]!);
       const updatedHold = await client.query<CreditHoldRow>(
@@ -3347,36 +3356,6 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const accountResult = await client.query<CreditAccountRow>(
-        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
-        [input.customerId],
-      );
-      const current = accountResult.rows[0];
-      if (!current) {
-        await client.query('ROLLBACK');
-        return null;
-      }
-      const existing = await client.query<CreditTransactionRow>(
-        `SELECT * FROM control_credit_transactions
-         WHERE customer_id = $1 AND idempotency_key = $2`,
-        [input.customerId, input.idempotencyKey],
-      );
-      if (existing.rows[0]) {
-        const transaction = creditTransactionFromRow(existing.rows[0]);
-        if (transaction.type !== 'release' || transaction.referenceId !== input.holdId) {
-          throw conflict('idempotency key was already used for a different operation');
-        }
-        const holdResult = await client.query<CreditHoldRow>(
-          'SELECT * FROM control_credit_holds WHERE id = $1', [input.holdId],
-        );
-        await client.query('COMMIT');
-        return {
-          account: creditAccountFromRow(current),
-          hold: creditHoldFromRow(holdResult.rows[0]!),
-          transaction,
-          replayed: true,
-        };
-      }
       const holdResult = await client.query<CreditHoldRow>(
         `SELECT * FROM control_credit_holds
          WHERE id = $1 AND customer_id = $2 FOR UPDATE`,
@@ -3387,16 +3366,44 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         await client.query('ROLLBACK');
         return null;
       }
+      const accountResult = await client.query<CreditAccountRow>(
+        `SELECT * FROM control_enterprise_credit_accounts
+         WHERE customer_id = $1 AND organization_id = $2 FOR UPDATE`,
+        [input.customerId, holdRow.organization_id],
+      );
+      const current = accountResult.rows[0];
+      if (!current) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const existing = await client.query<CreditTransactionRow>(
+        `SELECT * FROM control_credit_transactions
+         WHERE customer_id = $1 AND organization_id = $2 AND idempotency_key = $3`,
+        [input.customerId, holdRow.organization_id, input.idempotencyKey],
+      );
+      if (existing.rows[0]) {
+        const transaction = creditTransactionFromRow(existing.rows[0]);
+        if (transaction.type !== 'release' || transaction.referenceId !== input.holdId) {
+          throw conflict('idempotency key was already used for a different operation');
+        }
+        await client.query('COMMIT');
+        return {
+          account: creditAccountFromRow(current),
+          hold: creditHoldFromRow(holdResult.rows[0]!),
+          transaction,
+          replayed: true,
+        };
+      }
       if (holdRow.status !== 'active') throw conflict('credit hold is no longer active');
       const amount = Number(holdRow.amount);
       const updated = await client.query<CreditAccountRow>(
-        `UPDATE control_credit_accounts SET
+        `UPDATE control_enterprise_credit_accounts SET
            available_balance = available_balance + $2,
            frozen_balance = frozen_balance - $2,
            version = version + 1,
            updated_at = $3
-         WHERE customer_id = $1 RETURNING *`,
-        [input.customerId, amount, input.occurredAt],
+         WHERE customer_id = $1 AND organization_id = $4 RETURNING *`,
+        [input.customerId, amount, input.occurredAt, holdRow.organization_id],
       );
       const account = creditAccountFromRow(updated.rows[0]!);
       const updatedHold = await client.query<CreditHoldRow>(
@@ -3448,19 +3455,21 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     try {
       await client.query('BEGIN');
       await client.query(
-        'INSERT INTO control_credit_accounts (customer_id) VALUES ($1) ON CONFLICT DO NOTHING',
-        [input.customerId],
+        `INSERT INTO control_enterprise_credit_accounts (customer_id, organization_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [input.customerId, input.organizationId],
       );
       const accountResult = await client.query<CreditAccountRow>(
-        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
-        [input.customerId],
+        `SELECT * FROM control_enterprise_credit_accounts
+         WHERE customer_id = $1 AND organization_id = $2 FOR UPDATE`,
+        [input.customerId, input.organizationId],
       );
       const current = accountResult.rows[0];
       if (!current) throw conflict('customer does not exist');
       const existing = await client.query<CreditTransactionRow>(
         `SELECT * FROM control_credit_transactions
-         WHERE customer_id = $1 AND idempotency_key = $2`,
-        [input.customerId, input.idempotencyKey],
+         WHERE customer_id = $1 AND organization_id = $2 AND idempotency_key = $3`,
+        [input.customerId, input.organizationId, input.idempotencyKey],
       );
       if (existing.rows[0]) {
         const transaction = creditTransactionFromRow(existing.rows[0]);
@@ -3477,13 +3486,13 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         throw conflict('insufficient available credits');
       }
       const updated = await client.query<CreditAccountRow>(
-        `UPDATE control_credit_accounts SET
+        `UPDATE control_enterprise_credit_accounts SET
            available_balance = available_balance - $2,
            total_consumed = total_consumed + $2,
            version = version + 1,
            updated_at = $3
-         WHERE customer_id = $1 RETURNING *`,
-        [input.customerId, input.amount, input.occurredAt],
+         WHERE customer_id = $1 AND organization_id = $4 RETURNING *`,
+        [input.customerId, input.amount, input.occurredAt, input.organizationId],
       );
       const account = creditAccountFromRow(updated.rows[0]!);
       const transactionResult = await client.query<CreditTransactionRow>(
@@ -3648,12 +3657,14 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     try {
       await client.query('BEGIN');
       await client.query(
-        'INSERT INTO control_credit_accounts (customer_id) VALUES ($1) ON CONFLICT DO NOTHING',
-        [input.customerId],
+        `INSERT INTO control_enterprise_credit_accounts (customer_id, organization_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [input.customerId, receipt.organizationId],
       );
       const accountResult = await client.query<CreditAccountRow>(
-        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
-        [input.customerId],
+        `SELECT * FROM control_enterprise_credit_accounts
+         WHERE customer_id = $1 AND organization_id = $2 FOR UPDATE`,
+        [input.customerId, receipt.organizationId],
       );
       const current = accountResult.rows[0];
       if (!current) throw conflict('customer does not exist');
@@ -3726,13 +3737,13 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       }
 
       const updated = await client.query<CreditAccountRow>(
-        `UPDATE control_credit_accounts SET
+        `UPDATE control_enterprise_credit_accounts SET
            available_balance = available_balance - $2,
            total_consumed = total_consumed + $2,
            version = version + 1,
            updated_at = $3
-         WHERE customer_id = $1 RETURNING *`,
-        [input.customerId, input.amount, input.receivedAt],
+         WHERE customer_id = $1 AND organization_id = $4 RETURNING *`,
+        [input.customerId, input.amount, input.receivedAt, receipt.organizationId],
       );
       const account = creditAccountFromRow(updated.rows[0]!);
       const transactionResult = await client.query<CreditTransactionRow>(
@@ -3841,9 +3852,21 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
+      const originalResult = await client.query<CreditTransactionRow>(
+        `SELECT * FROM control_credit_transactions
+         WHERE id = $1 AND customer_id = $2 FOR UPDATE`,
+        [input.relatedTransactionId, input.customerId],
+      );
+      const original = originalResult.rows[0];
+      if (!original || !original.organization_id
+        || !['consume', 'capture'].includes(original.type)) {
+        await client.query('ROLLBACK');
+        return null;
+      }
       const accountResult = await client.query<CreditAccountRow>(
-        'SELECT * FROM control_credit_accounts WHERE customer_id = $1 FOR UPDATE',
-        [input.customerId],
+        `SELECT * FROM control_enterprise_credit_accounts
+         WHERE customer_id = $1 AND organization_id = $2 FOR UPDATE`,
+        [input.customerId, original.organization_id],
       );
       const current = accountResult.rows[0];
       if (!current) {
@@ -3852,8 +3875,8 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       }
       const existing = await client.query<CreditTransactionRow>(
         `SELECT * FROM control_credit_transactions
-         WHERE customer_id = $1 AND idempotency_key = $2`,
-        [input.customerId, input.idempotencyKey],
+         WHERE customer_id = $1 AND organization_id = $2 AND idempotency_key = $3`,
+        [input.customerId, original.organization_id, input.idempotencyKey],
       );
       if (existing.rows[0]) {
         const transaction = creditTransactionFromRow(existing.rows[0]);
@@ -3865,16 +3888,6 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         await client.query('COMMIT');
         return { account: creditAccountFromRow(current), transaction, replayed: true };
       }
-      const originalResult = await client.query<CreditTransactionRow>(
-        `SELECT * FROM control_credit_transactions
-         WHERE id = $1 AND customer_id = $2 FOR UPDATE`,
-        [input.relatedTransactionId, input.customerId],
-      );
-      const original = originalResult.rows[0];
-      if (!original || !['consume', 'capture'].includes(original.type)) {
-        await client.query('ROLLBACK');
-        return null;
-      }
       const refundedResult = await client.query<{ total: string }>(
         `SELECT COALESCE(SUM(billed_amount), 0)::text AS total
          FROM control_credit_transactions
@@ -3885,13 +3898,13 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         throw conflict('refund exceeds the remaining refundable amount');
       }
       const updated = await client.query<CreditAccountRow>(
-        `UPDATE control_credit_accounts SET
+        `UPDATE control_enterprise_credit_accounts SET
            available_balance = available_balance + $2,
            total_refunded = total_refunded + $2,
            version = version + 1,
            updated_at = $3
-         WHERE customer_id = $1 RETURNING *`,
-        [input.customerId, input.amount, input.occurredAt],
+         WHERE customer_id = $1 AND organization_id = $4 RETURNING *`,
+        [input.customerId, input.amount, input.occurredAt, original.organization_id],
       );
       const account = creditAccountFromRow(updated.rows[0]!);
       const transactionResult = await client.query<CreditTransactionRow>(
@@ -3966,8 +3979,12 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     from: Date;
     to: Date;
   }): Promise<CreditStatement | null> {
-    const account = await this.getCreditAccount(input.customerId);
-    if (!account) return null;
+    const accountCount = await this.#pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM control_enterprise_credit_accounts
+       WHERE customer_id = $1`,
+      [input.customerId],
+    );
+    if (Number(accountCount.rows[0]?.count ?? 0) === 0) return null;
     const totals = await this.#pool.query<{
       opening_balance: string;
       period_delta: string;
@@ -4979,13 +4996,15 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         [customerId],
       );
       const account = await client.query<Record<string, unknown>>(
-        `SELECT available_balance::text AS "availableBalance",
+        `SELECT organization_id AS "organizationId",
+                available_balance::text AS "availableBalance",
                 frozen_balance::text AS "frozenBalance",
                 total_topped_up::text AS "totalToppedUp",
                 total_consumed::text AS "totalConsumed",
                 total_refunded::text AS "totalRefunded", version,
                 created_at AS "createdAt", updated_at AS "updatedAt"
-         FROM control_credit_accounts WHERE customer_id = $1`,
+         FROM control_enterprise_credit_accounts WHERE customer_id = $1
+         ORDER BY organization_id`,
         [customerId],
       );
       const rates = await client.query<Record<string, unknown>>(
@@ -5064,7 +5083,12 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
           createdAt: row.created_at.toISOString(),
           updatedAt: row.updated_at.toISOString(),
         })),
-        billing: { account: account.rows[0] ?? null, rates: rates.rows, transactions: transactions.rows },
+        billing: {
+          account: account.rows.length === 1 ? account.rows[0]! : null,
+          accounts: account.rows,
+          rates: rates.rows,
+          transactions: transactions.rows,
+        },
         telemetry: {
           totalEvents: telemetry.rows.reduce((sum, row) => sum + Number(row.event_count), 0),
           byType: Object.fromEntries(telemetry.rows.map((row) => [row.event_type, Number(row.event_count)])),
@@ -5286,6 +5310,13 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
          SET organization_id = 'erased', deployment_id = 'erased', updated_at = $2
          WHERE customer_id = $1`,
         [request.customer_id, input.completedAt],
+      );
+      await client.query(
+        `UPDATE control_enterprise_credit_accounts
+         SET organization_id = 'erased:' || md5($2 || ':billing-org:' || organization_id),
+             updated_at = $3
+         WHERE customer_id = $1`,
+        [request.customer_id, input.pseudonymSeed, input.completedAt],
       );
       await client.query(
         `UPDATE control_credit_transactions

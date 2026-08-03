@@ -11,7 +11,7 @@ export const OPERATOR_CONSOLE_APPROVAL_ACTIONS = Object.freeze({
   'update_release.rollback': { label: '回滚更新版本', permission: 'update_release.publish' },
   'release_artifact.revoke': { label: '吊销发行物', permission: 'update_release.publish' },
   'billing.rate.set': { label: '调整计费费率', permission: 'billing.manage' },
-  'billing.topup': { label: '客户积分充值', permission: 'billing.topup' },
+  'billing.topup': { label: '企业积分充值', permission: 'billing.topup' },
   'billing.refund': { label: '客户积分退款', permission: 'billing.refund' },
   'billing.execution_receipt_key.register': {
     label: '登记执行收据公钥',

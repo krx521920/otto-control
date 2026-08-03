@@ -1125,14 +1125,20 @@ export class MemoryControlStore implements ControlStore {
     return true;
   }
 
-  #creditAccount(customerId: string, create = false): CreditAccountRecord | null {
-    const existing = this.creditAccounts.get(customerId);
+  #creditAccount(
+    customerId: string,
+    organizationId: string,
+    create = false,
+  ): CreditAccountRecord | null {
+    const accountKey = `${customerId}\0${organizationId}`;
+    const existing = this.creditAccounts.get(accountKey);
     if (existing) return existing;
     if (!create) return null;
     if (!this.customers.has(customerId)) throw conflict('customer does not exist');
     const now = new Date();
     const account: CreditAccountRecord = {
       customerId,
+      organizationId,
       availableBalance: 0,
       frozenBalance: 0,
       totalToppedUp: 0,
@@ -1142,13 +1148,19 @@ export class MemoryControlStore implements ControlStore {
       createdAt: now,
       updatedAt: now,
     };
-    this.creditAccounts.set(customerId, account);
+    this.creditAccounts.set(accountKey, account);
     return account;
   }
 
-  #transactionByKey(customerId: string, key: string): CreditTransactionRecord | null {
+  #transactionByKey(
+    customerId: string,
+    organizationId: string,
+    key: string,
+  ): CreditTransactionRecord | null {
     return [...this.creditTransactions.values()].find((transaction) => (
-      transaction.customerId === customerId && transaction.idempotencyKey === key
+      transaction.customerId === customerId
+      && transaction.organizationId === organizationId
+      && transaction.idempotencyKey === key
     )) ?? null;
   }
 
@@ -1163,12 +1175,15 @@ export class MemoryControlStore implements ControlStore {
       version: current.version + 1,
       updatedAt: changedAt,
     };
-    this.creditAccounts.set(current.customerId, account);
+    this.creditAccounts.set(`${current.customerId}\0${current.organizationId}`, account);
     return account;
   }
 
-  async getCreditAccount(customerId: string): Promise<CreditAccountRecord | null> {
-    return this.#creditAccount(customerId);
+  async getCreditAccount(
+    customerId: string,
+    organizationId: string,
+  ): Promise<CreditAccountRecord | null> {
+    return this.#creditAccount(customerId, organizationId);
   }
 
   async setBillingRate(input: {
@@ -1211,6 +1226,7 @@ export class MemoryControlStore implements ControlStore {
   async topUpCredits(input: {
     transactionId: string;
     customerId: string;
+    organizationId: string;
     amount: number;
     idempotencyKey: string;
     referenceId: string;
@@ -1218,8 +1234,12 @@ export class MemoryControlStore implements ControlStore {
     metadata: Record<string, unknown>;
     occurredAt: Date;
   }): Promise<CreditMutationResult> {
-    const current = this.#creditAccount(input.customerId, true)!;
-    const replay = this.#transactionByKey(input.customerId, input.idempotencyKey);
+    const current = this.#creditAccount(input.customerId, input.organizationId, true)!;
+    const replay = this.#transactionByKey(
+      input.customerId,
+      input.organizationId,
+      input.idempotencyKey,
+    );
     if (replay) {
       if (
         replay.type !== 'topup' || replay.availableDelta !== input.amount ||
@@ -1234,7 +1254,7 @@ export class MemoryControlStore implements ControlStore {
     const transaction: CreditTransactionRecord = {
       id: input.transactionId,
       customerId: input.customerId,
-      organizationId: null,
+      organizationId: input.organizationId,
       deploymentId: null,
       module: null,
       type: 'topup',
@@ -1267,7 +1287,7 @@ export class MemoryControlStore implements ControlStore {
     expiresAt: Date;
     occurredAt: Date;
   }): Promise<CreditHoldMutationResult> {
-    const current = this.#creditAccount(input.customerId, true)!;
+    const current = this.#creditAccount(input.customerId, input.organizationId, true)!;
     const replay = [...this.creditHolds.values()].find((hold) => (
       hold.customerId === input.customerId && hold.idempotencyKey === input.idempotencyKey
     ));
@@ -1279,7 +1299,11 @@ export class MemoryControlStore implements ControlStore {
       return {
         account: current,
         hold: replay,
-        transaction: this.#transactionByKey(input.customerId, input.idempotencyKey)!,
+        transaction: this.#transactionByKey(
+          input.customerId,
+          input.organizationId,
+          input.idempotencyKey,
+        )!,
         replayed: true,
       };
     }
@@ -1354,9 +1378,15 @@ export class MemoryControlStore implements ControlStore {
     description: string;
     occurredAt: Date;
   }): Promise<CreditHoldMutationResult | null> {
-    const current = this.#creditAccount(input.customerId);
+    const hold = this.creditHolds.get(input.holdId);
+    if (!hold || hold.customerId !== input.customerId) return null;
+    const current = this.#creditAccount(input.customerId, hold.organizationId);
     if (!current) return null;
-    const replay = this.#transactionByKey(input.customerId, input.idempotencyKey);
+    const replay = this.#transactionByKey(
+      input.customerId,
+      hold.organizationId,
+      input.idempotencyKey,
+    );
     if (replay) {
       if (
         replay.type !== 'capture' || replay.referenceId !== input.referenceId ||
@@ -1364,8 +1394,6 @@ export class MemoryControlStore implements ControlStore {
       ) throw conflict('idempotency key was already used for a different operation');
       return { account: current, hold: this.creditHolds.get(input.holdId)!, transaction: replay, replayed: true };
     }
-    const hold = this.creditHolds.get(input.holdId);
-    if (!hold || hold.customerId !== input.customerId) return null;
     if (hold.status !== 'active') throw conflict('credit hold is no longer active');
     if (hold.expiresAt.getTime() <= input.occurredAt.getTime()) throw conflict('credit hold has expired');
     const availableDelta = hold.amount - input.amount;
@@ -1412,17 +1440,21 @@ export class MemoryControlStore implements ControlStore {
     description: string;
     occurredAt: Date;
   }): Promise<CreditHoldMutationResult | null> {
-    const current = this.#creditAccount(input.customerId);
+    const hold = this.creditHolds.get(input.holdId);
+    if (!hold || hold.customerId !== input.customerId) return null;
+    const current = this.#creditAccount(input.customerId, hold.organizationId);
     if (!current) return null;
-    const replay = this.#transactionByKey(input.customerId, input.idempotencyKey);
+    const replay = this.#transactionByKey(
+      input.customerId,
+      hold.organizationId,
+      input.idempotencyKey,
+    );
     if (replay) {
       if (replay.type !== 'release' || replay.referenceId !== input.holdId) {
         throw conflict('idempotency key was already used for a different operation');
       }
       return { account: current, hold: this.creditHolds.get(input.holdId)!, transaction: replay, replayed: true };
     }
-    const hold = this.creditHolds.get(input.holdId);
-    if (!hold || hold.customerId !== input.customerId) return null;
     if (hold.status !== 'active') throw conflict('credit hold is no longer active');
     const account = this.#updateCreditAccount(current, {
       availableBalance: current.availableBalance + hold.amount,
@@ -1467,8 +1499,12 @@ export class MemoryControlStore implements ControlStore {
     metadata: Record<string, unknown>;
     occurredAt: Date;
   }): Promise<CreditMutationResult> {
-    const current = this.#creditAccount(input.customerId, true)!;
-    const replay = this.#transactionByKey(input.customerId, input.idempotencyKey);
+    const current = this.#creditAccount(input.customerId, input.organizationId, true)!;
+    const replay = this.#transactionByKey(
+      input.customerId,
+      input.organizationId,
+      input.idempotencyKey,
+    );
     if (replay) {
       if (
         replay.type !== 'consume' || replay.billedAmount !== input.amount ||
@@ -1607,7 +1643,7 @@ export class MemoryControlStore implements ControlStore {
     receivedAt: Date;
   }): Promise<ExecutionReceiptMutationResult> {
     const evidence = input.envelope.receipt;
-    const current = this.#creditAccount(input.customerId, true)!;
+    const current = this.#creditAccount(input.customerId, evidence.organizationId, true)!;
     const replay = this.executionReceipts.get(evidence.receiptId);
     if (replay) {
       const replayEvidence = {
@@ -1723,9 +1759,18 @@ export class MemoryControlStore implements ControlStore {
     metadata: Record<string, unknown>;
     occurredAt: Date;
   }): Promise<CreditMutationResult | null> {
-    const current = this.#creditAccount(input.customerId);
+    const original = this.creditTransactions.get(input.relatedTransactionId);
+    if (!original || original.customerId !== input.customerId || !original.organizationId
+      || !['consume', 'capture'].includes(original.type)) {
+      return null;
+    }
+    const current = this.#creditAccount(input.customerId, original.organizationId);
     if (!current) return null;
-    const replay = this.#transactionByKey(input.customerId, input.idempotencyKey);
+    const replay = this.#transactionByKey(
+      input.customerId,
+      original.organizationId,
+      input.idempotencyKey,
+    );
     if (replay) {
       if (
         replay.type !== 'refund' || replay.billedAmount !== input.amount ||
@@ -1733,10 +1778,6 @@ export class MemoryControlStore implements ControlStore {
         replay.referenceId !== input.referenceId
       ) throw conflict('idempotency key was already used for a different operation');
       return { account: current, transaction: replay, replayed: true };
-    }
-    const original = this.creditTransactions.get(input.relatedTransactionId);
-    if (!original || original.customerId !== input.customerId || !['consume', 'capture'].includes(original.type)) {
-      return null;
     }
     const refunded = [...this.creditTransactions.values()]
       .filter((transaction) => transaction.type === 'refund' && transaction.relatedTransactionId === original.id)
@@ -1801,7 +1842,9 @@ export class MemoryControlStore implements ControlStore {
     from: Date;
     to: Date;
   }): Promise<CreditStatement | null> {
-    if (!this.#creditAccount(input.customerId)) return null;
+    if (![...this.creditAccounts.values()].some(
+      (account) => account.customerId === input.customerId,
+    )) return null;
     const transactions = [...this.creditTransactions.values()]
       .filter((transaction) => transaction.customerId === input.customerId);
     const openingBalance = transactions

@@ -49,11 +49,11 @@ fingerprint, signing key ID, and lease bearer token. Unknown receipt or envelope
 fields are rejected. Prompts, replies, chat messages, filenames, files, meeting
 content, user names, and personal identifiers are not accepted by this schema.
 
-A private deployment may host multiple customer organizations. All receipts
-remain bound to the same licensed deployment and customer credit account, while
-`organizationId` provides per-enterprise attribution for statements and cost
-reports. It does not grant access to an organization's business data and is not
-used as an authentication credential.
+A private deployment may host multiple customer organizations. Every receipt
+remains bound to the licensed deployment and customer, but Control debits the
+separate account keyed by `customerId + organizationId`. One enterprise can
+never consume another enterprise's balance. `organizationId` still does not
+grant access to business data and is not an authentication credential by itself.
 
 ## Verification and settlement
 
@@ -61,7 +61,7 @@ Control validates the License binding, active deployment, short lease, receipt
 validity window, registered key, Ed25519 signature, centrally configured rate,
 and available credits. PostgreSQL then performs the following in one transaction:
 
-1. Lock the customer credit account and deployment sequence.
+1. Lock the customer-and-organization credit account and deployment sequence.
 2. Return the original result for a byte-equivalent receipt-ID replay.
 3. Require the next contiguous sequence number.
 4. Reject a second receipt for the same deployment and task ID.

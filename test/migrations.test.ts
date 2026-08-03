@@ -48,6 +48,12 @@ describe('PostgreSQL migrations', () => {
       statement.includes('CREATE TABLE IF NOT EXISTS control_credit_transactions')
     ))).toBe(true);
     expect(statements.some((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_enterprise_credit_accounts')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_legacy_credit_accounts')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
       statement.includes('CREATE TABLE IF NOT EXISTS control_execution_receipts')
     ))).toBe(true);
     expect(statements.some((statement) => (

@@ -87,6 +87,7 @@ describe('commercial credit billing', () => {
       creditsPerUnit: 3,
     }, 'admin');
     await service.topUp(CUSTOMER_ID, {
+      organizationId: ORGANIZATION_ID,
       amount: 100,
       idempotencyKey: 'topup:invoice-1',
       referenceId: 'invoice-1',
@@ -106,7 +107,7 @@ describe('commercial credit billing', () => {
     expect(first.account.availableBalance).toBe(94);
     expect(replay.replayed).toBe(true);
     expect(replay.transaction.id).toBe(first.transaction.id);
-    expect((await service.account(CUSTOMER_ID)).availableBalance).toBe(94);
+    expect((await service.account(CUSTOMER_ID, ORGANIZATION_ID)).availableBalance).toBe(94);
     await expect(service.consumeUsage({ ...request, units: 2_001 }, token))
       .rejects.toMatchObject({ code: 'CONFLICT' });
   });
@@ -117,6 +118,7 @@ describe('commercial credit billing', () => {
       module: 'meeting_agent', unitSize: 30, creditsPerUnit: 4,
     }, 'admin');
     await service.topUp(CUSTOMER_ID, {
+      organizationId: ORGANIZATION_ID,
       amount: 50, idempotencyKey: 'topup:meeting', referenceId: 'invoice-meeting',
     }, 'admin');
 
@@ -147,6 +149,7 @@ describe('commercial credit billing', () => {
       module: 'park_service', unitSize: 1, creditsPerUnit: 10,
     }, 'admin');
     await service.topUp(CUSTOMER_ID, {
+      organizationId: ORGANIZATION_ID,
       amount: 100, idempotencyKey: 'topup:park', referenceId: 'invoice-park',
     }, 'admin');
     const consumed = await service.consumeUsage({
@@ -175,7 +178,7 @@ describe('commercial credit billing', () => {
       idempotencyKey: 'refund:park-over',
       referenceId: 'refund-order-over',
     }, 'finance-admin')).rejects.toMatchObject({ code: 'CONFLICT' });
-    expect((await service.account(CUSTOMER_ID)).availableBalance).toBe(100);
+    expect((await service.account(CUSTOMER_ID, ORGANIZATION_ID)).availableBalance).toBe(100);
   });
 
   it('automatically releases expired holds and exports auditable statements', async () => {
@@ -190,6 +193,7 @@ describe('commercial credit billing', () => {
       module: 'model_gateway', unitSize: 100, creditsPerUnit: 2,
     }, 'admin');
     await service.topUp(CUSTOMER_ID, {
+      organizationId: ORGANIZATION_ID,
       amount: 20, idempotencyKey: 'topup:expiry', referenceId: 'invoice-expiry',
     }, 'admin');
     await service.createHold({
@@ -198,7 +202,7 @@ describe('commercial credit billing', () => {
       idempotencyKey: 'hold:expiry',
     }, token);
     clock += 61_000;
-    expect(await service.account(CUSTOMER_ID)).toMatchObject({
+    expect(await service.account(CUSTOMER_ID, ORGANIZATION_ID)).toMatchObject({
       availableBalance: 20,
       frozenBalance: 0,
     });

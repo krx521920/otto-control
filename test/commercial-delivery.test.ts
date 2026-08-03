@@ -53,7 +53,7 @@ function fixture() {
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
     }],
-    billing: { account: {}, rates: [], transactions: [] },
+    billing: { account: {}, accounts: [{}], rates: [], transactions: [] },
     telemetry: {
       totalEvents: 0,
       byType: {},

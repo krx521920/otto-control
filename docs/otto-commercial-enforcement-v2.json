@@ -15,7 +15,7 @@
   },
   "tenantAttribution": {
     "multipleOrganizationsPerDeployment": true,
-    "creditOwner": "deployment_customer",
+    "creditOwner": "customer_organization",
     "organizationIdIsCredential": false
   },
   "receiptFields": [

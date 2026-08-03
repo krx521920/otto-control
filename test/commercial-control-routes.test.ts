@@ -537,6 +537,7 @@ describe('commercial control HTTP routes', () => {
     expect(rateResponse.statusCode).toBe(200);
 
     const topupRequest = {
+      organizationId: 'org_billing_route',
       amount: 50,
       idempotencyKey: 'topup:route-1',
       referenceId: 'invoice-route-1',
@@ -551,6 +552,20 @@ describe('commercial control HTTP routes', () => {
       payload: topupRequest,
     });
     expect(topupResponse.statusCode).toBe(201);
+    expect(topupResponse.json()).toMatchObject({
+      account: { organizationId: 'org_billing_route', availableBalance: 50 },
+      transaction: { organizationId: 'org_billing_route', type: 'topup' },
+    });
+
+    const accountResponse = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/billing/customers/${customerId}/account?organizationId=org_billing_route`,
+      headers: authorization,
+    });
+    expect(accountResponse.statusCode).toBe(200);
+    expect(accountResponse.json()).toMatchObject({
+      account: { organizationId: 'org_billing_route', availableBalance: 50 },
+    });
 
     const usageRequest = {
       version: 1,
@@ -633,11 +648,28 @@ describe('commercial control HTTP routes', () => {
       key: { keyId: receiptSigner.keyId, status: 'active' },
     });
     const issuedAtMs = Date.now();
+    const betaOrganizationId = 'org_billing_route_tenant_beta';
+    const betaTopupRequest = {
+      organizationId: betaOrganizationId,
+      amount: 25,
+      idempotencyKey: 'topup:route-beta',
+      referenceId: 'invoice-route-beta',
+    };
+    const betaTopupApproval = await approvedOperation(
+      'billing.topup', 'customer', customerId, betaTopupRequest,
+    );
+    const betaTopupResponse = await app.inject({
+      method: 'POST',
+      url: `/v1/admin/billing/customers/${customerId}/topups`,
+      headers: { ...authorization, 'x-otto-approval-id': betaTopupApproval },
+      payload: betaTopupRequest,
+    });
+    expect(betaTopupResponse.statusCode).toBe(201);
     const receipt = {
       version: 2,
       receiptId: 'exec_77777777777777777777777777777777',
       deploymentId,
-      organizationId: 'org_billing_route_tenant_beta',
+      organizationId: betaOrganizationId,
       taskId: 'task_route_receipt_1',
       moduleId: 'model_gateway',
       units: 1_001,
@@ -663,7 +695,7 @@ describe('commercial control HTTP routes', () => {
     });
     expect(receiptResponse.statusCode).toBe(201);
     expect(receiptResponse.json()).toMatchObject({
-      account: { availableBalance: 42 },
+      account: { organizationId: betaOrganizationId, availableBalance: 21 },
       transaction: { billedAmount: 4 },
       receipt: { verificationStatus: 'verified', sequence: 1 },
     });

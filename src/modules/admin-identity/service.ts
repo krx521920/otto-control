@@ -68,7 +68,9 @@ const APPROVAL_REQUEST_FIELDS: Readonly<Record<string, readonly string[]>> = {
   'update_release.rollback': [],
   'release_artifact.revoke': ['reason'],
   'billing.rate.set': ['module', 'unitSize', 'creditsPerUnit'],
-  'billing.topup': ['amount', 'idempotencyKey', 'referenceId', 'description'],
+  'billing.topup': [
+    'organizationId', 'amount', 'idempotencyKey', 'referenceId', 'description',
+  ],
   'billing.refund': ['amount', 'idempotencyKey', 'transactionId', 'referenceId', 'description'],
   'billing.execution_receipt_key.register': [
     'publicKeyPem', 'keyId', 'notBefore', 'expiresAt',

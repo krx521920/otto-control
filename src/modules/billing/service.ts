@@ -138,9 +138,10 @@ export class BillingService {
     this.#allowLegacyUsageReports = options.allowLegacyUsageReports ?? true;
   }
 
-  async account(customerId: string) {
+  async account(customerId: string, organizationId: string) {
+    if (!ID_PATTERN.test(organizationId)) throw invalidRequest('organizationId is invalid');
     await this.#releaseExpiredHolds(customerId);
-    const account = await this.#store.getCreditAccount(customerId);
+    const account = await this.#store.getCreditAccount(customerId, organizationId);
     if (!account) throw notFound('credit account not found');
     return account;
   }
@@ -286,26 +287,29 @@ export class BillingService {
 
   async topUp(customerId: string, raw: unknown, actorId: string): Promise<CreditMutationResult> {
     const body = objectValue(raw);
+    const organizationId = requiredString(body, 'organizationId');
+    if (!ID_PATTERN.test(organizationId)) throw invalidRequest('organizationId is invalid');
     const amount = positiveInteger(body.amount, 'amount');
     const key = idempotencyKey(body);
     const referenceId = requiredString(body, 'referenceId');
     const result = await this.#store.topUpCredits({
       transactionId: transactionId(),
       customerId,
+      organizationId,
       amount,
       idempotencyKey: key,
       referenceId,
       description: optionalDescription(body, 'Credit top-up'),
-      metadata: { channel: 'admin' },
+      metadata: { channel: 'admin', organizationId },
       occurredAt: new Date(this.#now()),
     });
     if (!result.replayed) {
       await this.#store.appendAuditEvent({
         actorId,
         action: 'billing.topup',
-        targetType: 'customer',
-        targetId: customerId,
-        detail: { amount, transactionId: result.transaction.id, referenceId },
+        targetType: 'organization',
+        targetId: organizationId,
+        detail: { customerId, amount, transactionId: result.transaction.id, referenceId },
       });
     }
     return result;

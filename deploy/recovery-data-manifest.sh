@@ -150,6 +150,8 @@ for required_table in \
   control_deployments \
   control_licenses \
   control_signing_keys \
+  control_enterprise_credit_accounts \
+  control_legacy_credit_accounts \
   control_credit_transactions \
   control_audit_events \
   control_audit_chain_state \

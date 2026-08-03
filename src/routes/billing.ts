@@ -14,11 +14,19 @@ export async function registerBillingRoutes(
   options: BillingRouteOptions,
 ): Promise<void> {
   app.register(async (admin) => {
-    admin.get<{ Params: { customerId: string } }>(
+    admin.get<{
+      Params: { customerId: string };
+      Querystring: { organizationId?: string };
+    }>(
       '/billing/customers/:customerId/account',
       async (request) => {
         await authenticateAdmin(request, options, 'billing.read');
-        return { account: await options.service.account(request.params.customerId) };
+        return {
+          account: await options.service.account(
+            request.params.customerId,
+            request.query.organizationId ?? '',
+          ),
+        };
       },
     );
 

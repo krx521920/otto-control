@@ -481,7 +481,10 @@ export interface ControlStore {
     nonce: string;
     expiresAtMs: number;
   }): Promise<boolean>;
-  getCreditAccount(customerId: string): Promise<CreditAccountRecord | null>;
+  getCreditAccount(
+    customerId: string,
+    organizationId: string,
+  ): Promise<CreditAccountRecord | null>;
   setBillingRate(input: {
     customerId: string;
     module: OttoBillingModule;
@@ -495,6 +498,7 @@ export interface ControlStore {
   topUpCredits(input: {
     transactionId: string;
     customerId: string;
+    organizationId: string;
     amount: number;
     idempotencyKey: string;
     referenceId: string;

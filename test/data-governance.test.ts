@@ -39,6 +39,7 @@ const snapshot: CustomerDataExportSnapshot = {
   licenses: [],
   billing: {
     account: null,
+    accounts: [],
     rates: [],
     transactions: [{ id: 'tx_001', metadata: { apiToken: 'must-not-leak', purpose: 'invoice' } }],
   },

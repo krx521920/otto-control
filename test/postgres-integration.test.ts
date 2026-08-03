@@ -446,6 +446,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       module: 'model_gateway', unitSize: 1_000, creditsPerUnit: 3,
     }, 'admin:test');
     await billing.topUp(customer.id, {
+      organizationId: ORGANIZATION_ID,
       amount: 100,
       idempotencyKey: 'topup:postgres-integration',
       referenceId: 'invoice:postgres-integration',
@@ -466,7 +467,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
     ));
     expect(new Set(results.map((result) => result.transaction.id)).size).toBe(1);
     expect(results.filter((result) => !result.replayed)).toHaveLength(1);
-    expect(await billing.account(customer.id)).toMatchObject({
+    expect(await billing.account(customer.id, ORGANIZATION_ID)).toMatchObject({
       availableBalance: 94,
       totalConsumed: 6,
     });
@@ -517,6 +518,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       module: 'model_gateway', unitSize: 1_000, creditsPerUnit: 3,
     }, 'admin:test');
     await billing.topUp(customer.id, {
+      organizationId: ORGANIZATION_ID,
       amount: 100,
       idempotencyKey: 'topup:postgres-receipt',
       referenceId: 'invoice:postgres-receipt',
@@ -550,7 +552,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
     ));
     expect(new Set(results.map((result) => result.transaction.id)).size).toBe(1);
     expect(results.filter((result) => !result.replayed)).toHaveLength(1);
-    expect(await billing.account(customer.id)).toMatchObject({
+    expect(await billing.account(customer.id, ORGANIZATION_ID)).toMatchObject({
       availableBalance: 94,
       totalConsumed: 6,
     });
