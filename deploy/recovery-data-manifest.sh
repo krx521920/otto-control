@@ -116,8 +116,13 @@ OUTPUT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$OUTPUT")" && pwd)
 OUTPUT="$OUTPUT_DIRECTORY/$(basename -- "$OUTPUT")"
 TEMP_FILE="$OUTPUT.part.$$"
 BODY_FILE="$OUTPUT.body.$$"
+SQL_FILE="$OUTPUT.sql.$$"
+RAW_FILE="$OUTPUT.raw.$$"
+TABLES_FILE="$OUTPUT.tables.$$"
+ROWS_DIR="$OUTPUT.rows.$$"
 cleanup() {
-  rm -f -- "$TEMP_FILE" "$BODY_FILE"
+  rm -f -- "$TEMP_FILE" "$BODY_FILE" "$SQL_FILE" "$RAW_FILE" "$TABLES_FILE"
+  rm -rf -- "$ROWS_DIR"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -129,42 +134,6 @@ psql_value() {
     --set=ON_ERROR_STOP=1 \
     --tuples-only --no-align \
     --command "$1"
-}
-
-table_manifest() {
-  table=$1
-  exists=$(psql_value "SELECT CASE WHEN to_regclass('public.$table') IS NULL THEN 'missing' ELSE 'ok' END")
-  if [ "$exists" != ok ]; then
-    printf 'recovery manifest is missing required table: %s\n' "$table" >&2
-    exit 1
-  fi
-  count=$(psql_value "SELECT COUNT(*) FROM $table")
-  case "$count" in
-    ''|*[!0-9]*)
-      printf 'invalid row count while fingerprinting table: %s\n' "$table" >&2
-      exit 1
-      ;;
-  esac
-  sha256=$(service_exec psql \
-    --username "$DATABASE_USER" \
-    --dbname "$DATABASE" \
-    --port "$DATABASE_PORT" \
-    --set=ON_ERROR_STOP=1 \
-    --command "COPY (SELECT row_to_json(source_row)::text FROM $table AS source_row ORDER BY row_to_json(source_row)::text COLLATE \"C\") TO STDOUT" |
-    sha256sum | awk '{print $1}')
-  case "$sha256" in
-    [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) ;;
-    *)
-      printf 'invalid SHA-256 while fingerprinting table: %s\n' "$table" >&2
-      exit 1
-      ;;
-  esac
-  if [ "${#sha256}" -ne 64 ]; then
-    printf 'invalid SHA-256 length while fingerprinting table: %s\n' "$table" >&2
-    exit 1
-  fi
-  printf 'table.%s.count=%s\n' "$table" "$count" >> "$BODY_FILE"
-  printf 'table.%s.sha256=%s\n' "$table" "$sha256" >> "$BODY_FILE"
 }
 
 : > "$BODY_FILE"
@@ -190,7 +159,10 @@ do
     exit 1
   fi
 done
-printf '%s\n' "$CONTROL_TABLES" | while IFS= read -r table; do
+printf '%s\n' "$CONTROL_TABLES" > "$TABLES_FILE"
+mkdir "$ROWS_DIR"
+printf '%s\n' 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;' > "$SQL_FILE"
+while IFS= read -r table; do
   case "$table" in
     control_*) ;;
     *)
@@ -204,8 +176,72 @@ printf '%s\n' "$CONTROL_TABLES" | while IFS= read -r table; do
       exit 1
       ;;
   esac
-  table_manifest "$table"
-done
+  : > "$ROWS_DIR/$table.rows"
+  printf '\\echo __OTTO_TABLE__ %s\n' "$table" >> "$SQL_FILE"
+  printf 'COPY (SELECT row_to_json(source_row)::text FROM %s AS source_row ORDER BY row_to_json(source_row)::text COLLATE "C") TO STDOUT;\n' \
+    "$table" >> "$SQL_FILE"
+  printf '\\echo __OTTO_END__ %s\n' "$table" >> "$SQL_FILE"
+done < "$TABLES_FILE"
+printf '%s\n' 'COMMIT;' >> "$SQL_FILE"
+
+service_exec psql \
+  --username "$DATABASE_USER" \
+  --dbname "$DATABASE" \
+  --port "$DATABASE_PORT" \
+  --set=ON_ERROR_STOP=1 \
+  --tuples-only --no-align --quiet < "$SQL_FILE" > "$RAW_FILE"
+
+if ! awk -v output_directory="$ROWS_DIR" '
+  /^__OTTO_TABLE__ / {
+    table = substr($0, length("__OTTO_TABLE__ ") + 1)
+    if (seen[table]++) exit 4
+    printf "%s", "" > (output_directory "/" table ".seen")
+    close(output_directory "/" table ".seen")
+    next
+  }
+  /^__OTTO_END__ / {
+    ended = substr($0, length("__OTTO_END__ ") + 1)
+    if (table == "" || ended != table) exit 2
+    table = ""
+    next
+  }
+  table != "" {
+    if ($0 !~ /^\{/) exit 5
+    print $0 >> (output_directory "/" table ".rows")
+  }
+  END { if (table != "") exit 3 }
+' "$RAW_FILE"; then
+  printf '%s\n' 'recovery manifest table stream is incomplete or malformed' >&2
+  exit 1
+fi
+
+while IFS= read -r table; do
+  if [ ! -f "$ROWS_DIR/$table.seen" ]; then
+    printf 'recovery manifest stream omitted table: %s\n' "$table" >&2
+    exit 1
+  fi
+  count=$(wc -l < "$ROWS_DIR/$table.rows" | tr -d '[:space:]')
+  case "$count" in
+    ''|*[!0-9]*)
+      printf 'invalid row count while fingerprinting table: %s\n' "$table" >&2
+      exit 1
+      ;;
+  esac
+  sha256=$(sha256sum "$ROWS_DIR/$table.rows" | awk '{print $1}')
+  case "$sha256" in
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) ;;
+    *)
+      printf 'invalid SHA-256 while fingerprinting table: %s\n' "$table" >&2
+      exit 1
+      ;;
+  esac
+  if [ "${#sha256}" -ne 64 ]; then
+    printf 'invalid SHA-256 length while fingerprinting table: %s\n' "$table" >&2
+    exit 1
+  fi
+  printf 'table.%s.count=%s\n' "$table" "$count" >> "$BODY_FILE"
+  printf 'table.%s.sha256=%s\n' "$table" "$sha256" >> "$BODY_FILE"
+done < "$TABLES_FILE"
 
 DATABASE_FINGERPRINT=$(sha256sum "$BODY_FILE" | awk '{print $1}')
 {

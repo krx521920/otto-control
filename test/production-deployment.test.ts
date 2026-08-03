@@ -410,6 +410,9 @@ describe('production deployment assets', () => {
     expect(manifest).toContain('database_fingerprint_sha256');
     expect(manifest).toContain('control_credit_transactions');
     expect(manifest).toContain('control_audit_witness_evidence');
+    expect(manifest).toContain('REPEATABLE READ READ ONLY');
+    expect(manifest).toContain('__OTTO_TABLE__');
+    expect(manifest).toContain('__OTTO_END__');
   });
 
   it('fails unhealthy deployments before launch and drills every Control replica', () => {
