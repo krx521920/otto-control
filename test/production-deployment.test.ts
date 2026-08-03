@@ -303,6 +303,7 @@ describe('production deployment assets', () => {
     expect(backup).toContain('pg_restore --list');
     expect(backup).toContain('.dump.enc');
     expect(backup).toContain('backup-crypto.mjs');
+    expect(backup).toContain('decrypt-run');
     expect(backup).toContain('mkfifo');
     expect(backup).toContain('sha256sum');
     expect(backup).toContain('replicate-backup-s3.mjs');
@@ -338,6 +339,8 @@ describe('production deployment assets', () => {
     expect(drill).toContain('result=passed');
     expect(drill).toContain('CONTROL_DRILL_MAX_BACKUP_AGE_HOURS');
     expect(drill).toContain('backup_age_seconds');
+    expect(drill).toContain('decrypt-run');
+    expect(drill).not.toContain('RESTORE_PIPE');
     expect(drill).toContain('dropdb');
     expect(drill).not.toContain('compose stop control');
     expect(service).toContain('TimeoutStartSec=2h');

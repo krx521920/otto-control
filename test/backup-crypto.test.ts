@@ -66,4 +66,68 @@ describe('backup encryption', () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it('authenticates before streaming plaintext into a managed command', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'otto-control-backup-command-'));
+    try {
+      const input = join(directory, 'input.dump');
+      const encrypted = join(directory, 'backup.dump.enc');
+      const output = join(directory, 'command-output.dump');
+      const key = join(directory, 'backup-key');
+      const content = randomBytes(128 * 1024);
+      writeFileSync(input, content);
+      writeFileSync(key, randomBytes(48).toString('base64url'));
+      expect(cryptoCommand([
+        'encrypt', '--input', input, '--output', encrypted, '--key-file', key,
+      ]).status).toBe(0);
+
+      const command = cryptoCommand([
+        'decrypt-run', '--input', encrypted, '--key-file', key,
+        '--', process.execPath, '-e',
+        "const fs=require('node:fs');const chunks=[];process.stdin.on('data',chunk=>chunks.push(chunk));process.stdin.on('end',()=>fs.writeFileSync(process.argv.at(-1),Buffer.concat(chunks)));",
+        output,
+      ]);
+      expect(command.status, command.stderr).toBe(0);
+      expect(readFileSync(output)).toEqual(content);
+
+      const tampered = readFileSync(encrypted);
+      tampered[Math.floor(tampered.length / 2)]! ^= 1;
+      writeFileSync(encrypted, tampered);
+      rmSync(output);
+      const rejected = cryptoCommand([
+        'decrypt-run', '--input', encrypted, '--key-file', key,
+        '--', process.execPath, '-e',
+        "require('node:fs').writeFileSync(process.argv.at(-1),'command-started');process.stdin.resume();",
+        output,
+      ]);
+      expect(rejected.status).toBe(1);
+      expect(() => readFileSync(output)).toThrow();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('fails when the managed restore command rejects the decrypted stream', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'otto-control-backup-command-failure-'));
+    try {
+      const input = join(directory, 'input.dump');
+      const encrypted = join(directory, 'backup.dump.enc');
+      const key = join(directory, 'backup-key');
+      writeFileSync(input, randomBytes(64 * 1024));
+      writeFileSync(key, randomBytes(48).toString('base64url'));
+      expect(cryptoCommand([
+        'encrypt', '--input', input, '--output', encrypted, '--key-file', key,
+      ]).status).toBe(0);
+
+      const command = cryptoCommand([
+        'decrypt-run', '--input', encrypted, '--key-file', key,
+        '--', process.execPath, '-e',
+        "process.stdin.resume();process.stdin.on('end',()=>process.exit(7));",
+      ]);
+      expect(command.status).toBe(1);
+      expect(command.stderr).toContain('exited with code 7');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 15_000);
 });

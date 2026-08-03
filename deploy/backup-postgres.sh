@@ -82,15 +82,11 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 
 DUMP_PIPE=''
-DECRYPT_PIPE=''
 DUMP_PID=''
-DECRYPT_PID=''
 TEMP_FILE=''
 cleanup() {
   if [ -n "$DUMP_PID" ]; then kill "$DUMP_PID" 2>/dev/null || true; fi
-  if [ -n "$DECRYPT_PID" ]; then kill "$DECRYPT_PID" 2>/dev/null || true; fi
   if [ -n "$DUMP_PIPE" ]; then rm -f -- "$DUMP_PIPE"; fi
-  if [ -n "$DECRYPT_PIPE" ]; then rm -f -- "$DECRYPT_PIPE"; fi
   if [ -n "$TEMP_FILE" ]; then rm -f -- "$TEMP_FILE"; fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
@@ -131,28 +127,20 @@ if [ ! -s "$TEMP_FILE" ]; then
   printf '%s\n' 'PostgreSQL produced an empty backup' >&2
   exit 1
 fi
-DECRYPT_PIPE="$BACKUP_DIR/.verify-$$.pipe"
-mkfifo "$DECRYPT_PIPE"
-node "$ROOT/scripts/backup-crypto.mjs" decrypt \
+if [ "$COMPOSE_MODE" = plugin ]; then
+  set -- docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE"
+else
+  set -- docker-compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE"
+fi
+if ! node "$ROOT/scripts/backup-crypto.mjs" decrypt-run \
   --input "$TEMP_FILE" \
-  --output - \
-  --key-file "$BACKUP_KEY_FILE" > "$DECRYPT_PIPE" &
-DECRYPT_PID=$!
-if ! compose exec -T postgres-tools pg_restore --list < "$DECRYPT_PIPE" >/dev/null; then
-  kill "$DECRYPT_PID" 2>/dev/null || true
-  wait "$DECRYPT_PID" 2>/dev/null || true
-  DECRYPT_PID=''
+  --key-file "$BACKUP_KEY_FILE" \
+  --command-stdout ignore \
+  -- "$@" exec -T postgres-tools pg_restore --list
+then
   printf '%s\n' 'encrypted PostgreSQL backup validation failed' >&2
   exit 1
 fi
-if ! wait "$DECRYPT_PID"; then
-  DECRYPT_PID=''
-  printf '%s\n' 'encrypted PostgreSQL backup authentication failed' >&2
-  exit 1
-fi
-DECRYPT_PID=''
-rm -f -- "$DECRYPT_PIPE"
-DECRYPT_PIPE=''
 mv -- "$TEMP_FILE" "$FINAL_FILE"
 TEMP_FILE=''
 

@@ -112,13 +112,9 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 
 DRILL_DATABASE=''
-RESTORE_PIPE=''
-RESTORE_PID=''
 REPORT_TEMP=''
 MANIFEST_TEMP=''
 cleanup() {
-  if [ -n "$RESTORE_PID" ]; then kill "$RESTORE_PID" 2>/dev/null || true; fi
-  if [ -n "$RESTORE_PIPE" ]; then rm -f -- "$RESTORE_PIPE"; fi
   if [ -n "$REPORT_TEMP" ]; then rm -f -- "$REPORT_TEMP"; fi
   if [ -n "$MANIFEST_TEMP" ]; then rm -f -- "$MANIFEST_TEMP"; fi
   if [ -n "$DRILL_DATABASE" ]; then
@@ -156,33 +152,23 @@ compose exec -T postgres-tools createdb \
   --template template0 \
   "$DRILL_DATABASE"
 
-RESTORE_PIPE="$BACKUP_DIR/.drill-restore-$$.pipe"
-mkfifo "$RESTORE_PIPE"
-node "$ROOT/scripts/backup-crypto.mjs" decrypt \
+if [ "$COMPOSE_MODE" = plugin ]; then
+  set -- docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE"
+else
+  set -- docker-compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE"
+fi
+if ! node "$ROOT/scripts/backup-crypto.mjs" decrypt-run \
   --input "$BACKUP_PATH" \
-  --output - \
-  --key-file "$BACKUP_KEY_FILE" > "$RESTORE_PIPE" &
-RESTORE_PID=$!
-if ! compose exec -T postgres-tools pg_restore \
-  --username "$DB_USER" \
-  --dbname "$DRILL_DATABASE" \
-  --no-owner \
-  --exit-on-error < "$RESTORE_PIPE"
+  --key-file "$BACKUP_KEY_FILE" \
+  -- "$@" exec -T postgres-tools pg_restore \
+    --username "$DB_USER" \
+    --dbname "$DRILL_DATABASE" \
+    --no-owner \
+    --exit-on-error
 then
-  kill "$RESTORE_PID" 2>/dev/null || true
-  wait "$RESTORE_PID" 2>/dev/null || true
-  RESTORE_PID=''
   printf '%s\n' 'restore drill failed while loading PostgreSQL' >&2
   exit 1
 fi
-if ! wait "$RESTORE_PID"; then
-  RESTORE_PID=''
-  printf '%s\n' 'restore drill failed backup authentication' >&2
-  exit 1
-fi
-RESTORE_PID=''
-rm -f -- "$RESTORE_PIPE"
-RESTORE_PIPE=''
 
 REQUIRED_TABLES='control_schema_migrations control_customers control_deployments control_licenses control_signing_keys control_audit_events control_telemetry_events control_update_distributions control_update_releases control_deployment_update_assignments control_admin_accounts control_admin_roles control_admin_sessions control_admin_approvals control_admin_approval_decisions'
 for TABLE in $REQUIRED_TABLES; do

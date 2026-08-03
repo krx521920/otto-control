@@ -4,6 +4,7 @@ import {
   randomBytes,
   scrypt as deriveKey,
 } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import {
   appendFileSync,
   closeSync,
@@ -17,6 +18,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
+import { Writable } from 'node:stream';
 import { promisify } from 'node:util';
 
 const MAGIC = Buffer.from('OTTOCBK1', 'ascii');
@@ -63,7 +65,7 @@ async function encrypt(input, output, keyFile) {
   }
 }
 
-async function decrypt(input, output, keyFile) {
+async function decryptionStreams(input, keyFile) {
   const size = statSync(input).size;
   if (size <= HEADER_BYTES + TAG_BYTES) throw new Error('encrypted backup is truncated');
 
@@ -94,6 +96,22 @@ async function decrypt(input, output, keyFile) {
     end: size - TAG_BYTES - 1,
   });
 
+  return { source, decipher };
+}
+
+async function authenticateEncryptedBackup(input, keyFile) {
+  const { source, decipher } = await decryptionStreams(input, keyFile);
+  const discard = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  await pipeline(source, decipher, discard);
+}
+
+async function decrypt(input, output, keyFile) {
+  const { source, decipher } = await decryptionStreams(input, keyFile);
+
   if (output === '-') {
     await pipeline(source, decipher, process.stdout);
     return;
@@ -106,14 +124,67 @@ async function decrypt(input, output, keyFile) {
   }
 }
 
+function commandArguments() {
+  const separator = process.argv.indexOf('--');
+  if (separator < 0 || !process.argv[separator + 1]) {
+    throw new Error('decrypt-run requires -- COMMAND [ARGUMENTS...]');
+  }
+  return {
+    command: process.argv[separator + 1],
+    args: process.argv.slice(separator + 2),
+  };
+}
+
+function waitForCommand(child) {
+  return new Promise((resolveCommand, rejectCommand) => {
+    child.once('error', rejectCommand);
+    child.once('exit', (code, signal) => {
+      if (code === 0) {
+        resolveCommand();
+        return;
+      }
+      rejectCommand(new Error(
+        signal
+          ? `decrypted stream command terminated by ${signal}`
+          : `decrypted stream command exited with code ${code ?? 'unknown'}`,
+      ));
+    });
+  });
+}
+
+async function decryptRun(input, keyFile) {
+  await authenticateEncryptedBackup(input, keyFile);
+  const { command, args } = commandArguments();
+  const stdoutMode = option('--command-stdout') || 'inherit';
+  if (stdoutMode !== 'inherit' && stdoutMode !== 'ignore') {
+    throw new Error('--command-stdout must be inherit or ignore');
+  }
+  const child = spawn(command, args, {
+    stdio: ['pipe', stdoutMode, 'inherit'],
+    windowsHide: true,
+  });
+  const commandResult = waitForCommand(child);
+  commandResult.catch(() => undefined);
+  try {
+    const { source, decipher } = await decryptionStreams(input, keyFile);
+    await pipeline(source, decipher, child.stdin);
+    await commandResult;
+  } catch (error) {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    await commandResult.catch(() => undefined);
+    throw error;
+  }
+}
+
 async function main() {
   const action = process.argv[2];
   const input = requiredOption('--input');
-  const output = requiredOption('--output');
   const keyFile = requiredOption('--key-file');
+  if (action === 'decrypt-run') return decryptRun(input, keyFile);
+  const output = requiredOption('--output');
   if (action === 'encrypt') return encrypt(input, output, keyFile);
   if (action === 'decrypt') return decrypt(input, output, keyFile);
-  throw new Error('action must be encrypt or decrypt');
+  throw new Error('action must be encrypt, decrypt, or decrypt-run');
 }
 
 try {
