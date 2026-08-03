@@ -116,6 +116,15 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       );
       expect(migrations.rows.map((row) => row.id)).toEqual(CONTROL_SCHEMA_MIGRATION_IDS);
       expect(new Set(migrations.rows.map((row) => row.id)).size).toBe(migrations.rows.length);
+      await expect(first.runDataRetention({
+        telemetryBefore: new Date(NOW - 24 * 60 * 60 * 1_000),
+        exportPayloadBefore: new Date(NOW - 24 * 60 * 60 * 1_000),
+        now: new Date(NOW),
+      })).resolves.toEqual({
+        telemetryEventsDeleted: 0,
+        expiredNoncesDeleted: 0,
+        expiredExportPayloadsRestricted: 0,
+      });
       const billingPolicyColumn = await pool.query<{
         column_name: string;
         column_default: string;

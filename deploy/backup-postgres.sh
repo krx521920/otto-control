@@ -111,8 +111,7 @@ compose exec -T postgres-tools pg_dump \
   --dbname "$DB_NAME" \
   --format custom \
   --compress 9 \
-  --no-owner \
-  --file - > "$DUMP_PIPE" &
+  --no-owner > "$DUMP_PIPE" &
 DUMP_PID=$!
 
 node "$ROOT/scripts/backup-crypto.mjs" encrypt \

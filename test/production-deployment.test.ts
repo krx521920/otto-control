@@ -313,6 +313,7 @@ describe('production deployment assets', () => {
       restore.indexOf('compose stop control-a control-b control-c'),
     );
     expect(backup).toContain('compose exec -T postgres-tools pg_dump');
+    expect(backup).not.toContain('--file -');
     expect(restore).toContain('compose exec -T postgres-tools pg_restore');
     expect(restore).toContain('sha256sum --check');
     expect(restore).toContain('backup-crypto.mjs');

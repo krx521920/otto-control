@@ -5002,7 +5002,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         nonces += result.rowCount ?? 0;
       }
       const restricted = await client.query(
-        `UPDATE control_data_governance_requests
+        `UPDATE control_data_governance_requests AS requests
          SET result = jsonb_build_object(
                'restricted', true,
                'reason', 'export delivery payload retention expired',
