@@ -678,7 +678,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.31.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.32.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -953,7 +953,11 @@ can approve or reject with a reason; self-approval is unavailable. The original
 requester can execute an approved operation once, after which the approval is
 atomically marked `executed`. License revocation requests can be created directly
 from the License lifecycle dialog, and the generic executor covers every
-server-supported approval operation.
+server-supported approval operation. The console action catalog is checked
+against all 18 server approval operation IDs at compile and test time, including
+execution-receipt key rotation and data-governance actions. Unknown future
+operations remain disabled instead of falling through to an unimplemented
+button.
 
 Newly issued or updated signed License envelopes, including their derived
 deployment credentials, exist only in page memory and can be downloaded as JSON

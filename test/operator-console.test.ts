@@ -3,6 +3,8 @@ import vm from 'node:vm';
 import Fastify from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { ADMIN_APPROVAL_OPERATIONS } from '../src/contracts/admin-identity.js';
+import { OPERATOR_CONSOLE_APPROVAL_ACTIONS } from '../src/modules/operator-console/approval-assets.js';
 import { registerOperatorConsoleRoutes } from '../src/routes/operator-console.js';
 
 describe('operator console assets', () => {
@@ -71,5 +73,45 @@ describe('operator console assets', () => {
     expect(response.body).toContain('approval.request || {}');
     expect(response.body).toContain('URL.createObjectURL(blob)');
     expect(response.body).toContain('otto-license-');
+  });
+
+  it('maps every approved high-risk operation to RBAC metadata and a real executor', async () => {
+    expect(Object.keys(OPERATOR_CONSOLE_APPROVAL_ACTIONS).sort()).toEqual(
+      [...ADMIN_APPROVAL_OPERATIONS].sort(),
+    );
+    const response = await app.inject({ method: 'GET', url: '/admin/assets/app.js' });
+    const executorStart = response.body.indexOf('const definitions = {');
+    const executorEnd = response.body.indexOf('return definitions[approval.operation]', executorStart);
+    expect(executorStart).toBeGreaterThan(-1);
+    expect(executorEnd).toBeGreaterThan(executorStart);
+    const executorSource = response.body.slice(executorStart, executorEnd);
+    for (const operation of ADMIN_APPROVAL_OPERATIONS) {
+      expect(executorSource, `${operation} executor`).toContain(`'${operation}'`);
+    }
+    expect(response.body).not.toContain('尚未接入控制台执行器');
+    expect(response.body).toContain('/execution-receipt-keys/');
+    expect(response.body).toContain('/data-governance/forensic-exports');
+  });
+
+  it('does not ship an unbound command button', async () => {
+    const [page, script] = await Promise.all([
+      app.inject({ method: 'GET', url: '/admin' }),
+      app.inject({ method: 'GET', url: '/admin/assets/app.js' }),
+    ]);
+    const buttons = [...page.body.matchAll(/<button\b([^>]*)>/gu)].map((match) => match[1]!);
+    const namedButtons = buttons
+      .map((attributes) => /\bid="([^"]+)"/u.exec(attributes)?.[1] ?? null)
+      .filter((id): id is string => id !== null);
+    expect(new Set(namedButtons).size).toBe(namedButtons.length);
+    for (const id of namedButtons) {
+      expect(script.body, `${id} binding`).toContain(`byId('${id}')`);
+    }
+    const anonymousCommands = buttons.filter((attributes) => !/\bid="/u.test(attributes));
+    for (const attributes of anonymousCommands) {
+      expect(
+        /\btype="submit"|\bdata-close=|\bdata-mode=|\bdata-tab=/u.test(attributes),
+        `anonymous button must use a declarative handler: ${attributes}`,
+      ).toBe(true);
+    }
   });
 });

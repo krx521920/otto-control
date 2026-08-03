@@ -1,6 +1,6 @@
 {
   "name": "otto-control",
-  "version": "0.31.0",
+  "version": "0.32.0",
   "private": true,
   "description": "Commercial control plane for Otto private deployments",
   "type": "module",

@@ -1,3 +1,38 @@
+import type { AdminApprovalOperation, AdminPermission } from '../../contracts/admin-identity.js';
+
+export const OPERATOR_CONSOLE_APPROVAL_ACTIONS = Object.freeze({
+  'license.revoke': { label: '吊销 License', permission: 'license.revoke' },
+  'license.transfer_machine': { label: '迁移授权机器', permission: 'license.transfer' },
+  'license.rebind_deployment': { label: '重绑授权部署', permission: 'license.transfer' },
+  'signing_key.activate': { label: '启用签名密钥', permission: 'signing_key.manage' },
+  'signing_key.retire': { label: '停用签名密钥', permission: 'signing_key.manage' },
+  'signing_key.revoke': { label: '紧急吊销密钥', permission: 'signing_key.manage' },
+  'update_release.activate': { label: '激活更新版本', permission: 'update_release.publish' },
+  'update_release.rollback': { label: '回滚更新版本', permission: 'update_release.publish' },
+  'release_artifact.revoke': { label: '吊销发行物', permission: 'update_release.publish' },
+  'billing.rate.set': { label: '调整计费费率', permission: 'billing.manage' },
+  'billing.topup': { label: '客户积分充值', permission: 'billing.topup' },
+  'billing.refund': { label: '客户积分退款', permission: 'billing.refund' },
+  'billing.execution_receipt_key.register': {
+    label: '登记执行收据公钥',
+    permission: 'billing.manage',
+  },
+  'billing.execution_receipt_key.revoke': {
+    label: '吊销执行收据公钥',
+    permission: 'billing.manage',
+  },
+  'customer_erasure.execute': {
+    label: '执行客户数据注销',
+    permission: 'customer_erasure.manage',
+  },
+  'legal_hold.create': { label: '创建法律保全', permission: 'legal_hold.manage' },
+  'legal_hold.release': { label: '解除法律保全', permission: 'legal_hold.manage' },
+  'forensic_export.create': { label: '创建审计取证导出', permission: 'forensic_export.create' },
+} satisfies Record<AdminApprovalOperation, {
+  label: string;
+  permission: AdminPermission;
+}>);
+
 export const OPERATOR_CONSOLE_APPROVAL_CSS = `.approval-table { min-width: 840px; }
 .approval-actions { display: flex; align-items: center; gap: 8px; }
 .approval-actions small { color: #71807a; }
@@ -15,35 +50,12 @@ export const OPERATOR_CONSOLE_APPROVAL_CSS = `.approval-table { min-width: 840px
 
 export const OPERATOR_CONSOLE_APPROVAL_JS = `let currentApproval = null;
 let latestApprovals = [];
-const approvalOperationLabels = {
-  'license.revoke': '吊销 License',
-  'license.transfer_machine': '迁移授权机器',
-  'license.rebind_deployment': '重绑授权部署',
-  'signing_key.activate': '启用签名密钥',
-  'signing_key.retire': '停用签名密钥',
-  'signing_key.revoke': '紧急吊销密钥',
-  'update_release.activate': '激活更新版本',
-  'update_release.rollback': '回滚更新版本',
-  'release_artifact.revoke': '吊销发行物',
-  'billing.rate.set': '调整计费费率',
-  'billing.topup': '客户积分充值',
-  'billing.refund': '客户积分退款',
-};
+const approvalOperationMetadata = ${JSON.stringify(OPERATOR_CONSOLE_APPROVAL_ACTIONS)};
+const approvalOperationLabels = Object.fromEntries(Object.entries(approvalOperationMetadata)
+  .map(([operation, metadata]) => [operation, metadata.label]));
 const approvalStatusLabels = { pending: '待复核', approved: '已批准', rejected: '已拒绝', executed: '已执行', expired: '已过期' };
-const approvalExecutionPermissions = {
-  'license.revoke': 'license.revoke',
-  'license.transfer_machine': 'license.transfer',
-  'license.rebind_deployment': 'license.transfer',
-  'signing_key.activate': 'signing_key.manage',
-  'signing_key.retire': 'signing_key.manage',
-  'signing_key.revoke': 'signing_key.manage',
-  'update_release.activate': 'update_release.publish',
-  'update_release.rollback': 'update_release.publish',
-  'release_artifact.revoke': 'update_release.publish',
-  'billing.rate.set': 'billing.manage',
-  'billing.topup': 'billing.topup',
-  'billing.refund': 'billing.refund',
-};
+const approvalExecutionPermissions = Object.fromEntries(Object.entries(approvalOperationMetadata)
+  .map(([operation, metadata]) => [operation, metadata.permission]));
 function approvalTone(status) {
   if (status === 'approved') return 'good';
   if (status === 'pending') return 'warning';
@@ -150,6 +162,13 @@ async function decideCurrentApproval(decision) {
 function approvalExecutionRequest(approval) {
   const id = encodeURIComponent(approval.targetId);
   const request = approval.request || {};
+  const receiptKeySeparator = approval.targetId.indexOf(':');
+  const receiptKeyTarget = receiptKeySeparator > 0 && receiptKeySeparator < approval.targetId.length - 1
+    ? {
+        deploymentId: encodeURIComponent(approval.targetId.slice(0, receiptKeySeparator)),
+        keyId: encodeURIComponent(approval.targetId.slice(receiptKeySeparator + 1)),
+      }
+    : null;
   const definitions = {
     'license.revoke': { path: '/v1/admin/licenses/' + id + '/revoke', method: 'POST' },
     'license.transfer_machine': { path: '/v1/admin/licenses/' + id + '/transfer-machine', method: 'POST', body: request },
@@ -163,6 +182,8 @@ function approvalExecutionRequest(approval) {
     'billing.rate.set': { path: '/v1/admin/billing/customers/' + id + '/rates/' + encodeURIComponent(request.module), method: 'PUT', body: request },
     'billing.topup': { path: '/v1/admin/billing/customers/' + id + '/topups', method: 'POST', body: request },
     'billing.refund': { path: '/v1/admin/billing/customers/' + id + '/refunds', method: 'POST', body: request },
+    'billing.execution_receipt_key.register': { path: '/v1/admin/deployments/' + id + '/execution-receipt-keys', method: 'POST', body: request },
+    'billing.execution_receipt_key.revoke': receiptKeyTarget ? { path: '/v1/admin/deployments/' + receiptKeyTarget.deploymentId + '/execution-receipt-keys/' + receiptKeyTarget.keyId + '/revoke', method: 'POST' } : null,
     'customer_erasure.execute': { path: '/v1/admin/data-governance/erasure-requests/' + id + '/execute', method: 'POST', body: request },
     'legal_hold.create': { path: '/v1/admin/data-governance/legal-holds', method: 'POST', body: request },
     'legal_hold.release': { path: '/v1/admin/data-governance/legal-holds/' + id + '/release', method: 'POST', body: request },
@@ -172,7 +193,7 @@ function approvalExecutionRequest(approval) {
 }
 async function executeApprovedApproval(approval, button) {
   const definition = approvalExecutionRequest(approval);
-  if (!definition) return toast('该操作尚未接入控制台执行器');
+  if (!definition) return toast('审批目标格式无效，已阻止执行');
   button.disabled = true;
   try {
     const options = { method: definition.method, headers: { 'x-otto-approval-id': approval.id } };
