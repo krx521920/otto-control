@@ -24,6 +24,7 @@ case "$BACKUP_DIR" in
 esac
 REPORT_DIR="$BACKUP_DIR/drills"
 mkdir -p "$BACKUP_DIR" "$REPORT_DIR"
+EXPECTED_MANIFEST=${OTTO_CONTROL_RECOVERY_EXPECTED_MANIFEST:-}
 
 if [ "$#" -eq 1 ]; then
   BACKUP_PATH=$1
@@ -114,10 +115,12 @@ DRILL_DATABASE=''
 RESTORE_PIPE=''
 RESTORE_PID=''
 REPORT_TEMP=''
+MANIFEST_TEMP=''
 cleanup() {
   if [ -n "$RESTORE_PID" ]; then kill "$RESTORE_PID" 2>/dev/null || true; fi
   if [ -n "$RESTORE_PIPE" ]; then rm -f -- "$RESTORE_PIPE"; fi
   if [ -n "$REPORT_TEMP" ]; then rm -f -- "$REPORT_TEMP"; fi
+  if [ -n "$MANIFEST_TEMP" ]; then rm -f -- "$MANIFEST_TEMP"; fi
   if [ -n "$DRILL_DATABASE" ]; then
     compose exec -T postgres-tools dropdb \
       --username "$DB_USER" --if-exists --force "$DRILL_DATABASE" >/dev/null 2>&1 || true
@@ -210,6 +213,24 @@ case "$MIGRATION_COUNT" in
     ;;
 esac
 
+MANIFEST_NAME="restore-drill-$(date -u '+%Y%m%dT%H%M%SZ').manifest"
+MANIFEST_FILE="$REPORT_DIR/$MANIFEST_NAME"
+MANIFEST_TEMP="$REPORT_DIR/.$MANIFEST_NAME.part.$$"
+set -- \
+  --service postgres-tools \
+  --database "$DRILL_DATABASE" \
+  --user "$DB_USER" \
+  --output "$MANIFEST_TEMP"
+if [ -n "$EXPECTED_MANIFEST" ]; then
+  set -- "$@" --expected "$EXPECTED_MANIFEST"
+fi
+sh "$ROOT/deploy/recovery-data-manifest.sh" "$@"
+DATABASE_FINGERPRINT=$(sed -n 's/^database_fingerprint_sha256=//p' "$MANIFEST_TEMP" | tail -n 1)
+if [ -z "$DATABASE_FINGERPRINT" ]; then
+  printf '%s\n' 'restore drill did not produce a database fingerprint' >&2
+  exit 1
+fi
+
 compose exec -T postgres-tools dropdb \
   --username "$DB_USER" --if-exists --force "$DRILL_DATABASE"
 DRILL_DATABASE=''
@@ -233,9 +254,19 @@ REPORT_FILE="$REPORT_DIR/$REPORT_NAME"
   printf 'deployments=%s\n' "$DEPLOYMENT_COUNT"
   printf 'licenses=%s\n' "$LICENSE_COUNT"
   printf 'audit_events=%s\n' "$AUDIT_COUNT"
+  printf 'database_fingerprint_sha256=%s\n' "$DATABASE_FINGERPRINT"
+  printf 'recovery_manifest=%s\n' "$MANIFEST_NAME"
+  if [ -n "$EXPECTED_MANIFEST" ]; then
+    printf 'expected_manifest=%s\n' "$(basename -- "$EXPECTED_MANIFEST")"
+    printf 'expected_manifest_matched=true\n'
+  else
+    printf 'expected_manifest_matched=not_requested\n'
+  fi
 } > "$REPORT_TEMP"
 mv -- "$REPORT_TEMP" "$REPORT_FILE"
 REPORT_TEMP=''
+mv -- "$MANIFEST_TEMP" "$MANIFEST_FILE"
+MANIFEST_TEMP=''
 
 find "$REPORT_DIR" -type f -name 'restore-drill-*.txt' \
   -mtime "+$REPORT_RETENTION_DAYS" -delete

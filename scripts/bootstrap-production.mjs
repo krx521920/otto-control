@@ -317,7 +317,7 @@ function main() {
     `OTTO_CONTROL_SECRETS_DIR=./${secretDirectoryName}`,
     `OTTO_CONTROL_SIGNING_DIR=./${signingDirectoryName}`,
     `OTTO_CONTROL_BACKUP_DIR=./${backupDirectoryName}`,
-    'OTTO_CONTROL_VERSION=0.26.0',
+    'OTTO_CONTROL_VERSION=0.27.0',
     `ACME_EMAIL=${acmeEmail || `operations@${publicUrl.hostname}`}`,
     `ACME_CA=${environmentName === 'production'
       ? 'https://acme-v02.api.letsencrypt.org/directory'
@@ -399,6 +399,7 @@ function main() {
     'CONTROL_ALERT_WEBHOOK_URL=',
     'CONTROL_ALERT_WEBHOOK_SECRET_FILE=',
     'CONTROL_ALERT_POLL_INTERVAL_MS=60000',
+    'CONTROL_RECOVERY_ASSURANCE_INTERVAL_MS=900000',
     'CONTROL_ALERT_WEBHOOK_TIMEOUT_MS=10000',
     'CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS=8',
     'CONTROL_ALERT_RETENTION_DAYS=365',

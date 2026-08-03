@@ -50,15 +50,16 @@ export class S3AuditWitnessWormObjectStore implements AuditWitnessWormObjectStor
     this.prefix = config.prefix;
     this.requiredLockMode = config.objectLockMode;
     this.requiredEncryption = config.serverSideEncryption;
+    const credentials = config.accessKeyId && config.secretAccessKey ? {
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      sessionToken: config.sessionToken ?? undefined,
+    } : null;
     this.#client = options.client ?? new S3Client({
       endpoint: config.endpoint,
       region: config.region,
       forcePathStyle: config.forcePathStyle,
-      credentials: {
-        accessKeyId: config.accessKeyId,
-        secretAccessKey: config.secretAccessKey,
-        sessionToken: config.sessionToken ?? undefined,
-      },
+      ...(credentials ? { credentials } : {}),
     });
   }
 

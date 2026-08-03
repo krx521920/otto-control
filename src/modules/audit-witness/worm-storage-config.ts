@@ -8,8 +8,8 @@ export interface AuditWitnessWormStorageConfig {
   region: string;
   prefix: string;
   forcePathStyle: boolean;
-  accessKeyId: string;
-  secretAccessKey: string;
+  accessKeyId: string | null;
+  secretAccessKey: string | null;
   sessionToken: string | null;
   serverSideEncryption: 'AES256' | 'aws:kms';
   kmsKeyId: string | null;
@@ -113,6 +113,18 @@ export function loadAuditWitnessWormStorageConfig(
   if (environment === 'production' && required && lockMode !== 'COMPLIANCE') {
     throw new Error('required production audit WORM storage must use COMPLIANCE lock mode');
   }
+  const accessKeyFile = env.CONTROL_AUDIT_WORM_S3_ACCESS_KEY_ID_FILE?.trim();
+  const secretAccessKeyFile = env.CONTROL_AUDIT_WORM_S3_SECRET_ACCESS_KEY_FILE?.trim();
+  const sessionTokenFile = env.CONTROL_AUDIT_WORM_S3_SESSION_TOKEN_FILE?.trim();
+  if (Boolean(accessKeyFile) !== Boolean(secretAccessKeyFile)) {
+    throw new Error(
+      'CONTROL_AUDIT_WORM_S3_ACCESS_KEY_ID_FILE and '
+      + 'CONTROL_AUDIT_WORM_S3_SECRET_ACCESS_KEY_FILE must be configured together',
+    );
+  }
+  if (sessionTokenFile && !accessKeyFile) {
+    throw new Error('CONTROL_AUDIT_WORM_S3_SESSION_TOKEN_FILE requires static access key files');
+  }
   return {
     required,
     config: {
@@ -125,9 +137,13 @@ export function loadAuditWitnessWormStorageConfig(
         true,
         'CONTROL_AUDIT_WORM_S3_FORCE_PATH_STYLE',
       ),
-      accessKeyId: requiredFile(env, 'CONTROL_AUDIT_WORM_S3_ACCESS_KEY_ID_FILE'),
-      secretAccessKey: requiredFile(env, 'CONTROL_AUDIT_WORM_S3_SECRET_ACCESS_KEY_FILE'),
-      sessionToken: env.CONTROL_AUDIT_WORM_S3_SESSION_TOKEN_FILE?.trim()
+      accessKeyId: accessKeyFile
+        ? requiredFile(env, 'CONTROL_AUDIT_WORM_S3_ACCESS_KEY_ID_FILE')
+        : null,
+      secretAccessKey: secretAccessKeyFile
+        ? requiredFile(env, 'CONTROL_AUDIT_WORM_S3_SECRET_ACCESS_KEY_FILE')
+        : null,
+      sessionToken: sessionTokenFile
         ? requiredFile(env, 'CONTROL_AUDIT_WORM_S3_SESSION_TOKEN_FILE')
         : null,
       serverSideEncryption: encryption,

@@ -1019,6 +1019,26 @@ const MIGRATIONS: Migration[] = [
        ON control_federation_audit_events(occurred_at DESC, id DESC)`,
     ],
   },
+  {
+    id: '024_recovery_assurance_alerts',
+    statements: [
+      `ALTER TABLE control_alert_deliveries
+       DROP CONSTRAINT IF EXISTS control_alert_deliveries_source_check`,
+      `ALTER TABLE control_alert_deliveries
+       ADD CONSTRAINT control_alert_deliveries_source_check
+       CHECK (source IN ('backup_status', 'audit_integrity', 'audit_witness')) NOT VALID`,
+      `ALTER TABLE control_alert_deliveries
+       VALIDATE CONSTRAINT control_alert_deliveries_source_check`,
+      `ALTER TABLE control_alert_deliveries
+       DROP CONSTRAINT IF EXISTS control_alert_deliveries_event_type_check`,
+      `ALTER TABLE control_alert_deliveries
+       ADD CONSTRAINT control_alert_deliveries_event_type_check CHECK (event_type IN (
+         'backup.recovery.alert', 'audit.integrity.alert', 'audit.witness.alert'
+       )) NOT VALID`,
+      `ALTER TABLE control_alert_deliveries
+       VALIDATE CONSTRAINT control_alert_deliveries_event_type_check`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: PoolClient): Promise<void> {

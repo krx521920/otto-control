@@ -358,6 +358,13 @@ describe('production deployment assets', () => {
     expect(pitr).toContain('CONTROL_PITR_MAX_BACKUP_AGE_HOURS');
     expect(pitr).toContain('backup_age_seconds');
     expect(pitr).toContain('control_schema_migrations');
+    expect(pitr).toContain('recovery-data-manifest.sh');
+    expect(pitr).toContain('database_fingerprint_sha256');
+    expect(pitr).toContain('rpo_seconds');
+    expect(pitr).toContain('rto_seconds');
+    expect(repositoryFile('.github/workflows/ci.yml')).toContain(
+      'customer_pitr_recovery_probe',
+    );
     expect(pgBackRestWrapper).toContain('--config|--config=*');
     expect(pgBackRestWrapper).toContain('exec pgbackrest "$@"');
     expect(failover).toContain('--confirm=FAILOVER_OTTO_CONTROL');
@@ -384,6 +391,24 @@ describe('production deployment assets', () => {
     expect(repositoryFile('deploy/systemd/otto-control-pitr-drill.timer')).toContain(
       'OnCalendar=Sun',
     );
+  });
+
+  it('provisions and drills immutable audit evidence instead of trusting configuration', () => {
+    const template = repositoryFile('deploy/aws-audit-worm.template.yaml');
+    const drill = repositoryFile('scripts/drill-object-lock.mjs');
+    const manifest = repositoryFile('deploy/recovery-data-manifest.sh');
+    expect(template).toContain('ObjectLockEnabled: true');
+    expect(template).toContain('Mode: COMPLIANCE');
+    expect(template).toContain('SSEAlgorithm: aws:kms');
+    expect(template).toContain('s3:DeleteObjectVersion');
+    expect(template).toContain('DeletionPolicy: Retain');
+    expect(drill).toContain('DELETE_LOCKED_AUDIT_EVIDENCE');
+    expect(drill).toContain('delete-capable-principal');
+    expect(drill).toContain('COMPLIANCE object deletion unexpectedly succeeded');
+    expect(drill).toContain('objectIntactAfterDeletionAttempt: true');
+    expect(manifest).toContain('database_fingerprint_sha256');
+    expect(manifest).toContain('control_credit_transactions');
+    expect(manifest).toContain('control_audit_witness_evidence');
   });
 
   it('fails unhealthy deployments before launch and drills every Control replica', () => {

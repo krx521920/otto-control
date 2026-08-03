@@ -394,6 +394,21 @@ sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL
 sh deploy/drill-control-failover.sh --confirm=FAILOVER_OTTO_CONTROL_REPLICAS
 ```
 
+Before creating the backup, capture the expected commercial-state manifest and
+pass it into the restore drill. The manifest contains only row counts and table
+SHA-256 values, never customer rows. A restore is rejected when any protected
+`control_*` table differs. Run this source-baseline sequence only in CI, staging,
+or a quiesced production window. On an active production system, first create
+and drill a fresh backup without `--expected`, then retain the manifest produced
+from that isolated restored snapshot as the canonical baseline for later drills:
+
+```bash
+sh deploy/recovery-data-manifest.sh --output ./backups/reports/baseline.manifest
+npm run backup:production
+OTTO_CONTROL_RECOVERY_EXPECTED_MANIFEST="$PWD/backups/reports/baseline.manifest" \
+  npm run drill:restore:production
+```
+
 The PITR drill restores physical files into the dedicated
 `postgres_pitr_drill_data` volume and never points a server at the production
 data directories. The failover drill stops the current primary, waits for
@@ -562,6 +577,28 @@ npm run drill:audit:worm -- \
   --confirm=VERIFY_OTTO_AUDIT_WORM
 ```
 
+AWS deployments can create a separate SSE-KMS bucket with a seven-year default
+COMPLIANCE lock from `deploy/aws-audit-worm.template.yaml`. The runtime principal
+has no delete permission. The separately approved drill principal is explicitly
+allowed to request deletion, which lets the following drill prove that Object
+Lock itself rejects deletion and that the exact object version remains intact:
+
+```bash
+npm run drill:audit:object-lock -- \
+  --bucket otto-control-audit-evidence \
+  --key otto-audit-witness/SOURCE/SEQUENCE.json \
+  --version-id VERSION_ID \
+  --expected-sha256 LOWERCASE_SHA256 \
+  --delete-capable-principal=true \
+  --output ./object-lock-drill.json \
+  --confirm=DELETE_LOCKED_AUDIT_EVIDENCE
+```
+
+Run this only with the dedicated drill role. A denial from a principal that did
+not have `s3:DeleteObjectVersion` would not prove COMPLIANCE retention. Preserve
+the `0600` report, CloudTrail event, stack ID, workflow run, and corresponding
+WORM receipt as one quarterly recovery evidence package.
+
 Pointing a control plane at itself validates the protocol but does not protect
 against that host's superuser. S3 Object Lock also cannot protect against loss of
 the entire provider account, so independently export drill reports and monitor
@@ -607,7 +644,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.26.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.27.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -646,6 +683,7 @@ a misleading success report.
 | `CONTROL_ALERT_WEBHOOK_URL` | empty | HTTPS endpoint receiving signed operational alerts; empty disables delivery |
 | `CONTROL_ALERT_WEBHOOK_SECRET_FILE` | empty | Read-only file containing the webhook HMAC secret |
 | `CONTROL_ALERT_POLL_INTERVAL_MS` | `60000` | Background outbox polling interval, from 5 seconds to 1 hour |
+| `CONTROL_RECOVERY_ASSURANCE_INTERVAL_MS` | `900000` | Full audit-chain, witness, and WORM assurance scan interval |
 | `CONTROL_ALERT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-delivery timeout, from 500 to 30000 milliseconds |
 | `CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS` | `8` | Maximum delivery attempts before a terminal failure |
 | `CONTROL_ALERT_RETENTION_DAYS` | `365` | Days to retain delivered and terminally failed alert records |
@@ -659,7 +697,7 @@ a misleading success report.
 | `CONTROL_AUDIT_WORM_REQUIRED` | `false` | Fail startup when immutable witness storage is not fully configured |
 | `CONTROL_AUDIT_WORM_S3_ENDPOINT` / `CONTROL_AUDIT_WORM_S3_BUCKET` | empty | Dedicated S3/MinIO Object-Lock-capable evidence namespace |
 | `CONTROL_AUDIT_WORM_S3_REGION` / `CONTROL_AUDIT_WORM_S3_PREFIX` | `us-east-1` / `otto-audit-witness` | SigV4 region and isolated object prefix |
-| `CONTROL_AUDIT_WORM_S3_ACCESS_KEY_ID_FILE` / `CONTROL_AUDIT_WORM_S3_SECRET_ACCESS_KEY_FILE` | empty | Dedicated least-privilege file-backed credentials |
+| `CONTROL_AUDIT_WORM_S3_ACCESS_KEY_ID_FILE` / `CONTROL_AUDIT_WORM_S3_SECRET_ACCESS_KEY_FILE` | empty | Optional file-backed credentials; omit both on AWS to use the workload IAM role |
 | `CONTROL_AUDIT_WORM_S3_ENCRYPTION` | `AES256` | `AES256` or `aws:kms`; KMS requires its separate key ID |
 | `CONTROL_AUDIT_WORM_S3_LOCK_MODE` | `COMPLIANCE` | Immutable retention mode; required production mode rejects `GOVERNANCE` |
 | `CONTROL_AUDIT_WORM_RETENTION_DAYS` | `2555` | Retention assigned from receipt acceptance time, from 30 to 3650 days |

@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Otto Control immutable audit evidence bucket with SSE-KMS and COMPLIANCE Object Lock
+
+Parameters:
+  BucketName:
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+  RuntimePrincipalArn:
+    Type: String
+    AllowedPattern: '^arn:aws(-[a-z]+)?:iam::[0-9]{12}:(role|user)/.+$'
+  DrillPrincipalArn:
+    Type: String
+    AllowedPattern: '^arn:aws(-[a-z]+)?:iam::[0-9]{12}:(role|user)/.+$'
+  RetentionDays:
+    Type: Number
+    Default: 2555
+    MinValue: 30
+    MaxValue: 3650
+
+Resources:
+  AuditEvidenceKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Otto Control audit evidence encryption key
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: RuntimeEvidenceEncryption
+            Effect: Allow
+            Principal:
+              AWS: !Ref RuntimePrincipalArn
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub s3.${AWS::Region}.${AWS::URLSuffix}
+          - Sid: DrillEvidenceVerification
+            Effect: Allow
+            Principal:
+              AWS: !Ref DrillPrincipalArn
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub s3.${AWS::Region}.${AWS::URLSuffix}
+
+  AuditEvidenceKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/otto-control-audit-evidence-${AWS::Region}
+      TargetKeyId: !Ref AuditEvidenceKey
+
+  AuditEvidenceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: COMPLIANCE
+            Days: !Ref RetentionDays
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt AuditEvidenceKey.Arn
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AuditEvidenceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AuditEvidenceBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt AuditEvidenceBucket.Arn
+              - !Sub ${AuditEvidenceBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: RuntimeBucketInspection
+            Effect: Allow
+            Principal:
+              AWS: !Ref RuntimePrincipalArn
+            Action:
+              - s3:GetBucketVersioning
+              - s3:GetObjectLockConfiguration
+              - s3:ListBucket
+            Resource: !GetAtt AuditEvidenceBucket.Arn
+          - Sid: RuntimeImmutableEvidence
+            Effect: Allow
+            Principal:
+              AWS: !Ref RuntimePrincipalArn
+            Action:
+              - s3:GetObject
+              - s3:GetObjectRetention
+              - s3:GetObjectVersion
+              - s3:PutObject
+              - s3:PutObjectRetention
+            Resource: !Sub ${AuditEvidenceBucket.Arn}/*
+          - Sid: DrillBucketInspection
+            Effect: Allow
+            Principal:
+              AWS: !Ref DrillPrincipalArn
+            Action:
+              - s3:GetBucketVersioning
+              - s3:GetObjectLockConfiguration
+            Resource: !GetAtt AuditEvidenceBucket.Arn
+          - Sid: DrillAttemptsRealDeletion
+            Effect: Allow
+            Principal:
+              AWS: !Ref DrillPrincipalArn
+            Action:
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:GetObject
+              - s3:GetObjectRetention
+              - s3:GetObjectVersion
+            Resource: !Sub ${AuditEvidenceBucket.Arn}/*
+
+Outputs:
+  BucketName:
+    Value: !Ref AuditEvidenceBucket
+  BucketArn:
+    Value: !GetAtt AuditEvidenceBucket.Arn
+  KmsKeyArn:
+    Value: !GetAtt AuditEvidenceKey.Arn

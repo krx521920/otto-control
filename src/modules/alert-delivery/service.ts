@@ -5,12 +5,17 @@ import type {
   AlertDeliveryPayload,
   AlertDeliveryRecord,
   AlertDeliveryView,
+  AlertEventType,
   AlertPollResult,
   AlertSeverity,
+  AlertSource,
 } from '../../contracts/alert-delivery.js';
 import { conflict, invalidRequest, notFound } from '../../errors.js';
 import type { ControlStore } from '../../storage/control-store.js';
 import type { BackupStatusService } from '../backup-status/service.js';
+import type { AuditService } from '../audit/service.js';
+import type { AuditAnchorService } from '../audit-anchor/service.js';
+import type { AuditWitnessService } from '../audit-witness/service.js';
 import {
   alertChannelSummary,
   loadAlertChannelDefinitions,
@@ -27,11 +32,15 @@ type AlertFetch = typeof fetch;
 export interface AlertDeliveryServiceOptions {
   store: ControlStore;
   backupStatus: BackupStatusService;
+  audit?: AuditService;
+  auditAnchors?: AuditAnchorService | null;
+  auditWitness?: AuditWitnessService | null;
   channelsFile?: string | null;
   channels?: readonly AlertChannelDefinition[];
   webhookUrl?: string | null;
   webhookSecretFile?: string | null;
   pollIntervalMs?: number;
+  assuranceIntervalMs?: number;
   timeoutMs?: number;
   maxAttempts?: number;
   retentionDays?: number;
@@ -43,6 +52,23 @@ interface RuntimeAlertChannel {
   definition: AlertChannelDefinition;
   url: URL;
   secret: Buffer | null;
+}
+
+interface AlertObservation {
+  source: AlertSource;
+  eventType: AlertEventType;
+  severity: AlertSeverity;
+  status: string;
+  reason: string;
+  ageHours: number | null;
+  backupName: string | null;
+  backupRecordedAt: string | null;
+  chainSequence?: number | null;
+  brokenAtSequence?: number | null;
+  pendingCount?: number | null;
+  failedCount?: number | null;
+  alerts: Array<{ severity: AlertSeverity; code: string; message: string }>;
+  fingerprintContext: Record<string, unknown>;
 }
 
 function loadSecret(path: string): Buffer {
@@ -105,8 +131,12 @@ function retryDelayMs(attempt: number): number {
 export class AlertDeliveryService {
   readonly #store: ControlStore;
   readonly #backupStatus: BackupStatusService;
+  readonly #audit: AuditService | null;
+  readonly #auditAnchors: AuditAnchorService | null;
+  readonly #auditWitness: AuditWitnessService | null;
   readonly #channels: ReadonlyMap<string, RuntimeAlertChannel>;
   readonly #pollIntervalMs: number;
+  readonly #assuranceIntervalMs: number;
   readonly #timeoutMs: number;
   readonly #maxAttempts: number;
   readonly #retentionMs: number;
@@ -114,11 +144,16 @@ export class AlertDeliveryService {
   readonly #fetcher: AlertFetch;
   #timer: NodeJS.Timeout | null = null;
   #active: Promise<AlertPollResult> | null = null;
+  #lastAssuranceCheckAt: number | null = null;
 
   constructor(options: AlertDeliveryServiceOptions) {
     this.#store = options.store;
     this.#backupStatus = options.backupStatus;
+    this.#audit = options.audit ?? null;
+    this.#auditAnchors = options.auditAnchors ?? null;
+    this.#auditWitness = options.auditWitness ?? null;
     this.#pollIntervalMs = options.pollIntervalMs ?? 60_000;
+    this.#assuranceIntervalMs = options.assuranceIntervalMs ?? 15 * 60_000;
     this.#timeoutMs = options.timeoutMs ?? 10_000;
     this.#maxAttempts = options.maxAttempts ?? 8;
     const retentionDays = options.retentionDays ?? 365;
@@ -127,6 +162,10 @@ export class AlertDeliveryService {
     if (!Number.isInteger(this.#pollIntervalMs)
       || this.#pollIntervalMs < 5_000 || this.#pollIntervalMs > 3_600_000) {
       throw new Error('alert poll interval must be between 5000 and 3600000 milliseconds');
+    }
+    if (!Number.isInteger(this.#assuranceIntervalMs)
+      || this.#assuranceIntervalMs < 60_000 || this.#assuranceIntervalMs > 86_400_000) {
+      throw new Error('recovery assurance interval must be between 60000 and 86400000 milliseconds');
     }
     if (!Number.isInteger(this.#timeoutMs)
       || this.#timeoutMs < 500 || this.#timeoutMs > 30_000) {
@@ -264,39 +303,42 @@ export class AlertDeliveryService {
   async #poll(actorId: string): Promise<AlertPollResult> {
     const pollStartedAt = this.#now();
     await this.#store.pruneAlertDeliveries(new Date(pollStartedAt - this.#retentionMs));
-    const status = await this.#backupStatus.status();
+    const { observedStatus, observations } = await this.#collectObservations();
     let enqueuedCount = 0;
-    if (status.alerts.length > 0) {
-      const severity: AlertSeverity = status.alerts.some((alert) => alert.severity === 'critical')
-        ? 'critical'
-        : 'warning';
+    for (const observation of observations) {
       const fingerprint = createHash('sha256').update(JSON.stringify({
-        source: 'backup_status',
-        reason: status.reason,
-        backupRecordedAt: status.latest?.recordedAt ?? null,
-        alertCodes: status.alerts.map((alert) => alert.code).sort(),
+        source: observation.source,
+        eventType: observation.eventType,
+        reason: observation.reason,
+        ...observation.fingerprintContext,
+        alertCodes: observation.alerts.map((alert) => alert.code).sort(),
       })).digest('hex');
       const eventId = `alert_${randomUUID().replaceAll('-', '')}`;
       const payload: AlertDeliveryPayload = {
         version: 1,
         eventId,
-        eventType: 'backup.recovery.alert',
-        source: 'backup_status',
-        severity,
+        eventType: observation.eventType,
+        source: observation.source,
+        severity: observation.severity,
         fingerprint,
         observedAt: new Date(this.#now()).toISOString(),
         condition: {
-          status: status.status,
-          reason: status.reason,
-          ageHours: status.ageHours,
-          backupName: status.latest?.backup.name ?? null,
-          backupRecordedAt: status.latest?.recordedAt ?? null,
-          alerts: status.alerts,
+          status: observation.status,
+          reason: observation.reason,
+          ageHours: observation.ageHours,
+          backupName: observation.backupName,
+          backupRecordedAt: observation.backupRecordedAt,
+          chainSequence: observation.chainSequence,
+          brokenAtSequence: observation.brokenAtSequence,
+          pendingCount: observation.pendingCount,
+          failedCount: observation.failedCount,
+          alerts: observation.alerts,
         },
       };
       for (const channel of this.#channels.values()) {
         if (!channel.definition.enabled) continue;
-        if (channel.definition.minimumSeverity === 'critical' && severity !== 'critical') continue;
+        if (channel.definition.minimumSeverity === 'critical'
+          && observation.severity !== 'critical') continue;
         const deliveryId = `alert_${randomUUID().replaceAll('-', '')}`;
         const queued = await this.#store.enqueueAlertDelivery({
           id: deliveryId,
@@ -304,7 +346,7 @@ export class AlertDeliveryService {
           source: payload.source,
           eventType: payload.eventType,
           fingerprint,
-          severity,
+          severity: observation.severity,
           payload,
           createdAt: new Date(this.#now()),
           audit: {
@@ -315,8 +357,8 @@ export class AlertDeliveryService {
             detail: {
               channelId: channel.definition.id,
               source: payload.source,
-              severity,
-              reason: status.reason,
+              severity: observation.severity,
+              reason: observation.reason,
               fingerprint,
             },
           },
@@ -327,7 +369,7 @@ export class AlertDeliveryService {
 
     const result: AlertPollResult = {
       enabled: true,
-      observedStatus: status.status,
+      observedStatus,
       enqueued: enqueuedCount > 0,
       enqueuedCount,
       processed: 0,
@@ -407,6 +449,134 @@ export class AlertDeliveryService {
       }
     }
     return result;
+  }
+
+  async #collectObservations(): Promise<{
+    observedStatus: string;
+    observations: AlertObservation[];
+  }> {
+    const backup = await this.#backupStatus.status();
+    const observations: AlertObservation[] = [];
+    if (backup.alerts.length > 0) {
+      const severity: AlertSeverity = backup.alerts.some((alert) => alert.severity === 'critical')
+        ? 'critical'
+        : 'warning';
+      observations.push({
+        source: 'backup_status',
+        eventType: 'backup.recovery.alert',
+        severity,
+        status: backup.status,
+        reason: backup.reason,
+        ageHours: backup.ageHours,
+        backupName: backup.latest?.backup.name ?? null,
+        backupRecordedAt: backup.latest?.recordedAt ?? null,
+        alerts: backup.alerts,
+        fingerprintContext: { backupRecordedAt: backup.latest?.recordedAt ?? null },
+      });
+    }
+    const now = this.#now();
+    const assuranceDue = this.#lastAssuranceCheckAt === null
+      || now - this.#lastAssuranceCheckAt >= this.#assuranceIntervalMs;
+    if (!assuranceDue) return { observedStatus: backup.status, observations };
+    this.#lastAssuranceCheckAt = now;
+    if (this.#audit) {
+      const integrity = await this.#audit.verify();
+      if (!integrity.receipt.valid) {
+        observations.push({
+          source: 'audit_integrity',
+          eventType: 'audit.integrity.alert',
+          severity: 'critical',
+          status: 'failed',
+          reason: 'audit_chain_invalid',
+          ageHours: null,
+          backupName: null,
+          backupRecordedAt: null,
+          chainSequence: integrity.receipt.lastSequence,
+          brokenAtSequence: integrity.receipt.brokenAtSequence,
+          alerts: [{
+            severity: 'critical',
+            code: 'audit_chain_invalid',
+            message: 'The Control audit chain was rolled back, forked, or modified.',
+          }],
+          fingerprintContext: {
+            headHash: integrity.receipt.headHash,
+            brokenAtSequence: integrity.receipt.brokenAtSequence,
+          },
+        });
+      }
+    }
+    if (this.#auditAnchors) {
+      const anchors = await this.#auditAnchors.list(100);
+      if (anchors.enabled) {
+        const failed = anchors.anchors.filter((anchor) => anchor.status === 'failed');
+        const retrying = anchors.anchors.filter((anchor) => anchor.status === 'retrying');
+        if (failed.length > 0 || retrying.length > 0) {
+          const terminal = failed.length > 0;
+          observations.push({
+            source: 'audit_witness',
+            eventType: 'audit.witness.alert',
+            severity: terminal ? 'critical' : 'warning',
+            status: terminal ? 'failed' : 'degraded',
+            reason: terminal ? 'audit_witness_delivery_failed' : 'audit_witness_unavailable',
+            ageHours: null,
+            backupName: null,
+            backupRecordedAt: null,
+            pendingCount: retrying.length,
+            failedCount: failed.length,
+            alerts: [{
+              severity: terminal ? 'critical' : 'warning',
+              code: terminal ? 'audit_witness_delivery_failed' : 'audit_witness_unavailable',
+              message: terminal
+                ? 'Audit evidence could not be delivered to the independent witness.'
+                : 'The independent audit witness is temporarily unavailable.',
+            }],
+            fingerprintContext: {
+              failed: failed.map((anchor) => anchor.id).sort(),
+              retrying: retrying.map((anchor) => anchor.id).sort(),
+            },
+          });
+        }
+      }
+    }
+    if (this.#auditWitness) {
+      const evidence = await this.#auditWitness.evidenceStatus(1);
+      if (evidence.enabled && !evidence.healthy) {
+        const severity: AlertSeverity = evidence.required || evidence.failed > 0
+          ? 'critical'
+          : 'warning';
+        observations.push({
+          source: 'audit_witness',
+          eventType: 'audit.witness.alert',
+          severity,
+          status: severity === 'critical' ? 'failed' : 'degraded',
+          reason: evidence.failed > 0
+            ? 'audit_worm_evidence_failed'
+            : 'audit_worm_evidence_pending',
+          ageHours: null,
+          backupName: null,
+          backupRecordedAt: null,
+          pendingCount: evidence.pending + evidence.retrying + evidence.storing,
+          failedCount: evidence.failed,
+          alerts: [{
+            severity,
+            code: evidence.failed > 0
+              ? 'audit_worm_evidence_failed'
+              : 'audit_worm_evidence_pending',
+            message: evidence.failed > 0
+              ? 'Audit evidence failed to reach immutable WORM storage.'
+              : 'Audit evidence is waiting for immutable WORM storage.',
+          }],
+          fingerprintContext: {
+            pending: evidence.pending,
+            retrying: evidence.retrying,
+            storing: evidence.storing,
+            failed: evidence.failed,
+            oldestPendingAt: evidence.oldestPendingAt,
+          },
+        });
+      }
+    }
+    return { observedStatus: backup.status, observations };
   }
 
   async #deliver(record: AlertDeliveryRecord): Promise<void> {

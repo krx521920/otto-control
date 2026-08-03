@@ -109,17 +109,6 @@ export async function createCommercialControlRuntime(
       reportDirectory: config.backupReportDirectory,
       maximumAgeHours: config.backupStatusMaximumAgeHours,
     });
-    const alerts = new AlertDeliveryService({
-      store,
-      backupStatus,
-      channelsFile: config.alertChannelsFile,
-      webhookUrl: config.alertWebhookUrl,
-      webhookSecretFile: config.alertWebhookSecretFile,
-      pollIntervalMs: config.alertPollIntervalMs,
-      timeoutMs: config.alertWebhookTimeoutMs,
-      maxAttempts: config.alertWebhookMaxAttempts,
-      retentionDays: config.alertRetentionDays,
-    });
     const audit = new AuditService({
       store,
       signer,
@@ -143,6 +132,31 @@ export async function createCommercialControlRuntime(
       maxAttempts: config.auditWitnessWormStorage?.maxAttempts,
     });
     await auditWitness.assertWormReady();
+    const auditAnchors = new AuditAnchorService({
+      store,
+      audit,
+      url: config.auditAnchorUrl,
+      tokenFile: config.auditAnchorTokenFile,
+      anchorIntervalMs: config.auditAnchorIntervalMs,
+      pollIntervalMs: config.auditAnchorPollIntervalMs,
+      timeoutMs: config.auditAnchorTimeoutMs,
+      maxAttempts: config.auditAnchorMaxAttempts,
+    });
+    const alerts = new AlertDeliveryService({
+      store,
+      backupStatus,
+      audit,
+      auditAnchors,
+      auditWitness,
+      channelsFile: config.alertChannelsFile,
+      webhookUrl: config.alertWebhookUrl,
+      webhookSecretFile: config.alertWebhookSecretFile,
+      pollIntervalMs: config.alertPollIntervalMs,
+      assuranceIntervalMs: config.recoveryAssuranceIntervalMs,
+      timeoutMs: config.alertWebhookTimeoutMs,
+      maxAttempts: config.alertWebhookMaxAttempts,
+      retentionDays: config.alertRetentionDays,
+    });
     return {
       adminToken: config.adminToken!,
       identity,
@@ -151,16 +165,7 @@ export async function createCommercialControlRuntime(
       backupStatus,
       alerts,
       audit,
-      auditAnchors: new AuditAnchorService({
-        store,
-        audit,
-        url: config.auditAnchorUrl,
-        tokenFile: config.auditAnchorTokenFile,
-        anchorIntervalMs: config.auditAnchorIntervalMs,
-        pollIntervalMs: config.auditAnchorPollIntervalMs,
-        timeoutMs: config.auditAnchorTimeoutMs,
-        maxAttempts: config.auditAnchorMaxAttempts,
-      }),
+      auditAnchors,
       auditWitness,
       dataGovernance,
       observability: store,

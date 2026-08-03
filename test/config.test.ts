@@ -20,6 +20,7 @@ describe('control configuration', () => {
       alertWebhookUrl: null,
       alertWebhookSecretFile: null,
       alertPollIntervalMs: 60_000,
+      recoveryAssuranceIntervalMs: 900_000,
       alertWebhookTimeoutMs: 10_000,
       alertWebhookMaxAttempts: 8,
       alertRetentionDays: 365,
@@ -81,6 +82,9 @@ describe('control configuration', () => {
     })).toThrow('CONTROL_ALERT_CHANNELS_FILE cannot be combined');
     expect(() => loadControlConfig({ CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS: '21' })).toThrow(
       'CONTROL_ALERT_WEBHOOK_MAX_ATTEMPTS must be between 1 and 20',
+    );
+    expect(() => loadControlConfig({ CONTROL_RECOVERY_ASSURANCE_INTERVAL_MS: '59999' })).toThrow(
+      'CONTROL_RECOVERY_ASSURANCE_INTERVAL_MS must be between 60000 and 86400000',
     );
     expect(() => loadControlConfig({ CONTROL_ALERT_RETENTION_DAYS: '29' })).toThrow(
       'CONTROL_ALERT_RETENTION_DAYS must be between 30 and 3650',
@@ -216,6 +220,30 @@ describe('control configuration', () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it('supports an AWS workload role without long-lived WORM access keys', () => {
+    const config = loadControlConfig({
+      CONTROL_AUDIT_WORM_REQUIRED: 'true',
+      CONTROL_AUDIT_WORM_S3_ENDPOINT: 'https://s3.cn-north-1.amazonaws.com.cn',
+      CONTROL_AUDIT_WORM_S3_BUCKET: 'otto-control-audit-evidence',
+      CONTROL_AUDIT_WORM_S3_REGION: 'cn-north-1',
+      CONTROL_AUDIT_WORM_S3_FORCE_PATH_STYLE: 'false',
+      CONTROL_AUDIT_WORM_S3_ENCRYPTION: 'aws:kms',
+      CONTROL_AUDIT_WORM_S3_KMS_KEY_ID: 'alias/otto-control-audit-evidence-cn-north-1',
+    });
+    expect(config.auditWitnessWormStorage).toMatchObject({
+      accessKeyId: null,
+      secretAccessKey: null,
+      sessionToken: null,
+      forcePathStyle: false,
+      serverSideEncryption: 'aws:kms',
+    });
+    expect(() => loadControlConfig({
+      CONTROL_AUDIT_WORM_S3_ENDPOINT: 'https://s3.cn-north-1.amazonaws.com.cn',
+      CONTROL_AUDIT_WORM_S3_BUCKET: 'otto-control-audit-evidence',
+      CONTROL_AUDIT_WORM_S3_ACCESS_KEY_ID_FILE: 'access-key',
+    })).toThrow('must be configured together');
   });
 
   it('fails closed without a metrics credential in production', () => {

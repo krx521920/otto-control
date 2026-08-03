@@ -176,6 +176,17 @@ jobs:
           docker compose -f compose.ci.resolved.yaml \
             exec -T federation-a node --input-type=module < scripts/smoke-federation.mjs
 
+      - name: Prove logical backup restores the exact commercial state
+        env:
+          OTTO_CONTROL_COMPOSE_FILE: ${{ github.workspace }}/compose.ci.resolved.yaml
+        run: |
+          mkdir -p backups/reports
+          sh deploy/recovery-data-manifest.sh \
+            --output backups/reports/logical-baseline.manifest
+          sh deploy/backup-postgres.sh
+          OTTO_CONTROL_RECOVERY_EXPECTED_MANIFEST="$PWD/backups/reports/logical-baseline.manifest" \
+            sh deploy/drill-restore-postgres.sh
+
       - name: Prove the edge survives every Control replica failure
         env:
           OTTO_CONTROL_COMPOSE_FILE: ${{ github.workspace }}/compose.ci.resolved.yaml
@@ -187,12 +198,38 @@ jobs:
           OTTO_CONTROL_COMPOSE_FILE: ${{ github.workspace }}/compose.ci.resolved.yaml
         run: |
           sh deploy/backup-pitr-postgres.sh full
+          docker compose -f compose.ci.resolved.yaml exec -T postgres-tools \
+            psql --username otto_control --dbname otto_control \
+            --set=ON_ERROR_STOP=1 --command="INSERT INTO control_customers \
+              (id, name) VALUES ('customer_pitr_recovery_probe', 'PITR recovery probe')"
+          sh deploy/recovery-data-manifest.sh \
+            --output backups/reports/pitr-baseline.manifest
+          sleep 2
+          date -u '+%Y-%m-%dT%H:%M:%SZ' > backups/reports/pitr-target.txt
+          sleep 2
+          docker compose -f compose.ci.resolved.yaml exec -T postgres-tools \
+            psql --username otto_control --dbname otto_control \
+            --set=ON_ERROR_STOP=1 --command="DELETE FROM control_customers \
+              WHERE id = 'customer_pitr_recovery_probe'"
+          docker compose -f compose.ci.resolved.yaml exec -T postgres-tools \
+            psql --username otto_control --dbname otto_control \
+            --set=ON_ERROR_STOP=1 --tuples-only --no-align \
+            --command="SELECT CASE WHEN EXISTS (SELECT 1 FROM control_customers \
+              WHERE id = 'customer_pitr_recovery_probe') THEN 'probe-still-present' \
+              ELSE 'accidental-deletion-confirmed' END" \
+            | grep -F -x 'accidental-deletion-confirmed'
+          docker compose -f compose.ci.resolved.yaml exec -T postgres-tools \
+            psql --username otto_control --dbname otto_control \
+            --set=ON_ERROR_STOP=1 --command='SELECT pg_switch_wal()'
+          sh deploy/backup-pitr-postgres.sh diff
           sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL
 
       - name: Restore an isolated PITR instance
         env:
           OTTO_CONTROL_COMPOSE_FILE: ${{ github.workspace }}/compose.ci.resolved.yaml
-        run: sh deploy/drill-pitr-postgres.sh
+        run: |
+          OTTO_CONTROL_RECOVERY_EXPECTED_MANIFEST="$PWD/backups/reports/pitr-baseline.manifest" \
+            sh deploy/drill-pitr-postgres.sh "$(cat backups/reports/pitr-target.txt)"
 
       - name: Validate Caddy load-balancer configuration
         run: >-

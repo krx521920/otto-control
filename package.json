@@ -1,6 +1,6 @@
 {
   "name": "otto-control",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "private": true,
   "description": "Commercial control plane for Otto private deployments",
   "type": "module",
@@ -23,6 +23,7 @@
     "drill:signing:rotation": "node scripts/drill-signing-rotation.mjs",
     "drill:signing:revoke": "node scripts/drill-signing-revocation.mjs",
     "drill:audit:worm": "node scripts/drill-audit-worm.mjs",
+    "drill:audit:object-lock": "node scripts/drill-object-lock.mjs",
     "lint": "eslint .",
     "start": "node dist/server.js",
     "start:federation": "node dist/federation-server.js",

@@ -27,6 +27,7 @@ const testConfig: Readonly<ControlConfig> = {
   alertWebhookUrl: null,
   alertWebhookSecretFile: null,
   alertPollIntervalMs: 60_000,
+  recoveryAssuranceIntervalMs: 900_000,
   alertWebhookTimeoutMs: 10_000,
   alertWebhookMaxAttempts: 8,
   alertRetentionDays: 365,

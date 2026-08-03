@@ -37,6 +37,7 @@ export interface ControlConfig {
   alertWebhookUrl: string | null;
   alertWebhookSecretFile: string | null;
   alertPollIntervalMs: number;
+  recoveryAssuranceIntervalMs: number;
   alertWebhookTimeoutMs: number;
   alertWebhookMaxAttempts: number;
   alertRetentionDays: number;
@@ -368,7 +369,7 @@ export function loadControlConfig(
     logLevel: parseLogLevel(env.CONTROL_LOG_LEVEL),
     trustProxy: parseBoolean(env.CONTROL_TRUST_PROXY, false, 'CONTROL_TRUST_PROXY'),
     publicBaseUrl: parsePublicBaseUrl(env.CONTROL_PUBLIC_BASE_URL, environment),
-    version: env.OTTO_CONTROL_VERSION?.trim() || '0.26.0',
+    version: env.OTTO_CONTROL_VERSION?.trim() || '0.27.0',
     databaseUrl: parseDatabaseUrl(databaseUrlFromEnvironment(env)),
     databaseSsl: parseBoolean(
       env.CONTROL_DATABASE_SSL,
@@ -395,6 +396,13 @@ export function loadControlConfig(
       5_000,
       3_600_000,
       'CONTROL_ALERT_POLL_INTERVAL_MS',
+    ),
+    recoveryAssuranceIntervalMs: parseBoundedInteger(
+      env.CONTROL_RECOVERY_ASSURANCE_INTERVAL_MS,
+      15 * 60_000,
+      60_000,
+      86_400_000,
+      'CONTROL_RECOVERY_ASSURANCE_INTERVAL_MS',
     ),
     alertWebhookTimeoutMs: parseBoundedInteger(
       env.CONTROL_ALERT_WEBHOOK_TIMEOUT_MS,

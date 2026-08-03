@@ -1,11 +1,16 @@
 export type AlertSeverity = 'warning' | 'critical';
 export type AlertDeliveryStatus = 'pending' | 'delivering' | 'retrying' | 'delivered' | 'failed';
+export type AlertSource = 'backup_status' | 'audit_integrity' | 'audit_witness';
+export type AlertEventType =
+  | 'backup.recovery.alert'
+  | 'audit.integrity.alert'
+  | 'audit.witness.alert';
 
 export interface AlertDeliveryPayload {
   version: 1;
   eventId: string;
-  eventType: 'backup.recovery.alert';
-  source: 'backup_status';
+  eventType: AlertEventType;
+  source: AlertSource;
   severity: AlertSeverity;
   fingerprint: string;
   observedAt: string;
@@ -15,6 +20,10 @@ export interface AlertDeliveryPayload {
     ageHours: number | null;
     backupName: string | null;
     backupRecordedAt: string | null;
+    chainSequence?: number | null;
+    brokenAtSequence?: number | null;
+    pendingCount?: number | null;
+    failedCount?: number | null;
     alerts: Array<{ severity: AlertSeverity; code: string; message: string }>;
   };
 }
@@ -22,8 +31,8 @@ export interface AlertDeliveryPayload {
 export interface AlertDeliveryRecord {
   id: string;
   channelId: string;
-  source: 'backup_status';
-  eventType: 'backup.recovery.alert';
+  source: AlertSource;
+  eventType: AlertEventType;
   fingerprint: string;
   severity: AlertSeverity;
   payload: AlertDeliveryPayload;
