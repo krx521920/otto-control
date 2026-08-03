@@ -5,6 +5,7 @@ import type {
   FederationClaimedMessage,
   FederationDeploymentKeyRecord,
   FederationDeploymentRecord,
+  FederationDeploymentUsage,
   FederationEnvelope,
   FederationQueueStats,
   FederationStoredMessage,
@@ -17,6 +18,8 @@ export interface RegisterFederationDeploymentInput {
   origin: string;
   capabilities: string[];
   maxPendingMessages: number;
+  maxPendingBytes: number;
+  maxRequestsPerMinute: number;
   now: Date;
 }
 
@@ -79,6 +82,7 @@ export interface FederationStore {
   isBlocked(senderDeploymentId: string, recipientDeploymentId: string): Promise<boolean>;
   setBlock(input: FederationBlockRecord): Promise<void>;
   removeBlock(blockerDeploymentId: string, blockedDeploymentId: string): Promise<boolean>;
+  consumeRateLimit(deploymentId: string, now: Date): Promise<boolean>;
   createGrant(input: CreateFederationGrantInput): Promise<FederationA2aGrantRecord>;
   revokeGrant(ownerDeploymentId: string, grantId: string, now: Date): Promise<boolean>;
   enqueueMessage(input: EnqueueFederationMessageInput): Promise<EnqueueFederationMessageResult>;
@@ -97,7 +101,10 @@ export interface FederationStore {
   }): Promise<boolean>;
   getMessage(messageId: string): Promise<FederationStoredMessage | null>;
   appendAuditEvent(input: FederationAuditEventInput): Promise<void>;
+  listAuditEvents(limit: number): Promise<FederationAuditEventInput[]>;
   queueStats(): Promise<FederationQueueStats>;
+  queueBytes(): Promise<FederationQueueStats>;
+  deploymentUsage(deploymentId: string): Promise<FederationDeploymentUsage>;
   expireMessages(now: Date, deliveredBefore: Date): Promise<{ expired: number; purged: number }>;
 }
 

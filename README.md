@@ -121,6 +121,9 @@ Otto-specific. It accepts only E2EE ciphertext and never receives chat, file,
 or A2A context decryption keys. See
 [`docs/federation-protocol.zh-CN.md`](docs/federation-protocol.zh-CN.md) and
 [`docs/otto-private-server-federation-adapter.zh-CN.md`](docs/otto-private-server-federation-adapter.zh-CN.md).
+Production admission, key rotation, capacity, abuse response, and three-replica
+acceptance are documented in
+[`docs/federation-production-operations.zh-CN.md`](docs/federation-production-operations.zh-CN.md).
 Production CI starts all three Federation instances and runs
 `scripts/smoke-federation.mjs` across them to prove signed ciphertext relay,
 cross-instance inbox leasing, signature verification, idempotency, and acknowledgement.
@@ -644,7 +647,7 @@ a misleading success report.
 | `CONTROL_LOG_LEVEL` | `info` | Structured log level |
 | `CONTROL_TRUST_PROXY` | `false` | Trust the configured edge proxy |
 | `CONTROL_PUBLIC_BASE_URL` | empty | Public control-plane URL; HTTPS in production |
-| `OTTO_CONTROL_VERSION` | `0.29.0` | Runtime version exposed by health APIs |
+| `OTTO_CONTROL_VERSION` | `0.30.0` | Runtime version exposed by health APIs |
 | `CONTROL_DATABASE_URL` | empty | PostgreSQL connection URL |
 | `CONTROL_DATABASE_HOST` | empty | PostgreSQL host when component configuration is used |
 | `CONTROL_DATABASE_PORT` | `5432` | PostgreSQL port for component configuration |
@@ -1230,6 +1233,8 @@ POST /v1/federation/inbox/ack
 POST /v1/federation/a2a/grants
 POST /v1/federation/a2a/grants/revoke
 GET  /v1/admin/federation/deployments
+GET  /v1/admin/federation/audit-events
+GET  /v1/admin/federation/deployments/:deploymentId/operations
 GET  /v1/admin/federation/status
 POST /v1/admin/federation/deployments
 PATCH /v1/admin/federation/deployments/:deploymentId/status

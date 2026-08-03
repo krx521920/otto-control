@@ -7,10 +7,11 @@ import type {
   FederationClaimedMessage,
   FederationDeploymentKeyRecord,
   FederationDeploymentRecord,
+  FederationDeploymentUsage,
   FederationQueueStats,
   FederationStoredMessage,
 } from '../../contracts/federation.js';
-import { conflict, forbidden } from '../../errors.js';
+import { capacityExceeded, conflict, forbidden } from '../../errors.js';
 import { claimTokenHash } from './crypto.js';
 import {
   messageFromEnvelope,
@@ -33,6 +34,7 @@ export class MemoryFederationStore implements FederationStore {
   readonly blocks = new Map<string, FederationBlockRecord>();
   readonly grants = new Map<string, FederationA2aGrantRecord>();
   readonly messages = new Map<string, MemoryMessage>();
+  readonly rateWindows = new Map<string, number>();
   readonly auditEvents: FederationAuditEventInput[] = [];
 
   async close(): Promise<void> {
@@ -52,6 +54,8 @@ export class MemoryFederationStore implements FederationStore {
       status: previous?.status ?? 'active',
       capabilities: [...input.capabilities],
       maxPendingMessages: input.maxPendingMessages,
+      maxPendingBytes: input.maxPendingBytes,
+      maxRequestsPerMinute: input.maxRequestsPerMinute,
       createdAt: previous?.createdAt ?? input.now,
       updatedAt: input.now,
     };
@@ -117,6 +121,17 @@ export class MemoryFederationStore implements FederationStore {
     if (!record || record.status !== 'active') return false;
     record.status = 'revoked';
     record.revokedAt = now;
+    for (const message of this.messages.values()) {
+      if (
+        message.senderDeploymentId === deploymentId
+        && message.signingKeyId === keyId
+        && (message.status === 'pending' || message.status === 'claimed')
+      ) {
+        message.status = 'expired';
+        message.claimedUntil = null;
+        message.claimTokenHash = null;
+      }
+    }
     return true;
   }
 
@@ -175,6 +190,21 @@ export class MemoryFederationStore implements FederationStore {
     return this.blocks.delete(`${blockerDeploymentId}:${blockedDeploymentId}`);
   }
 
+  async consumeRateLimit(deploymentId: string, now: Date): Promise<boolean> {
+    const deployment = this.deployments.get(deploymentId);
+    if (!deployment) return false;
+    const windowStartedAt = Math.floor(now.getTime() / 60_000) * 60_000;
+    for (const key of this.rateWindows.keys()) {
+      const timestamp = Number(key.slice(key.lastIndexOf(':') + 1));
+      if (timestamp < windowStartedAt - 60_000) this.rateWindows.delete(key);
+    }
+    const key = `${deploymentId}:${windowStartedAt}`;
+    const count = this.rateWindows.get(key) ?? 0;
+    if (count >= deployment.maxRequestsPerMinute) return false;
+    this.rateWindows.set(key, count + 1);
+    return true;
+  }
+
   async createGrant(input: CreateFederationGrantInput): Promise<FederationA2aGrantRecord> {
     if (this.grants.has(input.id)) throw conflict('A2A grant already exists');
     const record: FederationA2aGrantRecord = {
@@ -212,10 +242,15 @@ export class MemoryFederationStore implements FederationStore {
       return { message: structuredClone(existing), duplicate: true };
     }
     const recipient = this.deployments.get(envelope.recipientDeploymentId);
-    const pending = [...this.messages.values()].filter((message) =>
+    const pendingMessages = [...this.messages.values()].filter((message) =>
       message.recipientDeploymentId === envelope.recipientDeploymentId
-      && (message.status === 'pending' || message.status === 'claimed')).length;
-    if (!recipient || pending >= recipient.maxPendingMessages) throw conflict('recipient federation inbox is full');
+      && (message.status === 'pending' || message.status === 'claimed'));
+    const pendingBytes = pendingMessages.reduce((total, message) => total + message.sizeBytes, 0);
+    if (
+      !recipient
+      || pendingMessages.length >= recipient.maxPendingMessages
+      || pendingBytes + input.sizeBytes > recipient.maxPendingBytes
+    ) throw capacityExceeded('recipient federation inbox capacity is exhausted');
 
     let a2aGrant: FederationA2aGrantRecord | null = null;
     if (envelope.type === 'a2a.request') {
@@ -332,9 +367,39 @@ export class MemoryFederationStore implements FederationStore {
     this.auditEvents.push(structuredClone(input));
   }
 
+  async listAuditEvents(limit: number): Promise<FederationAuditEventInput[]> {
+    return this.auditEvents.slice(-limit).reverse().map((event) => structuredClone(event));
+  }
+
   async queueStats(): Promise<FederationQueueStats> {
     const output: FederationQueueStats = { pending: 0, claimed: 0, delivered: 0, expired: 0 };
     for (const message of this.messages.values()) output[message.status] += 1;
+    return output;
+  }
+
+  async queueBytes(): Promise<FederationQueueStats> {
+    const output: FederationQueueStats = { pending: 0, claimed: 0, delivered: 0, expired: 0 };
+    for (const message of this.messages.values()) output[message.status] += message.sizeBytes;
+    return output;
+  }
+
+  async deploymentUsage(deploymentId: string): Promise<FederationDeploymentUsage> {
+    const output: FederationDeploymentUsage = {
+      pendingMessages: 0,
+      claimedMessages: 0,
+      pendingBytes: 0,
+      claimedBytes: 0,
+    };
+    for (const message of this.messages.values()) {
+      if (message.recipientDeploymentId !== deploymentId) continue;
+      if (message.status === 'pending') {
+        output.pendingMessages += 1;
+        output.pendingBytes += message.sizeBytes;
+      } else if (message.status === 'claimed') {
+        output.claimedMessages += 1;
+        output.claimedBytes += message.sizeBytes;
+      }
+    }
     return output;
   }
 
@@ -359,6 +424,11 @@ export class MemoryFederationStore implements FederationStore {
       }
     }
     for (const [key, expiry] of this.nonces) if (expiry <= now) this.nonces.delete(key);
+    const currentWindow = Math.floor(now.getTime() / 60_000) * 60_000;
+    for (const key of this.rateWindows.keys()) {
+      const timestamp = Number(key.slice(key.lastIndexOf(':') + 1));
+      if (timestamp < currentWindow - 60_000) this.rateWindows.delete(key);
+    }
     return { expired, purged };
   }
 }

@@ -72,6 +72,8 @@ for (const deployment of [
     origin: `https://${deployment.id}.example.test`,
     capabilities,
     maxPendingMessages: 100,
+    maxPendingBytes: 10 * 1024 * 1024,
+    maxRequestsPerMinute: 1_200,
   });
   await admin(`/v1/admin/federation/deployments/${deployment.id}/keys`, {
     keyId: deployment.signer.keyId,
@@ -85,48 +87,65 @@ const sender = new FederationClient({
   signer: senderSigner,
   allowInsecureLoopback: true,
 });
-const prepared = await sender.createSignedEnvelope({
+const prepared = await Promise.all(Array.from({ length: 6 }, (_, index) => sender.createSignedEnvelope({
   recipientDeploymentId: recipientId,
   type: 'chat.message',
-  ciphertext: 'b3R0by1mZWRlcmF0aW9uLXNtb2tlLWNpcGhlcnRleHQ',
+  ciphertext: Buffer.from(`otto-federation-smoke-ciphertext-${index}`).toString('base64url'),
   routing: {
     conversationId: `smoke_conversation_${suffix}`,
     senderPrincipalId: 'smoke_sender_account',
     recipientPrincipalId: 'smoke_recipient_account',
   },
   expiresInMs: 5 * 60_000,
-});
-const sent = await sender.sendSignedEnvelope(prepared);
-const duplicate = await sender.sendSignedEnvelope(prepared);
-if (!sent.accepted || sent.duplicate || !duplicate.duplicate) {
+})));
+const sent = await Promise.all(prepared.map((envelope) => sender.sendSignedEnvelope(envelope)));
+const duplicate = await sender.sendSignedEnvelope(prepared[0]);
+if (sent.some((result) => !result.accepted || result.duplicate) || !duplicate.duplicate) {
   throw new Error('federation relay did not preserve idempotent delivery');
 }
 
-const claim = await jsonRequest(`${claimUrl}/v1/federation/inbox/claim`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify(await signedRequest(recipientSigner, recipientId, { limit: 10 })),
-}, 200);
-const claimed = claim.messages?.find((item) => item.envelope?.messageId === sent.messageId);
-if (!claimed?.claimToken) throw new Error('federation recipient did not claim the sent envelope');
-verifyFederationSignature({
-  payload: claimed.envelope,
-  signature: claimed.signature,
-  publicKeyPem: senderSigner.publicKeyPem,
-});
-
-await jsonRequest(`${acknowledgeUrl}/v1/federation/inbox/ack`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify(await signedRequest(recipientSigner, recipientId, {
-    messageId: sent.messageId,
-    claimToken: claimed.claimToken,
-  })),
-}, 200);
+const claimUrls = [relayUrl, claimUrl, acknowledgeUrl];
+const claims = await Promise.all(claimUrls.map(async (url) => jsonRequest(
+  `${url}/v1/federation/inbox/claim`,
+  {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(await signedRequest(recipientSigner, recipientId, { limit: 10 })),
+  },
+  200,
+)));
+const expectedIds = new Set(sent.map((result) => result.messageId));
+const claimed = claims.flatMap((claim) => claim.messages || [])
+  .filter((item) => expectedIds.has(item.envelope?.messageId));
+if (claimed.length !== expectedIds.size || new Set(claimed.map((item) => item.envelope.messageId)).size !== expectedIds.size) {
+  throw new Error('concurrent federation replicas duplicated or lost an inbox lease');
+}
+for (const item of claimed) {
+  if (!item.claimToken) throw new Error('federation recipient did not receive a claim token');
+  verifyFederationSignature({
+    payload: item.envelope,
+    signature: item.signature,
+    publicKeyPem: senderSigner.publicKeyPem,
+  });
+}
+await Promise.all(claimed.map((item, index) => jsonRequest(
+  `${claimUrls[(index + 1) % claimUrls.length]}/v1/federation/inbox/ack`,
+  {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(await signedRequest(recipientSigner, recipientId, {
+      messageId: item.envelope.messageId,
+      claimToken: item.claimToken,
+    })),
+  },
+  200,
+)));
 const status = await jsonRequest(`${acknowledgeUrl}/v1/admin/federation/status`, {
   method: 'GET',
   headers: { authorization: `Bearer ${adminToken}` },
 }, 200);
-if ((status.queue?.delivered || 0) < 1) throw new Error('federation acknowledgement was not committed');
+if ((status.queue?.delivered || 0) < expectedIds.size) {
+  throw new Error('federation acknowledgements were not committed across replicas');
+}
 
-process.stdout.write(`Federation smoke test passed for ${senderId} -> ${recipientId}.\n`);
+process.stdout.write(`Federation three-replica smoke test passed for ${senderId} -> ${recipientId}.\n`);

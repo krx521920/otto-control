@@ -113,3 +113,24 @@ groups:
           severity: warning
         annotations:
           summary: Otto Federation pending queue is above 5000 messages
+      - alert: OttoFederationPendingBytesHigh
+        expr: max(otto_federation_queue_bytes{status=~"pending|claimed"}) > 2147483648
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Otto Federation encrypted backlog is above two GiB
+      - alert: OttoFederationCapacityRejected
+        expr: sum(increase(otto_federation_rejections_total{code="CAPACITY_EXCEEDED"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A federation deployment exhausted its inbox capacity
+      - alert: OttoFederationRateLimitedHigh
+        expr: sum(increase(otto_federation_rejections_total{code=~"RATE_LIMITED|HTTP_RATE_LIMITED"}[5m])) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Federation request throttling is sustained

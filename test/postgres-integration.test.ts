@@ -784,4 +784,106 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
       await store.close();
     }
   });
+
+  it('shares federation inbox leases and deployment rate budgets across three stores', async () => {
+    await resetDatabase(DATABASE_URL!);
+    const stores = await Promise.all(Array.from({ length: 3 }, () => PostgresFederationStore.connect({
+      connectionString: DATABASE_URL!,
+      ssl: false,
+    })));
+    try {
+      const federations = stores.map((store) => new FederationService({ store, now: () => NOW }));
+      const sender = signer();
+      const recipient = signer();
+      const rateSigner = signer();
+      for (const [id, origin, key, rate] of [
+        ['deployment_replica_a', 'https://replica-a.test', sender, 1_200],
+        ['deployment_replica_b', 'https://replica-b.test', recipient, 1_200],
+        ['deployment_replica_rate', 'https://replica-rate.test', rateSigner, 60],
+      ] as const) {
+        await federations[0]!.registerDeployment({
+          id,
+          displayName: id,
+          origin,
+          capabilities: ['federation.v1', 'chat.e2ee'],
+          maxRequestsPerMinute: rate,
+        });
+        await federations[0]!.registerKey(id, { publicKeyPem: key.publicKeyPem });
+      }
+
+      const envelopes = await Promise.all(Array.from({ length: 6 }, async (_, index) => {
+        const envelope = {
+          version: 1 as const,
+          messageId: `fmsg_three_replica_${index}`,
+          type: 'chat.message' as const,
+          senderDeploymentId: 'deployment_replica_a',
+          recipientDeploymentId: 'deployment_replica_b',
+          issuedAt: new Date(NOW).toISOString(),
+          expiresAt: new Date(NOW + 60_000).toISOString(),
+          nonce: `nonce_three_replica_message_${index}`,
+          contentType: 'application/otto-e2ee+json' as const,
+          ciphertext: Buffer.from(`three-replica-${index}`).toString('base64url'),
+          routing: {
+            conversationId: 'conversation_three_replica',
+            senderPrincipalId: 'account_sender',
+            recipientPrincipalId: 'account_recipient',
+          },
+        };
+        return {
+          envelope,
+          signingKeyId: sender.keyId,
+          signature: await sender.sign(envelope),
+        };
+      }));
+      await Promise.all(envelopes.map((envelope, index) =>
+        federations[index % federations.length]!.enqueue(envelope)));
+
+      const claims = await Promise.all(federations.map(async (federation, index) => {
+        const request = {
+          version: 1 as const,
+          deploymentId: 'deployment_replica_b',
+          issuedAt: new Date(NOW).toISOString(),
+          expiresAt: new Date(NOW + 60_000).toISOString(),
+          nonce: `nonce_three_replica_claim_${index}`,
+          limit: 10,
+        };
+        return federation.claim({
+          request,
+          signingKeyId: recipient.keyId,
+          signature: await recipient.sign(request),
+        });
+      }));
+      const claimed = claims.flatMap((result) => result.messages as Array<{
+        envelope: { messageId: string };
+        claimToken: string;
+      }>);
+      expect(claimed).toHaveLength(envelopes.length);
+      expect(new Set(claimed.map((item) => item.envelope.messageId)).size).toBe(envelopes.length);
+
+      await Promise.all(claimed.map(async (item, index) => {
+        const request = {
+          version: 1 as const,
+          deploymentId: 'deployment_replica_b',
+          issuedAt: new Date(NOW).toISOString(),
+          expiresAt: new Date(NOW + 60_000).toISOString(),
+          nonce: `nonce_three_replica_ack_${index}`,
+          messageId: item.envelope.messageId,
+          claimToken: item.claimToken,
+        };
+        return federations[(index + 1) % federations.length]!.acknowledge({
+          request,
+          signingKeyId: recipient.keyId,
+          signature: await recipient.sign(request),
+        });
+      }));
+      await expect(stores[2]!.queueStats()).resolves.toMatchObject({ delivered: envelopes.length });
+
+      const rateResults = await Promise.all(Array.from({ length: 61 }, (_, index) =>
+        stores[index % stores.length]!.consumeRateLimit('deployment_replica_rate', new Date(NOW))));
+      expect(rateResults.filter(Boolean)).toHaveLength(60);
+      expect(rateResults.filter((accepted) => !accepted)).toHaveLength(1);
+    } finally {
+      await Promise.all(stores.map((store) => store.close()));
+    }
+  });
 });

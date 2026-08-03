@@ -9,11 +9,12 @@ import type {
   FederationClaimedMessage,
   FederationDeploymentKeyRecord,
   FederationDeploymentRecord,
+  FederationDeploymentUsage,
   FederationMessageStatus,
   FederationQueueStats,
   FederationStoredMessage,
 } from '../../contracts/federation.js';
-import { conflict, forbidden } from '../../errors.js';
+import { capacityExceeded, conflict, forbidden } from '../../errors.js';
 import { runMigrations } from '../../storage/migrations.js';
 import { claimTokenHash } from './crypto.js';
 import {
@@ -41,6 +42,8 @@ interface DeploymentRow {
   status: FederationDeploymentRecord['status'];
   capabilities: string[];
   max_pending_messages: number;
+  max_pending_bytes: string;
+  max_requests_per_minute: number;
   created_at: Date;
   updated_at: Date;
 }
@@ -101,6 +104,8 @@ function deploymentFromRow(row: DeploymentRow): FederationDeploymentRecord {
     status: row.status,
     capabilities: row.capabilities,
     maxPendingMessages: row.max_pending_messages,
+    maxPendingBytes: Number(row.max_pending_bytes),
+    maxRequestsPerMinute: row.max_requests_per_minute,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -206,13 +211,18 @@ export class PostgresFederationStore implements FederationStore {
   async registerDeployment(input: RegisterFederationDeploymentInput): Promise<FederationDeploymentRecord> {
     const result = await this.#pool.query<DeploymentRow>(
       `INSERT INTO control_federation_deployments
-       (id, display_name, origin, capabilities, max_pending_messages, created_at, updated_at)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $6)
+       (id, display_name, origin, capabilities, max_pending_messages, max_pending_bytes,
+        max_requests_per_minute, created_at, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $8)
        ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name,
          origin = EXCLUDED.origin, capabilities = EXCLUDED.capabilities,
-         max_pending_messages = EXCLUDED.max_pending_messages, updated_at = EXCLUDED.updated_at
+         max_pending_messages = EXCLUDED.max_pending_messages,
+         max_pending_bytes = EXCLUDED.max_pending_bytes,
+         max_requests_per_minute = EXCLUDED.max_requests_per_minute,
+         updated_at = EXCLUDED.updated_at
        RETURNING *`,
-      [input.id, input.displayName, input.origin, JSON.stringify(input.capabilities), input.maxPendingMessages, input.now],
+      [input.id, input.displayName, input.origin, JSON.stringify(input.capabilities),
+        input.maxPendingMessages, input.maxPendingBytes, input.maxRequestsPerMinute, input.now],
     );
     return deploymentFromRow(result.rows[0]!);
   }
@@ -274,12 +284,22 @@ export class PostgresFederationStore implements FederationStore {
   }
 
   async revokeKey(deploymentId: string, keyId: string, now: Date): Promise<boolean> {
-    const result = await this.#pool.query(
-      `UPDATE control_federation_keys SET status = 'revoked', revoked_at = $3
-       WHERE deployment_id = $1 AND key_id = $2 AND status = 'active'`,
-      [deploymentId, keyId, now],
-    );
-    return (result.rowCount ?? 0) > 0;
+    return this.#transaction(async (client) => {
+      const result = await client.query(
+        `UPDATE control_federation_keys SET status = 'revoked', revoked_at = $3
+         WHERE deployment_id = $1 AND key_id = $2 AND status = 'active'`,
+        [deploymentId, keyId, now],
+      );
+      if ((result.rowCount ?? 0) === 0) return false;
+      await client.query(
+        `UPDATE control_federation_messages
+         SET status = 'expired', claimed_until = NULL, claim_token_hash = NULL
+         WHERE sender_deployment_id = $1 AND signing_key_id = $2
+           AND status IN ('pending', 'claimed')`,
+        [deploymentId, keyId],
+      );
+      return true;
+    });
   }
 
   async getActiveKey(
@@ -332,6 +352,11 @@ export class PostgresFederationStore implements FederationStore {
   async setBlock(input: FederationBlockRecord): Promise<void> {
     await this.#transaction(async (client) => {
       await client.query(
+        `SELECT id FROM control_federation_deployments
+         WHERE id IN ($1, $2) ORDER BY id FOR UPDATE`,
+        [input.blockerDeploymentId, input.blockedDeploymentId],
+      );
+      await client.query(
         `INSERT INTO control_federation_blocks
          (blocker_deployment_id, blocked_deployment_id, reason, created_at)
          VALUES ($1, $2, $3, $4)
@@ -356,6 +381,24 @@ export class PostgresFederationStore implements FederationStore {
       `DELETE FROM control_federation_blocks
        WHERE blocker_deployment_id = $1 AND blocked_deployment_id = $2`,
       [blockerDeploymentId, blockedDeploymentId],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async consumeRateLimit(deploymentId: string, now: Date): Promise<boolean> {
+    const windowStartedAt = new Date(Math.floor(now.getTime() / 60_000) * 60_000);
+    const result = await this.#pool.query(
+      `INSERT INTO control_federation_rate_windows
+       (deployment_id, window_started_at, request_count)
+       SELECT id, $2, 1 FROM control_federation_deployments
+       WHERE id = $1 AND status = 'active'
+       ON CONFLICT (deployment_id, window_started_at) DO UPDATE
+       SET request_count = control_federation_rate_windows.request_count + 1
+       WHERE control_federation_rate_windows.request_count < (
+         SELECT max_requests_per_minute FROM control_federation_deployments WHERE id = $1
+       )
+       RETURNING request_count`,
+      [deploymentId, windowStartedAt],
     );
     return (result.rowCount ?? 0) > 0;
   }
@@ -403,21 +446,50 @@ export class PostgresFederationStore implements FederationStore {
 
       // Serialize capacity checks per recipient so concurrent gateway instances
       // cannot collectively exceed the deployment's pending-message limit.
-      const recipient = await client.query<{ max_pending_messages: number }>(
-        `SELECT max_pending_messages FROM control_federation_deployments
-         WHERE id = $1 FOR UPDATE`,
-        [envelope.recipientDeploymentId],
+      const deployments = await client.query<{
+        id: string;
+        status: FederationDeploymentRecord['status'];
+        max_pending_messages: number;
+        max_pending_bytes: string;
+      }>(
+        `SELECT id, status, max_pending_messages, max_pending_bytes
+         FROM control_federation_deployments
+         WHERE id IN ($1, $2) ORDER BY id FOR UPDATE`,
+        [envelope.senderDeploymentId, envelope.recipientDeploymentId],
       );
-      const capacity = await client.query<{ pending: string }>(
-        `SELECT COUNT(*)::text AS pending FROM control_federation_messages
+      const sender = deployments.rows.find((row) => row.id === envelope.senderDeploymentId);
+      const recipient = deployments.rows.find((row) => row.id === envelope.recipientDeploymentId);
+      if (!sender || !recipient || sender.status !== 'active' || recipient.status !== 'active') {
+        throw forbidden('federation deployment is not active');
+      }
+      const signingKey = await client.query(
+        `SELECT 1 FROM control_federation_keys
+         WHERE deployment_id = $1 AND key_id = $2 AND status = 'active'
+           AND not_before <= $3 AND (expires_at IS NULL OR expires_at > $3)
+         FOR SHARE`,
+        [envelope.senderDeploymentId, input.signed.signingKeyId, input.now],
+      );
+      if (!signingKey.rowCount) throw forbidden('federation signing key is no longer active');
+      const blocked = await client.query(
+        `SELECT 1 FROM control_federation_blocks
+         WHERE (blocker_deployment_id = $1 AND blocked_deployment_id = $2)
+            OR (blocker_deployment_id = $2 AND blocked_deployment_id = $1)
+         LIMIT 1`,
+        [envelope.senderDeploymentId, envelope.recipientDeploymentId],
+      );
+      if (blocked.rowCount) throw forbidden('federation route is blocked');
+      const capacity = await client.query<{ pending: string; pending_bytes: string }>(
+        `SELECT COUNT(*)::text AS pending, COALESCE(SUM(size_bytes), 0)::text AS pending_bytes
+         FROM control_federation_messages
          WHERE recipient_deployment_id = $1 AND status IN ('pending', 'claimed')`,
         [envelope.recipientDeploymentId],
       );
       if (
-        !recipient.rows[0]
-        || Number(capacity.rows[0]?.pending ?? 0) >= recipient.rows[0].max_pending_messages
+        Number(capacity.rows[0]?.pending ?? 0) >= recipient.max_pending_messages
+        || Number(capacity.rows[0]?.pending_bytes ?? 0) + input.sizeBytes
+          > Number(recipient.max_pending_bytes)
       ) {
-        throw conflict('recipient federation inbox is full');
+        throw capacityExceeded('recipient federation inbox capacity is exhausted');
       }
 
       const nonce = await client.query(
@@ -579,6 +651,30 @@ export class PostgresFederationStore implements FederationStore {
     );
   }
 
+  async listAuditEvents(limit: number): Promise<FederationAuditEventInput[]> {
+    const result = await this.#pool.query<{
+      actor_deployment_id: string;
+      action: string;
+      target_type: string;
+      target_id: string;
+      details: Record<string, unknown>;
+      occurred_at: Date;
+    }>(
+      `SELECT actor_deployment_id, action, target_type, target_id, details, occurred_at
+       FROM control_federation_audit_events
+       ORDER BY occurred_at DESC, id DESC LIMIT $1`,
+      [limit],
+    );
+    return result.rows.map((row) => ({
+      actorDeploymentId: row.actor_deployment_id,
+      action: row.action,
+      targetType: row.target_type,
+      targetId: row.target_id,
+      details: row.details,
+      occurredAt: row.occurred_at,
+    }));
+  }
+
   async queueStats(): Promise<FederationQueueStats> {
     const result = await this.#pool.query<{ status: FederationMessageStatus; count: string }>(
       'SELECT status, COUNT(*)::text AS count FROM control_federation_messages GROUP BY status',
@@ -586,6 +682,44 @@ export class PostgresFederationStore implements FederationStore {
     const stats: FederationQueueStats = { pending: 0, claimed: 0, delivered: 0, expired: 0 };
     for (const row of result.rows) stats[row.status] = Number(row.count);
     return stats;
+  }
+
+  async queueBytes(): Promise<FederationQueueStats> {
+    const result = await this.#pool.query<{
+      status: FederationMessageStatus;
+      bytes: string;
+    }>(
+      `SELECT status, COALESCE(SUM(size_bytes), 0)::text AS bytes
+       FROM control_federation_messages GROUP BY status`,
+    );
+    const stats: FederationQueueStats = { pending: 0, claimed: 0, delivered: 0, expired: 0 };
+    for (const row of result.rows) stats[row.status] = Number(row.bytes);
+    return stats;
+  }
+
+  async deploymentUsage(deploymentId: string): Promise<FederationDeploymentUsage> {
+    const result = await this.#pool.query<{
+      pending_messages: string;
+      claimed_messages: string;
+      pending_bytes: string;
+      claimed_bytes: string;
+    }>(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'pending')::text AS pending_messages,
+         COUNT(*) FILTER (WHERE status = 'claimed')::text AS claimed_messages,
+         COALESCE(SUM(size_bytes) FILTER (WHERE status = 'pending'), 0)::text AS pending_bytes,
+         COALESCE(SUM(size_bytes) FILTER (WHERE status = 'claimed'), 0)::text AS claimed_bytes
+       FROM control_federation_messages
+       WHERE recipient_deployment_id = $1`,
+      [deploymentId],
+    );
+    const row = result.rows[0]!;
+    return {
+      pendingMessages: Number(row.pending_messages),
+      claimedMessages: Number(row.claimed_messages),
+      pendingBytes: Number(row.pending_bytes),
+      claimedBytes: Number(row.claimed_bytes),
+    };
   }
 
   async expireMessages(now: Date, deliveredBefore: Date): Promise<{ expired: number; purged: number }> {
@@ -596,6 +730,11 @@ export class PostgresFederationStore implements FederationStore {
       [now],
     );
     await this.#pool.query('DELETE FROM control_federation_nonces WHERE expires_at <= $1', [now]);
+    await this.#pool.query(
+      `DELETE FROM control_federation_rate_windows
+       WHERE window_started_at < $1 - INTERVAL '2 minutes'`,
+      [now],
+    );
     const purged = await this.#pool.query(
       `DELETE FROM control_federation_messages
        WHERE (status = 'delivered' AND delivered_at <= $1)

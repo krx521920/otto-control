@@ -1121,6 +1121,25 @@ const MIGRATIONS: Migration[] = [
        ON CONFLICT DO NOTHING`,
     ],
   },
+  {
+    id: '027_federation_production_limits',
+    statements: [
+      `ALTER TABLE control_federation_deployments
+       ADD COLUMN IF NOT EXISTS max_pending_bytes BIGINT NOT NULL DEFAULT 536870912
+       CHECK (max_pending_bytes BETWEEN 1048576 AND 1099511627776)`,
+      `ALTER TABLE control_federation_deployments
+       ADD COLUMN IF NOT EXISTS max_requests_per_minute INTEGER NOT NULL DEFAULT 1200
+       CHECK (max_requests_per_minute BETWEEN 60 AND 1000000)`,
+      `CREATE TABLE IF NOT EXISTS control_federation_rate_windows (
+        deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id) ON DELETE CASCADE,
+        window_started_at TIMESTAMPTZ NOT NULL,
+        request_count INTEGER NOT NULL CHECK (request_count BETWEEN 1 AND 1000000),
+        PRIMARY KEY (deployment_id, window_started_at)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_federation_rate_windows_expiry
+       ON control_federation_rate_windows(window_started_at)`,
+    ],
+  },
 ];
 
 export const CONTROL_SCHEMA_MIGRATION_IDS = Object.freeze(

@@ -187,7 +187,13 @@ describe('production deployment assets', () => {
     expect(smoke).toContain('verifyFederationSignature');
     expect(smoke).toContain('http://federation-b:7790');
     expect(smoke).toContain('http://federation-c:7790');
+    expect(smoke).toContain('Promise.all(claimUrls.map');
+    expect(smoke).toContain('duplicated or lost an inbox lease');
     expect(smoke).not.toContain('BEGIN PRIVATE KEY');
+    const federationOperations = repositoryFile('docs/federation-production-operations.zh-CN.md');
+    expect(federationOperations).toContain('CAPACITY_EXCEEDED');
+    expect(federationOperations).toContain('RATE_LIMITED');
+    expect(federationOperations).toContain('三个无状态 Federation 实例');
   });
 
   it('routes only to the Patroni primary and removes unhealthy control instances', () => {
@@ -227,6 +233,9 @@ describe('production deployment assets', () => {
     expect(rules).toContain('OttoFederationHttpErrorsHigh');
     expect(rules).toContain('OttoFederationLatencyHigh');
     expect(rules).toContain('OttoFederationPendingQueueHigh');
+    expect(rules).toContain('OttoFederationPendingBytesHigh');
+    expect(rules).toContain('OttoFederationCapacityRejected');
+    expect(rules).toContain('OttoFederationRateLimitedHigh');
     expect(rules).toContain('otto_control:slo_availability:ratio_5m');
     expect(rules).toContain('OttoControlAvailabilityErrorBudgetBurnHigh');
     expect(rules).toContain('OttoControlPostgresPoolSaturated');

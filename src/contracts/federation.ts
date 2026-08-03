@@ -19,6 +19,8 @@ export interface FederationDeploymentRecord {
   status: FederationDeploymentStatus;
   capabilities: string[];
   maxPendingMessages: number;
+  maxPendingBytes: number;
+  maxRequestsPerMinute: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -127,4 +129,11 @@ export interface FederationQueueStats {
   claimed: number;
   delivered: number;
   expired: number;
+}
+
+export interface FederationDeploymentUsage {
+  pendingMessages: number;
+  claimedMessages: number;
+  pendingBytes: number;
+  claimedBytes: number;
 }

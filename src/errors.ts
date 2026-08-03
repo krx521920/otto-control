@@ -30,6 +30,14 @@ export function conflict(message: string): ControlPlaneError {
   return new ControlPlaneError(409, 'CONFLICT', message);
 }
 
+export function rateLimited(message: string): ControlPlaneError {
+  return new ControlPlaneError(429, 'RATE_LIMITED', message);
+}
+
+export function capacityExceeded(message: string): ControlPlaneError {
+  return new ControlPlaneError(429, 'CAPACITY_EXCEEDED', message);
+}
+
 export function approvalRequired(message: string): ControlPlaneError {
   return new ControlPlaneError(428, 'APPROVAL_REQUIRED', message);
 }

@@ -105,6 +105,7 @@ async function signedEnvelope(input: {
 
 describe('Otto federation gateway', () => {
   let app: FastifyInstance;
+  let service: FederationService;
   let store: MemoryFederationStore;
   let deploymentA: LocalEd25519Signer;
   let deploymentB: LocalEd25519Signer;
@@ -115,7 +116,7 @@ describe('Otto federation gateway', () => {
     store = new MemoryFederationStore();
     deploymentA = signer();
     deploymentB = signer();
-    const service = new FederationService({ store, now: () => now, maximumClaimBytes: 30 });
+    service = new FederationService({ store, now: () => now, maximumClaimBytes: 30 });
     app = await buildFederationApp({ config, service, logger: false });
     for (const [id, displayName, origin, key] of [
       ['deployment_a', 'Tenant A', 'https://a.private.test', deploymentA],
@@ -296,6 +297,7 @@ describe('Otto federation gateway', () => {
       headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
     });
     expect(revoked.statusCode).toBe(200);
+    expect((await store.getMessage(delayed.envelope.messageId))?.status).toBe('expired');
     const reused = await app.inject({
       method: 'POST',
       url: '/v1/admin/federation/deployments/deployment_a/keys',
@@ -313,9 +315,11 @@ describe('Otto federation gateway', () => {
       now,
     });
     store.deployments.get('deployment_b')!.maxPendingMessages = 0;
-    expect((await app.inject({
+    const exhausted = await app.inject({
       method: 'POST', url: '/v1/federation/envelopes', payload: retryable,
-    })).statusCode).toBe(409);
+    });
+    expect(exhausted.statusCode).toBe(429);
+    expect(exhausted.json()).toMatchObject({ error: { code: 'CAPACITY_EXCEEDED' } });
 
     store.deployments.get('deployment_b')!.maxPendingMessages = 100;
     const retried = await app.inject({
@@ -323,6 +327,82 @@ describe('Otto federation gateway', () => {
     });
     expect(retried.statusCode).toBe(202);
     expect(retried.json()).toMatchObject({ accepted: true, duplicate: false });
+  });
+
+  it('enforces a deployment-wide rate budget and exposes operator capacity without ciphertext', async () => {
+    store.deployments.get('deployment_a')!.maxRequestsPerMinute = 1;
+    expect((await app.inject({
+      method: 'POST',
+      url: '/v1/federation/envelopes',
+      payload: await signedEnvelope({
+        deploymentSigner: deploymentA,
+        senderDeploymentId: 'deployment_a',
+        recipientDeploymentId: 'deployment_b',
+        now,
+      }),
+    })).statusCode).toBe(202);
+    const limited = await app.inject({
+      method: 'POST',
+      url: '/v1/federation/envelopes',
+      payload: await signedEnvelope({
+        deploymentSigner: deploymentA,
+        senderDeploymentId: 'deployment_a',
+        recipientDeploymentId: 'deployment_b',
+        now,
+      }),
+    });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json()).toMatchObject({ error: { code: 'RATE_LIMITED' } });
+
+    const operations = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/federation/deployments/deployment_b/operations',
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+    });
+    expect(operations.statusCode).toBe(200);
+    expect(operations.body).not.toContain('base64url-encrypted-payload');
+    expect(operations.json()).toMatchObject({
+      deployment: {
+        id: 'deployment_b',
+        maxPendingMessages: 10_000,
+        maxPendingBytes: 512 * 1024 * 1024,
+        maxRequestsPerMinute: 1_200,
+      },
+      usage: { pendingMessages: 1, pendingBytes: 27 },
+    });
+    const audit = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/federation/audit-events?limit=20',
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+    });
+    expect(audit.statusCode).toBe(200);
+    expect(audit.body).not.toContain('base64url-encrypted-payload');
+    expect(audit.json().events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: 'federation.message.enqueue',
+        targetId: expect.any(String),
+      }),
+    ]));
+  });
+
+  it('rejects new traffic immediately after a deployment is disabled', async () => {
+    const disabled = await app.inject({
+      method: 'PATCH',
+      url: '/v1/admin/federation/deployments/deployment_a/status',
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+      payload: { status: 'disabled' },
+    });
+    expect(disabled.statusCode).toBe(200);
+    expect((await app.inject({
+      method: 'POST',
+      url: '/v1/federation/envelopes',
+      payload: await signedEnvelope({
+        deploymentSigner: deploymentA,
+        senderDeploymentId: 'deployment_a',
+        recipientDeploymentId: 'deployment_b',
+        now,
+      }),
+    })).statusCode).toBe(403);
   });
 
   it('bounds each inbox claim by ciphertext bytes as well as message count', async () => {
@@ -346,6 +426,42 @@ describe('Otto federation gateway', () => {
     });
     expect(inbox.statusCode).toBe(200);
     expect(inbox.json().messages).toHaveLength(1);
+  });
+
+  it('rejects an inbox when the encrypted byte budget is exhausted', async () => {
+    store.deployments.get('deployment_b')!.maxPendingBytes = 20;
+    const exhausted = await app.inject({
+      method: 'POST',
+      url: '/v1/federation/envelopes',
+      payload: await signedEnvelope({
+        deploymentSigner: deploymentA,
+        senderDeploymentId: 'deployment_a',
+        recipientDeploymentId: 'deployment_b',
+        now,
+      }),
+    });
+    expect(exhausted.statusCode).toBe(429);
+    expect(exhausted.json()).toMatchObject({ error: { code: 'CAPACITY_EXCEEDED' } });
+  });
+
+  it('expires offline messages and purges retained ciphertext after the configured window', async () => {
+    const pending = await signedEnvelope({
+      deploymentSigner: deploymentA,
+      senderDeploymentId: 'deployment_a',
+      recipientDeploymentId: 'deployment_b',
+      now,
+    });
+    expect((await app.inject({
+      method: 'POST', url: '/v1/federation/envelopes', payload: pending,
+    })).statusCode).toBe(202);
+
+    now += 24 * 60 * 60_000 + 1;
+    await expect(service.expire()).resolves.toEqual({ expired: 1, purged: 0 });
+    expect((await store.getMessage(pending.envelope.messageId))?.status).toBe('expired');
+
+    now += 7 * 24 * 60 * 60_000 + 1;
+    await expect(service.expire()).resolves.toEqual({ expired: 0, purged: 1 });
+    expect(await store.getMessage(pending.envelope.messageId)).toBeNull();
   });
 
   it('atomically consumes scoped A2A grants and only accepts a matching response', async () => {
@@ -424,12 +540,15 @@ describe('Otto federation gateway', () => {
     });
     expect(adminStatus.statusCode).toBe(200);
     expect(adminStatus.json().queue).toEqual({ pending: 0, claimed: 0, delivered: 0, expired: 0 });
+    expect(adminStatus.json().queueBytes).toEqual({ pending: 0, claimed: 0, delivered: 0, expired: 0 });
     expect((await app.inject({ method: 'GET', url: '/metrics' })).statusCode).toBe(404);
     const metrics = await app.inject({
       method: 'GET', url: '/metrics', headers: { authorization: `Bearer ${METRICS_TOKEN}` },
     });
     expect(metrics.statusCode).toBe(200);
     expect(metrics.body).toContain('otto_federation_http_requests_total');
+    expect(metrics.body).toContain('otto_federation_queue_bytes');
+    expect(metrics.body).toContain('otto_federation_rejections_total');
   });
 
   it('provides a private-server client that signs sends and verifies claimed envelopes', async () => {

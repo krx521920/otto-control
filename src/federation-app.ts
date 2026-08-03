@@ -74,6 +74,24 @@ export async function buildFederationApp(options: {
     labelNames: ['status'],
     registers: [registry],
   });
+  const queueBytes = new Gauge({
+    name: 'otto_federation_queue_bytes',
+    help: 'Federation ciphertext bytes by delivery state.',
+    labelNames: ['status'],
+    registers: [registry],
+  });
+  const rejections = new Counter({
+    name: 'otto_federation_rejections_total',
+    help: 'Federation requests rejected by stable error code.',
+    labelNames: ['code'],
+    registers: [registry],
+  });
+  const cleanupEvents = new Counter({
+    name: 'otto_federation_cleanup_messages_total',
+    help: 'Federation messages expired or purged by retention cleanup.',
+    labelNames: ['result'],
+    registers: [registry],
+  });
   app.addHook('onRequest', async (request, reply) => {
     reply
       .header('cache-control', 'no-store')
@@ -98,9 +116,17 @@ export async function buildFederationApp(options: {
     const statusCode = statusCodeFor(error);
     if (statusCode >= 500) request.log.error({ err: error }, 'federation request failed');
     const message = error instanceof Error ? error.message : 'Invalid request';
+    const code = error instanceof ControlPlaneError
+      ? error.code
+      : statusCode === 400
+        ? 'INVALID_REQUEST'
+        : statusCode === 429
+          ? 'HTTP_RATE_LIMITED'
+          : 'REQUEST_FAILED';
+    if (statusCode >= 400) rejections.inc({ code });
     return reply.code(statusCode).send({
       error: {
-        code: error instanceof ControlPlaneError ? error.code : statusCode === 400 ? 'INVALID_REQUEST' : 'REQUEST_FAILED',
+        code,
         message: statusCode >= 500 ? 'Internal server error' : message,
         requestId: request.id,
       },
@@ -115,8 +141,11 @@ export async function buildFederationApp(options: {
   app.get('/metrics', async (request, reply) => {
     const expected = options.config.metricsToken;
     if (!expected || !secureEqual(bearer(request), expected)) return reply.code(404).send({ error: 'not found' });
-    const stats = (await options.service.status(true)).queue as Record<string, number>;
+    const status = await options.service.status(true);
+    const stats = status.queue as Record<string, number>;
     for (const [status, count] of Object.entries(stats)) queue.set({ status }, count);
+    const bytes = status.queueBytes as Record<string, number>;
+    for (const [status, count] of Object.entries(bytes)) queueBytes.set({ status }, count);
     return reply.type(registry.contentType).send(await registry.metrics());
   });
   await registerFederationRoutes(app, {
@@ -125,7 +154,12 @@ export async function buildFederationApp(options: {
   });
 
   const cleanup = setInterval(() => {
-    void options.service.expire().catch((error) => app.log.error({ err: error }, 'federation cleanup failed'));
+    void options.service.expire()
+      .then(({ expired, purged }) => {
+        if (expired > 0) cleanupEvents.inc({ result: 'expired' }, expired);
+        if (purged > 0) cleanupEvents.inc({ result: 'purged' }, purged);
+      })
+      .catch((error) => app.log.error({ err: error }, 'federation cleanup failed'));
   }, options.config.cleanupIntervalMs);
   cleanup.unref?.();
   app.addHook('onClose', async () => {

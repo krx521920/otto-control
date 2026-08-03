@@ -65,6 +65,12 @@ export async function registerFederationRoutes(
     admin.get('/status', async () => options.service.status(true));
     admin.get<{ Querystring: { limit?: string } }>('/deployments', async (request) =>
       options.service.listDeployments(request.query.limit));
+    admin.get<{ Querystring: { limit?: string } }>('/audit-events', async (request) =>
+      options.service.listAuditEvents(request.query.limit));
+    admin.get<{ Params: { deploymentId: string } }>(
+      '/deployments/:deploymentId/operations',
+      async (request) => options.service.deploymentOperations(request.params.deploymentId),
+    );
     admin.post<{ Body: Record<string, unknown> }>('/deployments', async (request, reply) =>
       reply.code(201).send(await options.service.registerDeployment(request.body || {})));
     admin.patch<{ Params: { deploymentId: string }; Body: Record<string, unknown> }>(

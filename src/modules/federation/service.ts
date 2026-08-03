@@ -9,7 +9,14 @@ import {
   type FederationSignedRequest,
   type SignedFederationEnvelope,
 } from '../../contracts/federation.js';
-import { conflict, forbidden, invalidRequest, notFound, unauthorized } from '../../errors.js';
+import {
+  conflict,
+  forbidden,
+  invalidRequest,
+  notFound,
+  rateLimited,
+  unauthorized,
+} from '../../errors.js';
 import { ciphertextSha256, normalizeFederationPublicKey, verifyFederationSignature } from './crypto.js';
 import type { FederationStore } from './store.js';
 
@@ -163,6 +170,12 @@ export class FederationService {
       maxPendingMessages: raw.maxPendingMessages === undefined
         ? 10_000
         : boundedInteger(raw.maxPendingMessages, 'maxPendingMessages', 100, 1_000_000),
+      maxPendingBytes: raw.maxPendingBytes === undefined
+        ? 512 * 1024 * 1024
+        : boundedInteger(raw.maxPendingBytes, 'maxPendingBytes', 1024 * 1024, 1024 ** 4),
+      maxRequestsPerMinute: raw.maxRequestsPerMinute === undefined
+        ? 1_200
+        : boundedInteger(raw.maxRequestsPerMinute, 'maxRequestsPerMinute', 60, 1_000_000),
       now,
     });
     await this.#store.appendAuditEvent({
@@ -202,6 +215,34 @@ export class FederationService {
   async listDeployments(rawLimit: unknown): Promise<Record<string, unknown>> {
     const limit = rawLimit === undefined ? 100 : boundedInteger(Number(rawLimit), 'limit', 1, 500);
     return { deployments: (await this.#store.listDeployments(limit)).map(deploymentView) };
+  }
+
+  async listAuditEvents(rawLimit: unknown): Promise<Record<string, unknown>> {
+    const limit = rawLimit === undefined ? 100 : boundedInteger(Number(rawLimit), 'limit', 1, 500);
+    return {
+      events: (await this.#store.listAuditEvents(limit)).map((event) => ({
+        ...event,
+        occurredAt: event.occurredAt.toISOString(),
+      })),
+    };
+  }
+
+  async deploymentOperations(deploymentId: string): Promise<Record<string, unknown>> {
+    const deployment = await this.#store.getDeployment(identifier(deploymentId, 'deploymentId'));
+    if (!deployment) throw notFound('federation deployment not found');
+    const usage = await this.#store.deploymentUsage(deployment.id);
+    return {
+      deployment: deploymentView(deployment),
+      usage,
+      utilization: {
+        messages: deployment.maxPendingMessages === 0
+          ? 1
+          : (usage.pendingMessages + usage.claimedMessages) / deployment.maxPendingMessages,
+        bytes: deployment.maxPendingBytes === 0
+          ? 1
+          : (usage.pendingBytes + usage.claimedBytes) / deployment.maxPendingBytes,
+      },
+    };
   }
 
   async directoryEntry(deploymentId: string): Promise<Record<string, unknown>> {
@@ -390,6 +431,7 @@ export class FederationService {
   async enqueue(raw: SignedFederationEnvelope): Promise<Record<string, unknown>> {
     const signed = await this.#validateEnvelope(raw);
     const now = new Date(this.#now());
+    await this.#enforceDeploymentRate(signed.envelope.senderDeploymentId, now);
     const result = await this.#store.enqueueMessage({
       signed,
       ciphertextSha256: ciphertextSha256(signed.envelope.ciphertext),
@@ -476,17 +518,19 @@ export class FederationService {
         visibleMetadata: ['deployment ids', 'message type', 'timestamps', 'size', 'delivery status'],
       },
     };
-    if (includeQueue) status.queue = await this.#store.queueStats();
+    if (includeQueue) {
+      status.queue = await this.#store.queueStats();
+      status.queueBytes = await this.#store.queueBytes();
+    }
     return status;
   }
 
-  async expire(): Promise<number> {
+  async expire(): Promise<{ expired: number; purged: number }> {
     const now = new Date(this.#now());
-    const result = await this.#store.expireMessages(
+    return this.#store.expireMessages(
       now,
       new Date(now.getTime() - this.#deliveredRetentionMs),
     );
-    return result.expired + result.purged;
   }
 
   async #verifySignedRequest(
@@ -512,7 +556,14 @@ export class FederationService {
     if (!await this.#store.consumeNonce(deployment.id, nonce, expiresAt, new Date(this.#now()))) {
       throw conflict('federation request nonce has already been used');
     }
+    await this.#enforceDeploymentRate(deployment.id, new Date(this.#now()));
     return request;
+  }
+
+  async #enforceDeploymentRate(deploymentId: string, now: Date): Promise<void> {
+    if (!await this.#store.consumeRateLimit(deploymentId, now)) {
+      throw rateLimited('federation deployment request rate is exhausted');
+    }
   }
 
   async #validateEnvelope(raw: SignedFederationEnvelope): Promise<SignedFederationEnvelope> {
