@@ -103,10 +103,22 @@ function validatePostgresIdentity(secretDirectory, errors) {
     if (!certificate.verify(ca.publicKey)) {
       errors.push('PostgreSQL server certificate is not signed by the generated CA');
     }
-    for (const hostname of ['postgres-router', 'postgres-1', 'postgres-2', 'postgres-3']) {
+    for (const hostname of [
+      'postgres-router',
+      'postgres-1',
+      'postgres-2',
+      'postgres-3',
+      'localhost',
+    ]) {
       if (!certificate.checkHost(hostname)) {
         errors.push(`PostgreSQL server certificate does not cover ${hostname}`);
       }
+    }
+    if (!certificate.checkIP('127.0.0.1')) {
+      errors.push('PostgreSQL server certificate does not cover 127.0.0.1');
+    }
+    if (!certificate.checkIP('::1')) {
+      errors.push('PostgreSQL server certificate does not cover ::1');
     }
     const certificateKey = certificate.publicKey.export({ type: 'spki', format: 'der' });
     const privateKey = createPrivateKey(keyPem);

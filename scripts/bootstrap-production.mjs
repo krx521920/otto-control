@@ -108,7 +108,7 @@ function createPostgresTlsIdentity(secretDirectory) {
       'basicConstraints=critical,CA:FALSE',
       'keyUsage=critical,digitalSignature,keyEncipherment',
       'extendedKeyUsage=serverAuth',
-      'subjectAltName=DNS:postgres-router,DNS:postgres-1,DNS:postgres-2,DNS:postgres-3',
+      'subjectAltName=DNS:postgres-router,DNS:postgres-1,DNS:postgres-2,DNS:postgres-3,DNS:localhost,IP:127.0.0.1,IP:::1',
       '',
     ].join('\n'), { encoding: 'utf8', mode: 0o600 });
     runOpenSsl([

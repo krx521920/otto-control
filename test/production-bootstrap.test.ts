@@ -127,6 +127,9 @@ describe('production bootstrap', () => {
       expect(postgresCertificate.verify(postgresCa.publicKey)).toBe(true);
       expect(postgresCertificate.checkHost('postgres-router')).toBe('postgres-router');
       expect(postgresCertificate.checkHost('postgres-3')).toBe('postgres-3');
+      expect(postgresCertificate.checkHost('localhost')).toBe('localhost');
+      expect(postgresCertificate.checkIP('127.0.0.1')).toBe('127.0.0.1');
+      expect(postgresCertificate.checkIP('::1')).toBe('::1');
 
       const repeated = spawnSync(process.execPath, [
         'scripts/bootstrap-production.mjs',

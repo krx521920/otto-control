@@ -74,7 +74,7 @@ npm run preflight:deployment -- --env-file .env.production
 ```
 
 生成器使用排他写入，不会覆盖已有身份。数据库服务器证书覆盖
-`postgres-router`、`postgres-1`、`postgres-2` 和 `postgres-3`，Control、Federation、
+`postgres-router`、`postgres-1`、`postgres-2`、`postgres-3` 和本机回环地址，Control、Federation、
 运维工具及数据库复制链路均使用 TLS。`postgres_tls_ca_private_key.pem` 只留在主机
 密钥目录用于受控轮换，Compose 不会把它挂载进任何容器。
 
