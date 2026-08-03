@@ -15,6 +15,7 @@ describe('production deployment assets', () => {
     expect(workflow).toContain('cancel-in-progress: true');
     expect(workflow).toContain('npm ci');
     expect(workflow).toContain('npm run check');
+    expect(repositoryFile('package.json')).toContain('node --check scripts/smoke-federation.mjs');
     expect(workflow).toContain('image: postgres:17-alpine');
     expect(workflow).toContain('POSTGRES_DB: otto_control_test');
     expect(workflow).toContain('CONTROL_REQUIRE_POSTGRES_TEST: "true"');

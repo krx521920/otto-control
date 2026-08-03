@@ -128,7 +128,7 @@ for (const item of claimed) {
     publicKeyPem: senderSigner.publicKeyPem,
   });
 }
-await Promise.all(claimed.map((item, index) => jsonRequest(
+await Promise.all(claimed.map(async (item, index) => jsonRequest(
   `${claimUrls[(index + 1) % claimUrls.length]}/v1/federation/inbox/ack`,
   {
     method: 'POST',
