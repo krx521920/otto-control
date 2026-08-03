@@ -278,7 +278,7 @@ services:
     command:
       - |
         password="$$(cat /run/secrets/postgres_password)"
-        printf '%s:%s:%s:%s:%s\n' "$$PGHOST" "$$PGPORT" "$$PGDATABASE" "$$PGUSER" "$$password" |
+        printf '%s:%s:%s:%s:%s\n' "$$PGHOST" "$$PGPORT" '*' "$$PGUSER" "$$password" |
           gosu postgres sh -c 'umask 077; cat > "$$PGPASSFILE"'
         unset password
         exec gosu postgres tail -f /dev/null

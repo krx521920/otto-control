@@ -131,6 +131,7 @@ psql_value() {
     --username "$DATABASE_USER" \
     --dbname "$DATABASE" \
     --port "$DATABASE_PORT" \
+    --no-password \
     --set=ON_ERROR_STOP=1 \
     --tuples-only --no-align \
     --command "$1"
@@ -188,6 +189,7 @@ service_exec psql \
   --username "$DATABASE_USER" \
   --dbname "$DATABASE" \
   --port "$DATABASE_PORT" \
+  --no-password \
   --set=ON_ERROR_STOP=1 \
   --tuples-only --no-align --quiet < "$SQL_FILE" > "$RAW_FILE"
 

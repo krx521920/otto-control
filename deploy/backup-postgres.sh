@@ -105,6 +105,7 @@ mkfifo "$DUMP_PIPE"
 compose exec -T postgres-tools pg_dump \
   --username "$DB_USER" \
   --dbname "$DB_NAME" \
+  --no-password \
   --format custom \
   --compress 9 \
   --no-owner > "$DUMP_PIPE" &
@@ -136,7 +137,7 @@ if ! node "$ROOT/scripts/backup-crypto.mjs" decrypt-run \
   --input "$TEMP_FILE" \
   --key-file "$BACKUP_KEY_FILE" \
   --command-stdout ignore \
-  -- "$@" exec -T postgres-tools pg_restore --list
+  -- "$@" exec -T postgres-tools pg_restore --no-password --list
 then
   printf '%s\n' 'encrypted PostgreSQL backup validation failed' >&2
   exit 1

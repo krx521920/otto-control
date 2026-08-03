@@ -136,6 +136,9 @@ describe('production deployment assets', () => {
       compose.indexOf('  postgres-pitr-drill:'),
     );
     expect(postgresTools).toContain('dockerfile: deploy/postgres-ha/Dockerfile');
+    expect(postgresTools).toContain(
+      `"$$PGHOST" "$$PGPORT" '*' "$$PGUSER" "$$password"`,
+    );
     expect(compose).toContain('postgres_superuser_password');
     expect(compose).toContain('postgres_replication_password');
     expect(compose).toContain('pgbackrest_cipher_pass');
@@ -300,7 +303,7 @@ describe('production deployment assets', () => {
     const restore = repositoryFile('deploy/restore-postgres.sh');
     const timer = repositoryFile('deploy/systemd/otto-control-backup.timer');
     expect(backup).toContain('--format custom');
-    expect(backup).toContain('pg_restore --list');
+    expect(backup).toContain('pg_restore --no-password --list');
     expect(backup).toContain('.dump.enc');
     expect(backup).toContain('backup-crypto.mjs');
     expect(backup).toContain('decrypt-run');
@@ -314,6 +317,7 @@ describe('production deployment assets', () => {
       restore.indexOf('compose stop control-a control-b control-c'),
     );
     expect(backup).toContain('compose exec -T postgres-tools pg_dump');
+    expect(backup).toContain('--no-password');
     expect(backup).not.toContain('--file -');
     expect(restore).toContain('compose exec -T postgres-tools pg_restore');
     expect(restore).toContain('sha256sum --check');
@@ -340,6 +344,7 @@ describe('production deployment assets', () => {
     expect(drill).toContain('CONTROL_DRILL_MAX_BACKUP_AGE_HOURS');
     expect(drill).toContain('backup_age_seconds');
     expect(drill).toContain('decrypt-run');
+    expect(drill).toContain('--no-password');
     expect(drill).not.toContain('RESTORE_PIPE');
     expect(drill).toContain('dropdb');
     expect(drill).not.toContain('compose stop control');

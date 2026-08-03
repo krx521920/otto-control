@@ -119,7 +119,7 @@ cleanup() {
   if [ -n "$MANIFEST_TEMP" ]; then rm -f -- "$MANIFEST_TEMP"; fi
   if [ -n "$DRILL_DATABASE" ]; then
     compose exec -T postgres-tools dropdb \
-      --username "$DB_USER" --if-exists --force "$DRILL_DATABASE" >/dev/null 2>&1 || true
+      --username "$DB_USER" --no-password --if-exists --force "$DRILL_DATABASE" >/dev/null 2>&1 || true
   fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
@@ -148,6 +148,7 @@ STARTED_SECONDS=$NOW_SECONDS
 DRILL_DATABASE="otto_drill_$(date -u '+%Y%m%d%H%M%S')_$$"
 compose exec -T postgres-tools createdb \
   --username "$DB_USER" \
+  --no-password \
   --owner "$DB_USER" \
   --template template0 \
   "$DRILL_DATABASE"
@@ -163,6 +164,7 @@ if ! node "$ROOT/scripts/backup-crypto.mjs" decrypt-run \
   -- "$@" exec -T postgres-tools pg_restore \
     --username "$DB_USER" \
     --dbname "$DRILL_DATABASE" \
+    --no-password \
     --no-owner \
     --exit-on-error
 then
@@ -173,7 +175,7 @@ fi
 REQUIRED_TABLES='control_schema_migrations control_customers control_deployments control_licenses control_signing_keys control_audit_events control_telemetry_events control_update_distributions control_update_releases control_deployment_update_assignments control_admin_accounts control_admin_roles control_admin_sessions control_admin_approvals control_admin_approval_decisions'
 for TABLE in $REQUIRED_TABLES; do
   EXISTS=$(compose exec -T postgres-tools psql \
-    --username "$DB_USER" --dbname "$DRILL_DATABASE" --tuples-only --no-align \
+    --username "$DB_USER" --dbname "$DRILL_DATABASE" --no-password --tuples-only --no-align \
     --command "SELECT CASE WHEN to_regclass('public.$TABLE') IS NULL THEN 'missing' ELSE 'ok' END")
   if [ "$EXISTS" != ok ]; then
     printf 'restore drill is missing required table: %s\n' "$TABLE" >&2
@@ -183,7 +185,7 @@ done
 
 query_count() {
   compose exec -T postgres-tools psql \
-    --username "$DB_USER" --dbname "$DRILL_DATABASE" --tuples-only --no-align \
+    --username "$DB_USER" --dbname "$DRILL_DATABASE" --no-password --tuples-only --no-align \
     --command "SELECT COUNT(*) FROM $1"
 }
 
@@ -218,7 +220,7 @@ if [ -z "$DATABASE_FINGERPRINT" ]; then
 fi
 
 compose exec -T postgres-tools dropdb \
-  --username "$DB_USER" --if-exists --force "$DRILL_DATABASE"
+  --username "$DB_USER" --no-password --if-exists --force "$DRILL_DATABASE"
 DRILL_DATABASE=''
 
 COMPLETED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
