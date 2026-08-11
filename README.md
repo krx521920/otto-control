@@ -129,6 +129,31 @@ Production CI starts all three Federation instances and runs
 `scripts/smoke-federation.mjs` across them to prove signed ciphertext relay,
 cross-instance inbox leasing, signature verification, idempotency, and acknowledgement.
 
+## Edge model gateway
+
+The first independently deployable Otto Edge Gateway implementation lives in
+this repository while remaining outside the Control request process:
+
+```bash
+npm run dev:edge
+# production Node adapter: npm run start:edge
+```
+
+It validates short-lived Control-signed tokens and policies locally, pins model
+provider routes, enforces request/rate bounds, performs bounded failover, and
+streams provider responses without sending prompts or conversation context to
+Control. Signed policy also bounds upstream stream-idle time, and downstream
+disconnects cancel provider work instead of continuing to consume tokens. A
+standard Web Service Worker adapter is provided for Alibaba Cloud
+ESA. See [`docs/otto-edge-gateway.zh-CN.md`](docs/otto-edge-gateway.zh-CN.md) for
+the trust boundary, configuration, and remaining production gates.
+
+Control persists deployment-scoped Edge policies in PostgreSQL and exposes
+authenticated policy-resolution and short-lived token-issuance APIs. They
+validate the online License/deployment/organization/fingerprint binding, reject
+replay with persisted nonces, apply enforced-billing admission, and never accept
+prompt or conversation content.
+
 ## Managed release artifact distribution
 
 Production releases can use a fail-closed upload and delivery pipeline instead

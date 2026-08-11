@@ -33,6 +33,7 @@ import type {
   CustomerRecord,
   DeploymentUpdateAssignmentRecord,
   DeploymentRecord,
+  EdgeGatewayPolicyRecord,
   LicenseLifecycleEventRecord,
   LicenseRecord,
   LicenseSeatUsageRecord,
@@ -50,6 +51,7 @@ import type {
   UpdateReleaseRecord,
   UpdateReleaseTransition,
 } from './control-store.js';
+import type { EdgeGatewayLimitsV1, EdgeModelRouteV1 } from '../contracts/edge-gateway.js';
 import type { UpdateChannel, UpdateReleaseState } from '../contracts/update-policy.js';
 import type {
   ReleaseArtifactKind,
@@ -180,6 +182,18 @@ interface DeploymentRow {
   machine_fingerprint: string;
   name: string;
   status: RecordStatus;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface EdgeGatewayPolicyRow {
+  deployment_id: string;
+  organization_id: string;
+  policy_version: string;
+  routes: EdgeModelRouteV1[];
+  limits: EdgeGatewayLimitsV1;
+  status: RecordStatus;
+  updated_by: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -633,6 +647,20 @@ function deploymentFromRow(row: DeploymentRow): DeploymentRecord {
     machineFingerprint: row.machine_fingerprint,
     name: row.name,
     status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function edgeGatewayPolicyFromRow(row: EdgeGatewayPolicyRow): EdgeGatewayPolicyRecord {
+  return {
+    deploymentId: row.deployment_id,
+    organizationId: row.organization_id,
+    policyVersion: row.policy_version,
+    routes: row.routes,
+    limits: row.limits,
+    status: row.status,
+    updatedBy: row.updated_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1328,6 +1356,87 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       [id],
     );
     return result.rows[0] ? deploymentFromRow(result.rows[0]) : null;
+  }
+
+  async upsertEdgeGatewayPolicy(input: {
+    deploymentId: string;
+    organizationId: string;
+    policyVersion: string;
+    routes: EdgeModelRouteV1[];
+    limits: EdgeGatewayLimitsV1;
+    status: RecordStatus;
+    updatedBy: string;
+    changedAt: Date;
+  }): Promise<EdgeGatewayPolicyRecord> {
+    try {
+      const result = await this.#pool.query<EdgeGatewayPolicyRow>(
+        `INSERT INTO control_edge_gateway_policies
+          (deployment_id, organization_id, policy_version, routes, limits, status,
+           updated_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $8)
+         ON CONFLICT (deployment_id) DO UPDATE SET
+           organization_id = EXCLUDED.organization_id,
+           policy_version = EXCLUDED.policy_version,
+           routes = EXCLUDED.routes,
+           limits = EXCLUDED.limits,
+           status = EXCLUDED.status,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = EXCLUDED.updated_at
+         RETURNING *`,
+        [
+          input.deploymentId,
+          input.organizationId,
+          input.policyVersion,
+          JSON.stringify(input.routes),
+          JSON.stringify(input.limits),
+          input.status,
+          input.updatedBy,
+          input.changedAt,
+        ],
+      );
+      return edgeGatewayPolicyFromRow(result.rows[0]!);
+    } catch (error) {
+      if (postgresCode(error) === '23503') throw conflict('deployment does not exist');
+      throw error;
+    }
+  }
+
+  async getEdgeGatewayPolicy(deploymentId: string): Promise<EdgeGatewayPolicyRecord | null> {
+    const result = await this.#pool.query<EdgeGatewayPolicyRow>(
+      'SELECT * FROM control_edge_gateway_policies WHERE deployment_id = $1',
+      [deploymentId],
+    );
+    return result.rows[0] ? edgeGatewayPolicyFromRow(result.rows[0]) : null;
+  }
+
+  async consumeEdgeGatewayNonce(input: {
+    deploymentId: string;
+    nonce: string;
+    nowMs: number;
+    expiresAtMs: number;
+  }): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'DELETE FROM control_edge_gateway_nonces WHERE expires_at_ms < $1',
+        [input.nowMs],
+      );
+      const result = await client.query(
+        `INSERT INTO control_edge_gateway_nonces (deployment_id, nonce, expires_at_ms)
+         VALUES ($1, $2, $3)
+         ON CONFLICT DO NOTHING
+         RETURNING nonce`,
+        [input.deploymentId, input.nonce, input.expiresAtMs],
+      );
+      await client.query('COMMIT');
+      return result.rowCount === 1;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async createLicense(input: CreateLicenseRecordInput): Promise<LicenseRecord> {

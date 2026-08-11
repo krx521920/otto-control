@@ -20,6 +20,7 @@ import { registerAuditAnchorRoutes } from './routes/audit-anchor.js';
 import { registerAuditWitnessRoutes } from './routes/audit-witness.js';
 import { registerDataGovernanceRoutes } from './routes/data-governance.js';
 import { registerCommercialDeliveryRoutes } from './routes/commercial-delivery.js';
+import { registerEdgeGatewayRoutes } from './routes/edge-gateway.js';
 import { ControlMetrics } from './observability/metrics.js';
 import { traceLogContext } from './observability/tracing.js';
 
@@ -218,6 +219,17 @@ export async function buildControlApp(
       );
       await registerBillingRoutes(app, {
         service: commercialControl.billing,
+        identity: commercialControl.identity,
+      });
+    }
+    if (commercialControl.edgeGateway) {
+      capabilities.push(
+        'edge_gateway_control_plane',
+        'edge_gateway_signed_policy',
+        'edge_gateway_short_lived_access_tokens',
+      );
+      await registerEdgeGatewayRoutes(app, {
+        service: commercialControl.edgeGateway,
         identity: commercialControl.identity,
       });
     }

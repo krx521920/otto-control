@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "testRunner": "vitest",
+  "plugins": ["@stryker-mutator/vitest-runner"],
+  "mutate": [
+    "src/edge-gateway/gateway.ts",
+    "src/edge-gateway/protocol.ts",
+    "src/edge-gateway/rate-limit.ts",
+    "src/modules/edge-gateway/service.ts"
+  ],
+  "testFiles": [
+    "test/edge-gateway.test.ts",
+    "test/edge-gateway-properties.test.ts",
+    "test/edge-gateway-control.test.ts",
+    "test/edge-gateway-protocol.test.ts"
+  ],
+  "coverageAnalysis": "perTest",
+  "mutator": {
+    "excludedMutations": ["StringLiteral"]
+  },
+  "reporters": ["clear-text", "progress", "html", "json"],
+  "htmlReporter": {
+    "fileName": "reports/mutation/edge-gateway.html"
+  },
+  "jsonReporter": {
+    "fileName": "reports/mutation/edge-gateway.json"
+  },
+  "thresholds": {
+    "high": 90,
+    "low": 85,
+    "break": 80
+  },
+  "concurrency": 2,
+  "timeoutMS": 10000,
+  "dryRunTimeoutMinutes": 2,
+  "vitest": {
+    "configFile": "vitest.config.ts",
+    "related": true
+  }
+}

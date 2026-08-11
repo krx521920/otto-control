@@ -57,6 +57,10 @@ import type {
   AuditWitnessEvidenceStatus,
   AuditWitnessReceiptRecord,
 } from '../contracts/audit-witness.js';
+import type {
+  EdgeGatewayLimitsV1,
+  EdgeModelRouteV1,
+} from '../contracts/edge-gateway.js';
 
 export type RecordStatus = 'active' | 'suspended';
 
@@ -99,6 +103,18 @@ export interface DeploymentRecord {
   machineFingerprint: string;
   name: string;
   status: RecordStatus;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface EdgeGatewayPolicyRecord {
+  deploymentId: string;
+  organizationId: string;
+  policyVersion: string;
+  routes: EdgeModelRouteV1[];
+  limits: EdgeGatewayLimitsV1;
+  status: RecordStatus;
+  updatedBy: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -315,6 +331,23 @@ export interface ControlStore {
     name: string;
   }): Promise<DeploymentRecord>;
   getDeployment(id: string): Promise<DeploymentRecord | null>;
+  upsertEdgeGatewayPolicy(input: {
+    deploymentId: string;
+    organizationId: string;
+    policyVersion: string;
+    routes: EdgeModelRouteV1[];
+    limits: EdgeGatewayLimitsV1;
+    status: RecordStatus;
+    updatedBy: string;
+    changedAt: Date;
+  }): Promise<EdgeGatewayPolicyRecord>;
+  getEdgeGatewayPolicy(deploymentId: string): Promise<EdgeGatewayPolicyRecord | null>;
+  consumeEdgeGatewayNonce(input: {
+    deploymentId: string;
+    nonce: string;
+    nowMs: number;
+    expiresAtMs: number;
+  }): Promise<boolean>;
   createLicense(input: CreateLicenseRecordInput): Promise<LicenseRecord>;
   getLicense(id: string): Promise<LicenseRecord | null>;
   revokeLicense(id: string, revokedAtMs: number): Promise<LicenseRecord | null>;

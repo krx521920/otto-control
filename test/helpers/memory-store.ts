@@ -9,6 +9,7 @@ import type {
   CustomerRecord,
   DeploymentUpdateAssignmentRecord,
   DeploymentRecord,
+  EdgeGatewayPolicyRecord,
   LicenseLifecycleEventRecord,
   LicenseRecord,
   LicenseSeatUsageRecord,
@@ -93,6 +94,7 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'update_release.publish', 'identity.read', 'identity.manage', 'approval.request',
   'approval.read', 'approval.decide',
   'billing.read', 'billing.topup', 'billing.manage', 'billing.refund',
+  'edge_gateway.read', 'edge_gateway.manage',
   'audit.read', 'audit.export', 'audit.verify', 'audit.anchor.manage',
   'customer_delivery.read',
 ];
@@ -106,6 +108,8 @@ interface StoredTelemetryEvent extends OttoTelemetryEvent {
 export class MemoryControlStore implements ControlStore {
   readonly customers = new Map<string, CustomerRecord>();
   readonly deployments = new Map<string, DeploymentRecord>();
+  readonly edgeGatewayPolicies = new Map<string, EdgeGatewayPolicyRecord>();
+  readonly edgeGatewayNonces = new Map<string, number>();
   readonly licenses = new Map<string, LicenseRecord>();
   readonly licenseLifecycleEvents: LicenseLifecycleEventRecord[] = [];
   readonly licenseSeatUsage = new Map<string, LicenseSeatUsageRecord>();
@@ -263,6 +267,45 @@ export class MemoryControlStore implements ControlStore {
 
   async getDeployment(id: string): Promise<DeploymentRecord | null> {
     return this.deployments.get(id) ?? null;
+  }
+
+  async upsertEdgeGatewayPolicy(
+    input: Omit<EdgeGatewayPolicyRecord, 'createdAt' | 'updatedAt'> & { changedAt: Date },
+  ): Promise<EdgeGatewayPolicyRecord> {
+    const existing = this.edgeGatewayPolicies.get(input.deploymentId);
+    const record: EdgeGatewayPolicyRecord = {
+      deploymentId: input.deploymentId,
+      organizationId: input.organizationId,
+      policyVersion: input.policyVersion,
+      routes: structuredClone(input.routes),
+      limits: structuredClone(input.limits),
+      status: input.status,
+      updatedBy: input.updatedBy,
+      createdAt: existing?.createdAt ?? input.changedAt,
+      updatedAt: input.changedAt,
+    };
+    this.edgeGatewayPolicies.set(input.deploymentId, record);
+    return structuredClone(record);
+  }
+
+  async getEdgeGatewayPolicy(deploymentId: string): Promise<EdgeGatewayPolicyRecord | null> {
+    const record = this.edgeGatewayPolicies.get(deploymentId);
+    return record ? structuredClone(record) : null;
+  }
+
+  async consumeEdgeGatewayNonce(input: {
+    deploymentId: string;
+    nonce: string;
+    nowMs: number;
+    expiresAtMs: number;
+  }): Promise<boolean> {
+    for (const [key, expiresAtMs] of this.edgeGatewayNonces) {
+      if (expiresAtMs < input.nowMs) this.edgeGatewayNonces.delete(key);
+    }
+    const key = `${input.deploymentId}\0${input.nonce}`;
+    if (this.edgeGatewayNonces.has(key)) return false;
+    this.edgeGatewayNonces.set(key, input.expiresAtMs);
+    return true;
   }
 
   async createLicense(input: CreateLicenseRecordInput): Promise<LicenseRecord> {

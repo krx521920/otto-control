@@ -11,8 +11,12 @@ import type {
 } from '../../contracts/billing.js';
 import { isOttoBillingModule } from '../../contracts/billing.js';
 import { conflict, invalidRequest, notFound, unauthorized } from '../../errors.js';
-import type { ControlStore, LicenseRecord } from '../../storage/control-store.js';
+import type { ControlStore } from '../../storage/control-store.js';
 import type { ControlTokenIssuer } from '../commercial-control/token-issuer.js';
+import {
+  authenticateOnlineDeployment,
+  type AuthenticatedOnlineDeployment,
+} from '../commercial-control/deployment-authentication.js';
 import {
   normalizeExecutionReceiptEnvelope,
   normalizeExecutionReceiptKeyBootstrap,
@@ -21,18 +25,10 @@ import {
 } from './execution-receipt.js';
 
 const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,159}$/u;
-const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_CREDITS = 9_000_000_000_000_000;
 const MAX_UNITS = 9_000_000_000_000;
 const MAX_RECEIPT_KEY_LIFETIME_MS = 400 * 24 * 60 * 60 * 1000;
 const RECEIPT_REQUEST_FIELDS = new Set(['licenseId', 'machineFingerprint', 'envelope']);
-
-interface AuthenticatedDeployment {
-  customerId: string;
-  license: LicenseRecord;
-  organizationId: string;
-  deploymentId: string;
-}
 
 function objectValue(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -619,35 +615,19 @@ export class BillingService {
     body: Record<string, unknown>,
     bearerToken: string,
     allowDeploymentOrganization = false,
-  ): Promise<AuthenticatedDeployment> {
+  ): Promise<AuthenticatedOnlineDeployment> {
     const licenseId = requiredString(body, 'licenseId');
     const deploymentId = requiredString(body, 'deploymentId');
     const organizationId = requiredString(body, 'organizationId');
-    if (!ID_PATTERN.test(organizationId)) throw invalidRequest('organizationId is invalid');
     const machineFingerprint = requiredString(body, 'machineFingerprint', 64).toLowerCase();
-    if (!FINGERPRINT_PATTERN.test(machineFingerprint)) {
-      throw invalidRequest('machineFingerprint is invalid');
-    }
-    const license = await this.#store.getLicense(licenseId);
-    if (!license) throw unauthorized('License is invalid');
-    if (license.offline) throw unauthorized('offline License cannot use online billing');
-    if (license.revokedAtMs !== null || this.#now() >= license.expiresAtMs + license.gracePeriodMs) {
-      throw unauthorized('License is revoked or expired');
-    }
-    if (
-      license.deploymentId !== deploymentId ||
-      (!allowDeploymentOrganization && license.organizationId !== organizationId) ||
-      license.machineFingerprint !== machineFingerprint
-    ) throw unauthorized('billing request binding is invalid');
-    const expected = this.#tokens.issue({
-      purpose: 'lease',
-      licenseId,
-      deploymentId,
-      version: license.tokenVersion,
+    return authenticateOnlineDeployment({
+      store: this.#store,
+      tokens: this.#tokens,
+      binding: { licenseId, deploymentId, organizationId, machineFingerprint },
+      bearerToken,
+      nowMs: this.#now(),
+      purpose: 'billing',
+      allowDeploymentOrganization,
     });
-    if (!this.#tokens.matches(bearerToken, expected)) throw unauthorized('billing token is invalid');
-    const deployment = await this.#store.getDeployment(deploymentId);
-    if (!deployment || deployment.status !== 'active') throw unauthorized('deployment is inactive');
-    return { customerId: deployment.customerId, license, organizationId, deploymentId };
   }
 }

@@ -1,0 +1,756 @@
+import { generateKeyPairSync } from 'node:crypto';
+
+import { describe, expect, it, vi } from 'vitest';
+
+import type {
+  EdgeGatewayLimitsV1,
+  EdgeGatewayOutcomeV1,
+  EdgeModelRouteV1,
+} from '../src/contracts/edge-gateway.js';
+import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import { createOttoEdgeGateway } from '../src/edge-gateway/gateway.js';
+import {
+  createEdgeSignatureVerifier,
+  encodeEdgeAccessTokenEnvelope,
+} from '../src/edge-gateway/protocol.js';
+import { InMemoryEdgeRateLimiter } from '../src/edge-gateway/rate-limit.js';
+import { EdgeGatewayControlService } from '../src/modules/edge-gateway/service.js';
+
+const NOW = Date.parse('2026-08-11T08:00:00.000Z');
+const DEPLOYMENT_ID = 'dep_edge_fixture';
+const ORGANIZATION_ID = 'org_edge_fixture';
+const POLICY_VERSION = 'edge-v1';
+
+const limits: EdgeGatewayLimitsV1 = {
+  maxRequestBytes: 4_096,
+  requestsPerMinute: 10,
+  upstreamConnectTimeoutMs: 5_000,
+  upstreamIdleTimeoutMs: 30_000,
+  maxRouteAttempts: 2,
+};
+
+const primaryRoute: EdgeModelRouteV1 = {
+  id: 'route_primary',
+  endpoint: 'chat_completions',
+  publicModel: 'otto-fast',
+  upstreamModel: 'provider-model-v3',
+  upstreamUrl: 'https://provider-a.test/v1/chat/completions',
+  priority: 10,
+  authentication: { type: 'bearer', secretBinding: 'PROVIDER_A_API_KEY' },
+};
+
+async function fixture(overrides: {
+  routes?: EdgeModelRouteV1[];
+  limits?: EdgeGatewayLimitsV1;
+  policyVersion?: string;
+  tokenPolicyVersion?: string;
+  allowedModels?: string[];
+  policyDurationMs?: number;
+  rateLimiter?: InMemoryEdgeRateLimiter;
+  fetch?: typeof fetch;
+  secrets?: Readonly<Record<string, string>>;
+} = {}) {
+  const { privateKey } = generateKeyPairSync('ed25519');
+  const signer = new LocalEd25519Signer(
+    privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+  );
+  let nextId = 0;
+  const control = new EdgeGatewayControlService({
+    signer,
+    now: () => NOW,
+    id: () => `fixture_${++nextId}`,
+  });
+  const policy = await control.issuePolicy({
+    policyVersion: overrides.policyVersion ?? POLICY_VERSION,
+    deploymentId: DEPLOYMENT_ID,
+    organizationId: ORGANIZATION_ID,
+    routes: overrides.routes ?? [primaryRoute],
+    limits: overrides.limits ?? limits,
+    durationMs: overrides.policyDurationMs,
+  });
+  const access = await control.issueAccessToken({
+    deploymentId: DEPLOYMENT_ID,
+    organizationId: ORGANIZATION_ID,
+    subjectId: 'account_edge_user',
+    policyVersion: overrides.tokenPolicyVersion ?? POLICY_VERSION,
+    allowedModels: overrides.allowedModels ?? ['otto-fast'],
+  });
+  const outcomes: EdgeGatewayOutcomeV1[] = [];
+  const secrets = overrides.secrets ?? { PROVIDER_A_API_KEY: 'provider-secret-value' };
+  const gateway = createOttoEdgeGateway({
+    policySource: { load: async () => policy },
+    verifier: createEdgeSignatureVerifier({ [signer.keyId]: signer.publicKeyPem }),
+    secretResolver: { get: async (binding) => secrets[binding] ?? null },
+    rateLimiter: overrides.rateLimiter ?? new InMemoryEdgeRateLimiter(),
+    outcomeSink: { record: async (outcome) => { outcomes.push(outcome); } },
+    fetch: overrides.fetch ?? (vi.fn(async () => new Response('{}')) as typeof fetch),
+    now: () => NOW,
+    requestId: () => 'edge_request_fixture',
+  });
+  const authorization = `Bearer ${encodeEdgeAccessTokenEnvelope(access)}`;
+  const request = (body: unknown, init: RequestInit = {}) => new Request(
+    'https://edge.otto.test/v1/chat/completions',
+    {
+      ...init,
+      method: 'POST',
+      headers: {
+        authorization,
+        'content-type': 'application/json',
+        ...Object.fromEntries(new Headers(init.headers)),
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  return { access, authorization, control, gateway, outcomes, policy, request, signer };
+}
+
+describe('otto edge gateway', () => {
+  it('exposes a minimal health endpoint without loading policy or secrets', async () => {
+    const values = await fixture();
+    const response = await values.gateway.fetch(new Request('https://edge.otto.test/healthz'));
+    await expect(response.json()).resolves.toEqual({ status: 'ok', service: 'otto-edge-gateway' });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('verifies Control signatures, pins the upstream route, and streams without content logging', async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async (...parameters: Parameters<typeof fetch>) => {
+      void parameters;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"delta":"first"}\n\n'));
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream', 'x-request-id': 'provider-request' },
+      });
+    });
+    const values = await fixture({ fetch: fetchMock as typeof fetch });
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast',
+      stream: true,
+      messages: [{ role: 'user', content: 'private prompt must stay off Control' }],
+    }));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('text/event-stream');
+    expect(response.headers.get('x-upstream-request-id')).toBe('provider-request');
+    await expect(response.text()).resolves.toBe('data: {"delta":"first"}\n\ndata: [DONE]\n\n');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(primaryRoute.upstreamUrl);
+    const headers = new Headers(init?.headers);
+    expect(headers.get('authorization')).toBe('Bearer provider-secret-value');
+    expect(headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    const sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    expect(sent.model).toBe('provider-model-v3');
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({
+        outcome: 'succeeded',
+        publicModel: 'otto-fast',
+        routeId: 'route_primary',
+      }),
+    ]);
+    const evidence = JSON.stringify(values.outcomes);
+    expect(evidence).not.toContain('private prompt');
+    expect(evidence).not.toContain('provider-secret-value');
+  });
+
+  it('aborts an idle upstream stream and records a content-free timeout outcome', async () => {
+    vi.useFakeTimers();
+    try {
+      let providerCancelled = false;
+      let providerSignal: AbortSignal | null = null;
+      const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+        providerSignal = init?.signal ?? null;
+        return new Response(new ReadableStream<Uint8Array>({
+          pull: () => new Promise<void>(() => undefined),
+          cancel() {
+            providerCancelled = true;
+          },
+        }), { headers: { 'content-type': 'text/event-stream' } });
+      });
+      const values = await fixture({
+        fetch: fetchMock,
+        limits: { ...limits, upstreamIdleTimeoutMs: 1_000 },
+      });
+      const response = await values.gateway.fetch(values.request({
+        model: 'otto-fast', stream: true, messages: [],
+      }));
+      const content = expect(response.text()).rejects.toMatchObject({ name: 'TimeoutError' });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await content;
+      expect(providerCancelled).toBe(true);
+      expect((providerSignal as AbortSignal | null)?.aborted).toBe(true);
+      expect(values.outcomes).toEqual([
+        expect.objectContaining({
+          outcome: 'stream_timed_out',
+          requestId: 'edge_request_fixture',
+          routeId: 'route_primary',
+        }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels provider work when the downstream request disconnects', async () => {
+    let providerCancelled = false;
+    let providerSignal: AbortSignal | null = null;
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      providerSignal = init?.signal ?? null;
+      return new Response(new ReadableStream<Uint8Array>({
+        pull: () => new Promise<void>(() => undefined),
+        cancel() {
+          providerCancelled = true;
+        },
+      }), { headers: { 'content-type': 'text/event-stream' } });
+    });
+    const values = await fixture({ fetch: fetchMock });
+    const downstream = new AbortController();
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', stream: true, messages: [],
+    }, { signal: downstream.signal }));
+    const content = response.text();
+
+    downstream.abort(new DOMException('test disconnect', 'AbortError'));
+
+    await expect(content).rejects.toMatchObject({ name: 'AbortError' });
+    expect(providerCancelled).toBe(true);
+    expect((providerSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({
+        outcome: 'client_cancelled',
+        requestId: 'edge_request_fixture',
+        routeId: 'route_primary',
+      }),
+    ]);
+  });
+
+  it('enforces the response-header connection timeout before retrying or failing', async () => {
+    let providerSignal: AbortSignal | null = null;
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => new Promise<Response>(
+      (_resolve, reject) => {
+        providerSignal = init?.signal ?? null;
+        const fail = () => reject(providerSignal?.reason ?? new DOMException('aborted', 'AbortError'));
+        if (providerSignal?.aborted) fail();
+        else providerSignal?.addEventListener('abort', fail, { once: true });
+      },
+    ));
+    const values = await fixture({
+      fetch: fetchMock,
+      limits: { ...limits, upstreamConnectTimeoutMs: 500, maxRouteAttempts: 1 },
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(502);
+    expect((providerSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({ outcome: 'upstream_failed', upstreamStatus: null }),
+    ]);
+  });
+
+  it('resets the idle deadline after every upstream chunk', async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      let providerController: ReadableStreamDefaultController<Uint8Array> | null = null;
+      let providerSignal: AbortSignal | null = null;
+      const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+        providerSignal = init?.signal ?? null;
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            providerController = controller;
+          },
+        }));
+      });
+      const values = await fixture({
+        fetch: fetchMock,
+        limits: { ...limits, upstreamIdleTimeoutMs: 1_000 },
+      });
+      const response = await values.gateway.fetch(values.request({
+        model: 'otto-fast', stream: true, messages: [],
+      }));
+      const content = response.text();
+
+      providerController!.enqueue(encoder.encode('first'));
+      await vi.advanceTimersByTimeAsync(999);
+      providerController!.enqueue(encoder.encode('second'));
+      await vi.advanceTimersByTimeAsync(999);
+      providerController!.close();
+
+      await expect(content).resolves.toBe('firstsecond');
+      expect((providerSignal as AbortSignal | null)?.aborted).toBe(false);
+      expect(values.outcomes).toEqual([
+        expect.objectContaining({ outcome: 'succeeded' }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('records an upstream stream failure without exposing its error text', async () => {
+    let providerController: ReadableStreamDefaultController<Uint8Array> | null = null;
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          providerController = controller;
+        },
+      }),
+    ));
+    const values = await fixture({ fetch: fetchMock });
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', stream: true, messages: [],
+    }));
+    const content = expect(response.text()).rejects.toThrow('private provider failure');
+
+    providerController!.error(new Error('private provider failure'));
+
+    await content;
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({ outcome: 'upstream_failed' }),
+    ]);
+    expect(JSON.stringify(values.outcomes)).not.toContain('private provider failure');
+  });
+
+  it('cancels provider work when the downstream response body is discarded', async () => {
+    let providerCancelled = false;
+    let providerSignal: AbortSignal | null = null;
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      providerSignal = init?.signal ?? null;
+      return new Response(new ReadableStream<Uint8Array>({
+        pull: () => new Promise<void>(() => undefined),
+        cancel() {
+          providerCancelled = true;
+        },
+      }));
+    });
+    const values = await fixture({ fetch: fetchMock });
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', stream: true, messages: [],
+    }));
+
+    await response.body!.cancel('consumer discarded response');
+
+    expect(providerCancelled).toBe(true);
+    expect((providerSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({ outcome: 'client_cancelled' }),
+    ]);
+  });
+
+  it('completes content-free responses without leaving stream lifecycle state behind', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    const values = await fixture({ fetch: fetchMock });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(204);
+    expect(response.body).toBeNull();
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({ outcome: 'succeeded', upstreamStatus: 204 }),
+    ]);
+  });
+
+  it('rejects missing, forged, and policy-mismatched access tokens before provider fetch', async () => {
+    const fetchMock = vi.fn(async () => new Response('{}'));
+    const values = await fixture({ fetch: fetchMock as typeof fetch });
+    const missing = await values.gateway.fetch(new Request(
+      'https://edge.otto.test/v1/chat/completions',
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' },
+    ));
+    expect(missing.status).toBe(401);
+
+    const forgedEnvelope = {
+      ...values.access,
+      token: { ...values.access.token, subjectId: 'account_attacker' },
+    };
+    const forged = await values.gateway.fetch(new Request(
+      'https://edge.otto.test/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${encodeEdgeAccessTokenEnvelope(forgedEnvelope)}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ model: 'otto-fast', messages: [] }),
+      },
+    ));
+    expect(forged.status).toBe(401);
+
+    const mismatch = await fixture({
+      fetch: fetchMock as typeof fetch,
+      tokenPolicyVersion: 'different-policy',
+    });
+    const mismatchResponse = await mismatch.gateway.fetch(mismatch.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(mismatchResponse.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('enforces model allowlists, JSON media type, body limits, and per-subject rate limits', async () => {
+    const fetchMock = vi.fn(async () => new Response('{}'));
+    const restricted = await fixture({
+      allowedModels: ['otto-reasoning'],
+      fetch: fetchMock as typeof fetch,
+    });
+    const forbidden = await restricted.gateway.fetch(restricted.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(forbidden.status).toBe(403);
+
+    const smallLimit = await fixture({
+      fetch: fetchMock as typeof fetch,
+      limits: { ...limits, maxRequestBytes: 1_024 },
+    });
+    const tooLarge = await smallLimit.gateway.fetch(smallLimit.request({
+      model: 'otto-fast', messages: [{ role: 'user', content: 'x'.repeat(2_000) }],
+    }));
+    expect(tooLarge.status).toBe(413);
+
+    const rateLimited = await fixture({
+      fetch: fetchMock as typeof fetch,
+      limits: { ...limits, requestsPerMinute: 1 },
+    });
+    expect((await rateLimited.gateway.fetch(rateLimited.request({
+      model: 'otto-fast', messages: [],
+    }))).status).toBe(200);
+    const second = await rateLimited.gateway.fetch(rateLimited.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(second.status).toBe(429);
+    expect(second.headers.get('retry-after')).toBe('60');
+  });
+
+  it('handles path, method, media, JSON, model, and byte-limit boundaries fail-closed', async () => {
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    const values = await fixture({
+      allowedModels: ['otto-fast', 'otto-unrouted'],
+      fetch: fetchMock as typeof fetch,
+      limits: { ...limits, maxRequestBytes: 1_024, requestsPerMinute: 100 },
+    });
+    const raw = (
+      body: string | Uint8Array | undefined,
+      input: { path?: string; method?: string; headers?: Record<string, string> } = {},
+    ) => new Request(`https://edge.otto.test${input.path ?? '/v1/chat/completions'}`, {
+      method: input.method ?? 'POST',
+      headers: {
+        authorization: values.authorization,
+        'content-type': 'application/json',
+        ...input.headers,
+      },
+      body,
+    });
+    const errorCode = async (response: Response) => {
+      const body = await response.json() as { error: { code: string } };
+      return body.error.code;
+    };
+
+    const missingRoute = await values.gateway.fetch(raw(undefined, {
+      path: '/v1/not-a-route', method: 'GET',
+    }));
+    expect(missingRoute.status).toBe(404);
+    await expect(errorCode(missingRoute)).resolves.toBe('EDGE_NOT_FOUND');
+
+    const wrongMethod = await values.gateway.fetch(raw(undefined, { method: 'GET' }));
+    expect(wrongMethod.status).toBe(405);
+    expect(wrongMethod.headers.get('allow')).toBe('POST');
+    await expect(errorCode(wrongMethod)).resolves.toBe('EDGE_METHOD_NOT_ALLOWED');
+
+    const wrongMedia = await values.gateway.fetch(raw('{}', {
+      headers: { 'content-type': 'text/plain' },
+    }));
+    expect(wrongMedia.status).toBe(415);
+    await expect(errorCode(wrongMedia)).resolves.toBe('EDGE_UNSUPPORTED_MEDIA_TYPE');
+
+    for (const invalidBody of ['{', '[]', 'null', '{}', '{"model":7}']) {
+      const response = await values.gateway.fetch(raw(invalidBody));
+      expect(response.status).toBe(400);
+      await expect(errorCode(response)).resolves.toBe('EDGE_INVALID_REQUEST');
+    }
+
+    const malformedUtf8 = await values.gateway.fetch(raw(new Uint8Array([0xff, 0xfe])));
+    expect(malformedUtf8.status).toBe(400);
+    await expect(errorCode(malformedUtf8)).resolves.toBe('EDGE_INVALID_REQUEST');
+
+    const invalidLength = await values.gateway.fetch(raw('{}', {
+      headers: { 'content-length': 'not-an-integer' },
+    }));
+    expect(invalidLength.status).toBe(400);
+    await expect(errorCode(invalidLength)).resolves.toBe('EDGE_INVALID_REQUEST');
+
+    const declaredTooLarge = await values.gateway.fetch(raw('{}', {
+      headers: { 'content-length': '1025' },
+    }));
+    expect(declaredTooLarge.status).toBe(413);
+    await expect(errorCode(declaredTooLarge)).resolves.toBe('EDGE_REQUEST_TOO_LARGE');
+
+    const prefix = '{"model":"otto-fast","padding":"';
+    const suffix = '"}';
+    const exactBody = `${prefix}${'x'.repeat(1_024 - prefix.length - suffix.length)}${suffix}`;
+    expect(new TextEncoder().encode(exactBody)).toHaveLength(1_024);
+    expect((await values.gateway.fetch(raw(exactBody))).status).toBe(200);
+    const overBody = `${prefix}${'x'.repeat(1_025 - prefix.length - suffix.length)}${suffix}`;
+    const overResponse = await values.gateway.fetch(raw(overBody));
+    expect(overResponse.status).toBe(413);
+    await expect(errorCode(overResponse)).resolves.toBe('EDGE_REQUEST_TOO_LARGE');
+
+    const modelTooLong = await values.gateway.fetch(raw(JSON.stringify({
+      model: 'x'.repeat(161), messages: [],
+    })));
+    expect(modelTooLong.status).toBe(400);
+    await expect(errorCode(modelTooLong)).resolves.toBe('EDGE_INVALID_REQUEST');
+
+    const unavailable = await values.gateway.fetch(raw(JSON.stringify({
+      model: 'otto-unrouted', messages: [],
+    })));
+    expect(unavailable.status).toBe(503);
+    await expect(errorCode(unavailable)).resolves.toBe('EDGE_MODEL_UNAVAILABLE');
+  });
+
+  it('fails over only retryable upstream failures and never accepts a client upstream URL', async () => {
+    const secondary: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      id: 'route_secondary',
+      upstreamUrl: 'https://provider-b.test/v1/chat/completions',
+      priority: 20,
+      authentication: { type: 'header', headerName: 'x-api-key', secretBinding: 'PROVIDER_B_API_KEY' },
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('temporarily unavailable', { status: 503 }))
+      .mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }));
+    const values = await fixture({
+      routes: [secondary, primaryRoute],
+      fetch: fetchMock as typeof fetch,
+      secrets: {
+        PROVIDER_A_API_KEY: 'primary-secret',
+        PROVIDER_B_API_KEY: 'secondary-secret',
+      },
+    });
+    const rejectedOverride = await values.gateway.fetch(values.request({
+      model: 'otto-fast',
+      messages: [],
+      upstreamUrl: 'https://attacker.test/',
+    }));
+    expect(rejectedOverride.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast',
+      messages: [],
+    }));
+    expect(response.status).toBe(200);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://provider-a.test/v1/chat/completions',
+      'https://provider-b.test/v1/chat/completions',
+    ]);
+    expect(new Headers(fetchMock.mock.calls[1]![1]?.headers).get('x-api-key'))
+      .toBe('secondary-secret');
+
+    const clientErrorFetch = vi.fn(async () => new Response('bad request', { status: 400 }));
+    const noRetry = await fixture({
+      routes: [primaryRoute, secondary],
+      fetch: clientErrorFetch as typeof fetch,
+      secrets: {
+        PROVIDER_A_API_KEY: 'primary-secret',
+        PROVIDER_B_API_KEY: 'secondary-secret',
+      },
+    });
+    expect((await noRetry.gateway.fetch(noRetry.request({
+      model: 'otto-fast', messages: [],
+    }))).status).toBe(400);
+    expect(clientErrorFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('contains secret-provider and network exceptions without leaking internal errors', async () => {
+    const secondary: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      id: 'route_exception_fallback',
+      upstreamUrl: 'https://provider-b.test/v1/chat/completions',
+      priority: 20,
+      authentication: { type: 'bearer', secretBinding: 'PROVIDER_B_API_KEY' },
+    };
+    const networkFetch = vi.fn()
+      .mockRejectedValueOnce(new Error('private DNS details must not escape'))
+      .mockResolvedValueOnce(new Response('{"fallback":true}', { status: 200 }));
+    const values = await fixture({
+      routes: [primaryRoute, secondary],
+      fetch: networkFetch as typeof fetch,
+      secrets: {
+        PROVIDER_A_API_KEY: 'primary-secret',
+        PROVIDER_B_API_KEY: 'secondary-secret',
+      },
+    });
+    const recovered = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(recovered.status).toBe(200);
+    expect(networkFetch).toHaveBeenCalledTimes(2);
+
+    const unavailable = createOttoEdgeGateway({
+      policySource: { load: async () => values.policy },
+      verifier: createEdgeSignatureVerifier({ [values.signer.keyId]: values.signer.publicKeyPem }),
+      secretResolver: { get: async () => { throw new Error('secret backend unavailable'); } },
+      rateLimiter: new InMemoryEdgeRateLimiter(),
+      fetch: networkFetch as typeof fetch,
+      now: () => NOW,
+      requestId: () => 'edge_request_secret_error',
+    });
+    const failed = await unavailable.fetch(values.request({ model: 'otto-fast', messages: [] }));
+    expect(failed.status).toBe(502);
+    expect(await failed.text()).not.toContain('secret backend');
+  });
+
+  it('fails closed when a signed policy is expired or a provider secret is absent', async () => {
+    const expired = await fixture({ policyDurationMs: 60_000 });
+    const gateway = createOttoEdgeGateway({
+      policySource: { load: async () => expired.policy },
+      verifier: createEdgeSignatureVerifier({
+        [expired.signer.keyId]: expired.signer.publicKeyPem,
+      }),
+      secretResolver: { get: async () => null },
+      rateLimiter: new InMemoryEdgeRateLimiter(),
+      now: () => NOW + 60_000,
+    });
+    const expiredResponse = await gateway.fetch(expired.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(expiredResponse.status).toBe(401);
+
+    const missingSecret = await fixture({ secrets: {} });
+    const unavailable = await missingSecret.gateway.fetch(missingSecret.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(unavailable.status).toBe(502);
+  });
+
+  it('rejects unsafe signed routes before they can become SSRF or secret-header policies', async () => {
+    const values = await fixture();
+    await expect(values.control.issuePolicy({
+      policyVersion: POLICY_VERSION,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      routes: [{ ...primaryRoute, upstreamUrl: 'http://127.0.0.1/admin' }],
+      limits,
+    })).rejects.toMatchObject({ code: 'EDGE_INVALID_ENVELOPE' });
+    await expect(values.control.issuePolicy({
+      policyVersion: POLICY_VERSION,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      routes: [{
+        ...primaryRoute,
+        authentication: {
+          type: 'header',
+          headerName: 'cookie',
+          secretBinding: 'PROVIDER_A_API_KEY',
+        },
+      }],
+      limits,
+    })).rejects.toMatchObject({ code: 'EDGE_INVALID_ENVELOPE' });
+  });
+
+  it('parses authorization and normalized model names without accepting token smuggling', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{"ok":true}', {
+      headers: { 'content-type': 'application/json' },
+    }));
+    const values = await fixture({ fetch: fetchMock as typeof fetch });
+    const body = { model: 'otto-fast', messages: [] };
+    for (const authorization of [
+      `xBearer ${values.authorization.slice('Bearer '.length)}`,
+      `Bearer ${values.authorization.slice('Bearer '.length)} trailing`,
+      values.authorization.replace('Bearer ', 'Bearer'),
+    ]) {
+      const response = await values.gateway.fetch(values.request(body, {
+        headers: { authorization },
+      }));
+      expect(response.status).toBe(401);
+    }
+
+    const normalized = await values.gateway.fetch(values.request({
+      model: '  otto-fast  ', messages: [],
+    }, { headers: { accept: 'application/json' } }));
+    expect(normalized.status).toBe(200);
+    await expect(normalized.text()).resolves.toBe('{"ok":true}');
+    const upstreamHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    expect(upstreamHeaders.get('accept')).toBe('application/json');
+    expect(normalized.headers.get('cache-control')).toBe('no-store');
+    expect(normalized.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    expect(normalized.headers.get('x-ratelimit-remaining')).toBe('9');
+    expect(values.outcomes[0]?.durationMs).toBe(0);
+  });
+
+  it('keeps endpoint selection and equal-priority failover deterministic', async () => {
+    const wrongEndpoint: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      id: 'route_responses_only',
+      endpoint: 'responses',
+      upstreamUrl: 'https://wrong-endpoint.test/v1/responses',
+      priority: 0,
+    };
+    const lexicalLast: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      id: 'route_z_last',
+      upstreamUrl: 'https://z-route.test/v1/chat/completions',
+      priority: 10,
+    };
+    const lexicalFirst: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      id: 'route_a_first',
+      upstreamUrl: 'https://a-route.test/v1/chat/completions',
+      priority: 10,
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const values = await fixture({
+      routes: [wrongEndpoint, lexicalLast, lexicalFirst],
+      fetch: fetchMock as typeof fetch,
+    });
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe('{}');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(lexicalFirst.upstreamUrl);
+    expect(values.outcomes[0]?.routeId).toBe('route_a_first');
+  });
+
+  it('rejects independently signed deployment and organization token mismatches', async () => {
+    const fetchMock = vi.fn(async () => new Response('{}'));
+    const values = await fixture({ fetch: fetchMock as typeof fetch });
+    for (const binding of [
+      { deploymentId: 'dep_other', organizationId: ORGANIZATION_ID },
+      { deploymentId: DEPLOYMENT_ID, organizationId: 'org_other' },
+    ]) {
+      const mismatched = await values.control.issueAccessToken({
+        ...binding,
+        subjectId: 'account_edge_user',
+        policyVersion: POLICY_VERSION,
+        allowedModels: ['otto-fast'],
+      });
+      const response = await values.gateway.fetch(new Request(
+        'https://edge.otto.test/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${encodeEdgeAccessTokenEnvelope(mismatched)}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ model: 'otto-fast', messages: [] }),
+        },
+      ));
+      expect(response.status).toBe(403);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

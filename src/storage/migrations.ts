@@ -1274,6 +1274,51 @@ const MIGRATIONS: Migration[] = [
        ON control_enterprise_credit_accounts(customer_id, organization_id)`,
     ],
   },
+  {
+    id: '029_edge_gateway_control_plane',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_edge_gateway_policies (
+        deployment_id TEXT PRIMARY KEY REFERENCES control_deployments(id) ON DELETE CASCADE,
+        organization_id TEXT NOT NULL,
+        policy_version TEXT NOT NULL,
+        routes JSONB NOT NULL,
+        limits JSONB NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
+        updated_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CHECK (jsonb_typeof(routes) = 'array'),
+        CHECK (jsonb_array_length(routes) BETWEEN 1 AND 64),
+        CHECK (jsonb_typeof(limits) = 'object')
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_edge_gateway_policies_organization
+       ON control_edge_gateway_policies(organization_id, status, updated_at DESC)`,
+      `CREATE TABLE IF NOT EXISTS control_edge_gateway_nonces (
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id) ON DELETE CASCADE,
+        nonce TEXT NOT NULL,
+        expires_at_ms BIGINT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (deployment_id, nonce)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_edge_gateway_nonces_expiry
+       ON control_edge_gateway_nonces(expires_at_ms)`,
+      `INSERT INTO control_admin_permissions (id) VALUES
+        ('edge_gateway.read'), ('edge_gateway.manage')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'super_admin', id FROM control_admin_permissions
+       WHERE id IN ('edge_gateway.read', 'edge_gateway.manage')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'license_admin', id FROM control_admin_permissions
+       WHERE id IN ('edge_gateway.read', 'edge_gateway.manage')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'auditor', id FROM control_admin_permissions
+       WHERE id = 'edge_gateway.read'
+       ON CONFLICT DO NOTHING`,
+    ],
+  },
 ];
 
 export const CONTROL_SCHEMA_MIGRATION_IDS = Object.freeze(

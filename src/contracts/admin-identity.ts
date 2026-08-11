@@ -28,6 +28,8 @@ export const ADMIN_PERMISSIONS = [
   'billing.topup',
   'billing.manage',
   'billing.refund',
+  'edge_gateway.read',
+  'edge_gateway.manage',
   'audit.read',
   'audit.export',
   'audit.verify',
