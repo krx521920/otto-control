@@ -165,6 +165,9 @@ invalid, or backward-moving clock is clamped to the verified request start so cl
 circuit state, outcome evidence, and billing finalization still complete consistently.
 Completion hooks are isolated and concurrency release is idempotent, so a faulty limiter,
 circuit adapter, outcome sink, or edge-runtime task registrar cannot strand a response stream.
+Runtime adapter results are validated and capability methods are snapshotted: malformed
+concurrency leases, circuit attempts, or billing reservations fail closed before secrets,
+provider traffic, or untracked metered execution can proceed.
 It also holds a global and per-subject concurrency slot
 for the complete lifetime of every upstream response stream, preventing slow
 clients from exhausting sockets, memory, or provider credit while remaining

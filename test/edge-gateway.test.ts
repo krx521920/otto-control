@@ -499,6 +499,100 @@ describe('otto edge gateway', () => {
     expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
   });
 
+  it('fails closed when a concurrency adapter returns a malformed lease', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const values = await fixture({
+      concurrencyLimiter: {
+        acquire: () => ({ release: null }) as never,
+        snapshot: () => ({
+          activeRequests: 0,
+          globalLimit: 1,
+          trackedSubjects: 0,
+          subjectsAtLimit: 0,
+          perSubjectLimit: 1,
+        }),
+      },
+      fetch: fetchMock,
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_CONCURRENCY_UNAVAILABLE' },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before secret access when a circuit adapter returns a malformed attempt', async () => {
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(1, 1);
+    const secretGet = vi.fn(async () => 'provider-secret-value');
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const values = await fixture({
+      concurrencyLimiter,
+      circuitBreaker: {
+        acquire: () => ({ succeeded: vi.fn() }) as never,
+        snapshot: () => ({
+          trackedRoutes: 0,
+          failingRoutes: 0,
+          openRoutes: 0,
+          probeReadyRoutes: 0,
+          halfOpenRoutes: 0,
+          failureThreshold: 1,
+          cooldownMs: 1_000,
+        }),
+      },
+      fetch: fetchMock,
+      secretResolver: { get: secretGet },
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_CIRCUIT_BREAKER_UNAVAILABLE' },
+    });
+    expect(secretGet).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+  });
+
+  it('fails closed before provider access when billing returns a malformed reservation', async () => {
+    const route: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 100 },
+    };
+    const billing = billingCoordinatorFixture();
+    billing.reserve.mockResolvedValue({ reservationId: '_invalid' });
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(1, 1);
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const values = await fixture({
+      billingCoordinator: billing.coordinator,
+      concurrencyLimiter,
+      fetch: fetchMock,
+      routes: [route],
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_BILLING_UNAVAILABLE' },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(billing.reserve).toHaveBeenCalledOnce();
+    expect(billing.settle).not.toHaveBeenCalled();
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+  });
+
   it('reports readiness without exposing component details or failure messages', async () => {
     for (const [state, expectedStatus] of [
       ['ready', 200],

@@ -4,6 +4,7 @@
   "plugins": ["@stryker-mutator/vitest-runner"],
   "mutate": [
     "src/edge-gateway/gateway.ts",
+    "src/edge-gateway/adapter-contracts.ts",
     "src/edge-gateway/control-keyring-verifier.ts",
     "src/edge-gateway/control-billing-coordinator.ts",
     "src/edge-gateway/control-policy-source.ts",
@@ -29,6 +30,7 @@
   "testFiles": [
     "test/edge-gateway.test.ts",
     "test/edge-gateway-properties.test.ts",
+    "test/edge-gateway-adapter-contracts.test.ts",
     "test/edge-gateway-control.test.ts",
     "test/edge-gateway-control-billing-coordinator.test.ts",
     "test/edge-gateway-control-keyring-verifier.test.ts",

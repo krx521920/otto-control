@@ -7,6 +7,11 @@ import type {
   EdgeModelRouteV1,
 } from '../contracts/edge-gateway.js';
 import {
+  normalizeEdgeBillingReservation,
+  normalizeEdgeConcurrencyLease,
+  normalizeEdgeRouteAttempt,
+} from './adapter-contracts.js';
+import {
   EdgeBillingAdmissionError,
   type EdgeBillingCoordinator,
   type EdgeBillingRequestIdentity,
@@ -740,10 +745,14 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
       };
       let concurrencyLease: EdgeConcurrencyLease | null;
       try {
-        concurrencyLease = concurrencyLimiter.acquire(
+        const candidate = concurrencyLimiter.acquire(
           `${authorized.token.deploymentId}\0${authorized.token.organizationId}`
           + `\0${authorized.token.subjectId}`,
         );
+        concurrencyLease = normalizeEdgeConcurrencyLease(candidate);
+        if (candidate !== null && !concurrencyLease) {
+          throw new Error('concurrency limiter returned an invalid lease');
+        }
       } catch {
         return jsonResponse(
           503,
@@ -775,7 +784,11 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         const route = routes[index]!;
         let routeAttempt: EdgeRouteAttempt | null;
         try {
-          routeAttempt = circuitBreaker.acquire(route.id, startedAt);
+          const candidate = circuitBreaker.acquire(route.id, startedAt);
+          routeAttempt = normalizeEdgeRouteAttempt(candidate);
+          if (candidate !== null && !routeAttempt) {
+            throw new Error('circuit breaker returned an invalid route attempt');
+          }
         } catch {
           releaseConcurrency();
           return jsonResponse(
@@ -811,10 +824,14 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             );
           }
           try {
-            billingReservation = await options.billingCoordinator.reserve({
+            const candidate = await options.billingCoordinator.reserve({
               ...billingIdentity(evidence),
               reserveUnits: route.metering.reserveUnits,
             });
+            billingReservation = normalizeEdgeBillingReservation(candidate);
+            if (!billingReservation) {
+              throw new Error('billing coordinator returned an invalid reservation');
+            }
           } catch (error) {
             runEdgeCompletionHook(() => routeAttempt.cancelled());
             releaseConcurrency();
