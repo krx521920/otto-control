@@ -33,7 +33,11 @@ import {
   createEdgeSignatureVerifier,
   encodeEdgeAccessTokenEnvelope,
 } from '../src/edge-gateway/protocol.js';
-import { StaticEdgeUpstreamOriginPolicy } from '../src/edge-gateway/upstream-origin-policy.js';
+import {
+  normalizeEdgeUpstreamOriginPolicy,
+  StaticEdgeUpstreamOriginPolicy,
+  type EdgeUpstreamOriginPolicy,
+} from '../src/edge-gateway/upstream-origin-policy.js';
 import {
   EdgeRateLimitUnavailableError,
   type EdgeRateLimiter,
@@ -82,6 +86,7 @@ async function fixture(overrides: {
   readinessProbe?: EdgeGatewayReadinessProbe;
   responseLimits?: { maximumBytes: number; maximumDurationMs: number };
   allowedUpstreamOrigins?: readonly string[];
+  upstreamOriginPolicy?: EdgeUpstreamOriginPolicy;
   now?: () => number;
 } = {}) {
   const { privateKey } = generateKeyPairSync('ed25519');
@@ -112,10 +117,11 @@ async function fixture(overrides: {
   });
   const outcomes: EdgeGatewayOutcomeV2[] = [];
   const secrets = overrides.secrets ?? { PROVIDER_A_API_KEY: 'provider-secret-value' };
-  const upstreamOriginPolicy = new StaticEdgeUpstreamOriginPolicy(
-    overrides.allowedUpstreamOrigins
-      ?? [...new Set(routes.map((route) => new URL(route.upstreamUrl).origin))],
-  );
+  const upstreamOriginPolicy = overrides.upstreamOriginPolicy
+    ?? new StaticEdgeUpstreamOriginPolicy(
+      overrides.allowedUpstreamOrigins
+        ?? [...new Set(routes.map((route) => new URL(route.upstreamUrl).origin))],
+    );
   const gateway = createOttoEdgeGateway({
     policySource: { load: async () => policy },
     verifier: createEdgeSignatureVerifier({ [signer.keyId]: signer.publicKeyPem }),
@@ -1505,6 +1511,36 @@ describe('otto edge gateway', () => {
         code: 'EDGE_UPSTREAM_NOT_ALLOWED',
         message: 'model routes are not allowed by local upstream policy',
       },
+    });
+    expect(secretGet).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('requires local credential approval even when the signed origin is approved', async () => {
+    const secretGet = vi.fn(async () => 'unrelated-secret-value');
+    const fetchMock = vi.fn(async () => new Response('{}'));
+    const values = await fixture({
+      upstreamOriginPolicy: normalizeEdgeUpstreamOriginPolicy({
+        version: 2,
+        allowedUpstreams: [{
+          origin: 'https://provider-a.test',
+          authentications: [{
+            type: 'bearer',
+            secretBinding: 'DIFFERENT_PROVIDER_API_KEY',
+          }],
+        }],
+      }),
+      fetch: fetchMock as typeof fetch,
+      secretResolver: { get: secretGet },
+    });
+
+    const denied = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(denied.status).toBe(503);
+    await expect(denied.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_UPSTREAM_NOT_ALLOWED' },
     });
     expect(secretGet).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();

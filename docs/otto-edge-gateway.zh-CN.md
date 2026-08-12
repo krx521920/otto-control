@@ -40,8 +40,9 @@ sequenceDiagram
   模型密钥。
 - 客户端只能选择策略公开的模型名，不能提供上游 URL、认证头或密钥绑定。
 - 上游地址必须来自签名策略，并且只能是无凭据、无查询参数的 HTTPS URL。
-- 每条签名路由还必须命中部署环境独立维护的精确 HTTPS Origin 白名单；白名单拒绝或
-  不可用时，在读取供应商 Secret 和建立网络连接之前 fail-closed。
+- 每条签名路由还必须同时命中部署环境独立维护的精确 HTTPS Origin、Secret Binding
+  和认证方式白名单；白名单拒绝或不可用时，在读取供应商 Secret 和建立网络连接之前
+  fail-closed。
 - Node HTTP 适配器只接受最长 8 KiB 的 origin-form request-target；客户端 `Host`、绝对 URL、
   authority-form、反斜线、片段、非法百分号转义、点段、控制字符和非 ASCII 原始字符均不能
   改变内部路由 origin；`Host` 不进入内部 Web Request。
@@ -97,19 +98,40 @@ PostgreSQL 并一次性消费，跨实例重放会被拒绝。请求体采用字
 
 ```json
 {
-  "version": 1,
-  "allowedOrigins": [
-    "https://api.openai.com",
-    "https://model-gateway.example.com:8443"
+  "version": 2,
+  "allowedUpstreams": [
+    {
+      "origin": "https://api.openai.com",
+      "authentications": [
+        {
+          "type": "bearer",
+          "secretBinding": "OPENAI_API_KEY"
+        }
+      ]
+    },
+    {
+      "origin": "https://model-gateway.example.com:8443",
+      "authentications": [
+        {
+          "type": "header",
+          "headerName": "x-api-key",
+          "secretBinding": "ENTERPRISE_MODEL_API_KEY"
+        }
+      ]
+    }
   ]
 }
 ```
 
-白名单必须包含 1–256 个无凭据、路径、查询或片段的 HTTPS Origin。协议、主机和
+v2 白名单必须包含 1–256 个上游，每个上游包含 1–16 个允许的认证组合。认证组合
+精确绑定认证类型、Secret Binding，并在自定义 Header 模式下绑定 Header 名；因此
+Control 即使错误地把其他供应商密钥绑定到已批准 Origin，也无法触发密钥读取或转发。
+Origin 必须是无凭据、路径、查询或片段的 HTTPS Origin。协议、主机和
 显式非默认端口都参与精确匹配；批准主机不会同时批准其子域名。签名策略仍负责固定
 完整路径，部署白名单只提供第二道独立的目标主机边界。白名单不能替代出站防火墙和
 受控 DNS；生产环境仍应限制网关只能连接批准的公网供应商地址，防范 DNS 重绑定及
-错误的私网解析。
+错误的私网解析。旧 `version: 1`、`allowedOrigins` 文件仍可在迁移期读取，但它只绑定
+Origin、不隔离 Secret Binding；正式部署应升级到 v2。
 
 策略中的每个 `secretBinding` 对应同名进程环境变量。例如
 `PROVIDER_A_API_KEY`。然后运行：
@@ -180,7 +202,8 @@ HMAC、时间戳和一次性 nonce 认证，并禁止 HTTP、URL 凭据、查询
 污染现有缓存。Control 暂时不可用时，只能继续使用仍处于其签名有效期内的旧策略；
 一旦策略过期即 fail-closed，不会写盘，也不会无限宽限。
 
-签名有效不代表路由自动获准：网关会取“签名策略路由”与本地 Origin 白名单的交集。
+签名有效不代表路由自动获准：网关会取“签名策略路由”与本地 Origin、Secret Binding、
+认证方式白名单的交集。
 没有可用交集时返回 `EDGE_UPSTREAM_NOT_ALLOWED`；本地策略自身异常时返回
 `EDGE_UPSTREAM_POLICY_UNAVAILABLE`。两种情况都不会解析供应商 Secret、建立上游连接
 或回显本地策略异常详情。更新白名单需要按部署配置变更流程审批并重启网关。
@@ -358,9 +381,9 @@ Control 租约、License、Redis、模型或签名密钥。两个接口都要求
 ## 阿里云 ESA 接入
 
 `createAliyunEsaGateway` 接受 ESA `EdgeKV` 读取器、Control 公钥集合、Secret
-解析器、限流器和必填的 `allowedUpstreamOrigins`，并返回官方 Web Service Worker
-风格的 `fetch(request)` 入口。该白名单应由 ESA 部署配置独立注入，不能直接复用
-EdgeKV 中的签名策略路由列表。
+解析器、限流器和必填的 `upstreamOriginPolicy`，并返回官方 Web Service Worker
+风格的 `fetch(request)` 入口。该本地策略应由 ESA 部署配置独立构造和注入，不能直接
+复用 EdgeKV 中的签名策略路由列表。
 部署引导层负责构造 `EdgeKV` 以及绑定 ESA 的 Secret，业务核心不引用任何全局
 平台对象。
 
@@ -406,7 +429,7 @@ npm run test:mutation
 本次修改后独立复验的网关核心为 81.36%、用量解析器为 80.41%、单机计费协调器为
 81.68%、单机并发限制器为 100%、优雅排空状态机为 100%、Node HTTP 适配器为 100%、
 Node HTTP 资源边界为 100%、上游响应限制配置为 100%、上游熔断器为 96.06%、协议层为
-77.88%、本地上游 Origin 策略为 100%。
+77.88%、本地上游 Origin 与凭据绑定策略为 99.01%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。

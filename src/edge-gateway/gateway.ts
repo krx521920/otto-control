@@ -548,7 +548,7 @@ async function authorize(
   }
   let routes: EdgeModelRouteV1[];
   try {
-    routes = matching.filter((route) => options.upstreamOriginPolicy.allows(route.upstreamUrl));
+    routes = matching.filter((route) => options.upstreamOriginPolicy.allows(route));
   } catch {
     throw new EdgeGatewayProtocolError(
       503,
