@@ -95,3 +95,8 @@ docker compose -f compose.ci.resolved.yaml \
 烟测会从一个实例写入多条密文，同时向三个实例发起领取，并从不同实例确认。验收必须证明：没有重复租约、没有消息丢失、跨实例回执生效、重复发送保持幂等。
 
 正式环境还要保存以下证据：三个实例健康结果、Prometheus 截图或查询结果、一次停用拒绝记录、一次过期删除记录和对应审计事件。证据不得包含 ciphertext、签名私钥、claim token 或管理员 Token。
+
+三实例烟测必须将 JSON 输出保存为 `backups/reports/federation-three-replica.json`。随后运行
+`deploy/drill-federation-failover.sh --confirm=FAILOVER_OTTO_FEDERATION_REPLICAS`，逐台停止并恢复
+`federation-a`、`federation-b`、`federation-c`，证明 Caddy 联邦入口始终可用。CI 会把脱敏报告
+作为 GitHub Actions artifact 保留 14 天；报告只允许包含提交号、时间、实例名和验收结论。
