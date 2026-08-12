@@ -23,6 +23,7 @@ import {
   type EdgeRouteCircuitBreaker,
   InMemoryEdgeRouteCircuitBreaker,
 } from './circuit-breaker.js';
+import { normalizeEdgeClock, readEdgeClockAtOrAfter } from './clock.js';
 import type { EdgeGatewayLifecycle } from './lifecycle.js';
 import { normalizeEdgeProviderSecret } from './provider-secret.js';
 import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
@@ -648,17 +649,17 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           allow: 'POST',
         });
       }
-      let requestContext: { startedAt: number; id: string | null };
+      let requestContext: { startedAt: number | null; id: string | null };
       try {
         requestContext = {
-          startedAt: now(),
+          startedAt: normalizeEdgeClock(now()),
           id: normalizeEdgeRequestId(requestId()),
         };
       } catch {
-        requestContext = { startedAt: Number.NaN, id: null };
+        requestContext = { startedAt: null, id: null };
       }
       const { startedAt, id } = requestContext;
-      if (!Number.isSafeInteger(startedAt) || startedAt < 0 || !id) {
+      if (startedAt === null || !id) {
         return jsonResponse(
           503,
           'EDGE_REQUEST_CONTEXT_UNAVAILABLE',
@@ -835,14 +836,16 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             request.signal,
           );
         } catch {
-          routeAttempt.failed(now());
+          routeAttempt.failed(readEdgeClockAtOrAfter(now, startedAt));
           continue;
         }
         const upstream = connection.response;
         lastStatus = upstream.status;
         const hasFallback = index + 1 < routes.length;
         const retryableUpstream = RETRYABLE_UPSTREAM_STATUSES.has(upstream.status);
-        if (retryableUpstream) routeAttempt.failed(now());
+        if (retryableUpstream) {
+          routeAttempt.failed(readEdgeClockAtOrAfter(now, startedAt));
+        }
         if (hasFallback && retryableUpstream) {
           connection.controller.abort();
           try {
@@ -863,7 +866,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             Boolean(route.metering),
             (completion, usage) => {
               releaseConcurrency();
-              const completedAt = now();
+              const completedAt = readEdgeClockAtOrAfter(now, evidence.startedAt);
               if (completion === 'client_cancelled') routeAttempt.cancelled();
               else if (completion !== 'completed' || retryableUpstream) {
                 routeAttempt.failed(completedAt);
@@ -930,7 +933,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             },
           );
         } catch {
-          routeAttempt.failed(now());
+          routeAttempt.failed(readEdgeClockAtOrAfter(now, startedAt));
           releaseConcurrency();
           connection.controller.abort();
           try {
@@ -943,7 +946,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         try {
           return clientResponse(upstream, body, id, authorized.remaining);
         } catch {
-          routeAttempt.failed(now());
+          routeAttempt.failed(readEdgeClockAtOrAfter(now, startedAt));
           releaseConcurrency();
           connection.controller.abort();
           return jsonResponse(
@@ -955,6 +958,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         }
       }
 
+      const completedAt = readEdgeClockAtOrAfter(now, evidence.startedAt);
       scheduleOutcome(options.outcomeSink, context, {
         version: 2,
         requestId: evidence.requestId,
@@ -967,8 +971,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         routeId: lastRouteId,
         upstreamStatus: lastStatus,
         outcome: 'upstream_failed',
-        durationMs: Math.max(0, now() - evidence.startedAt),
-        occurredAtMs: now(),
+        durationMs: completedAt - evidence.startedAt,
+        occurredAtMs: completedAt,
         usage: null,
       });
       if (billingReservation && options.billingCoordinator) {
@@ -976,7 +980,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           ...billingIdentity(evidence),
           reservation: billingReservation,
           reason: 'no_usable_route',
-          occurredAtMs: now(),
+          occurredAtMs: completedAt,
         }));
       }
       releaseConcurrency();

@@ -160,7 +160,9 @@ bounded visible request IDs are exposed. The `stream` field is accepted only as
 a boolean so provider behavior, response parsing, and billing cannot disagree.
 Liveness and readiness do not depend on the business clock or request-ID generator;
 business IDs are normalized to a bounded safe alphabet and invalid generators fail
-closed before policy, secret, billing, or provider access.
+closed before policy, secret, billing, or provider access. After admission, a failed,
+invalid, or backward-moving clock is clamped to the verified request start so cleanup,
+circuit state, outcome evidence, and billing finalization still complete consistently.
 It also holds a global and per-subject concurrency slot
 for the complete lifetime of every upstream response stream, preventing slow
 clients from exhausting sockets, memory, or provider credit while remaining

@@ -163,7 +163,9 @@ Origin、不隔离 Secret Binding；正式部署应升级到 v2。
 拖垮存活和就绪探针。模型请求 ID 去除首尾空白后必须为 1–128 个字符，以字母或数字
 开头，后续只允许字母、数字、点、下划线、冒号和连字符；生成器抛错、时钟不是非负安全
 整数或 ID 不合法时返回 `EDGE_REQUEST_CONTEXT_UNAVAILABLE`，且不会加载策略、读取
-Secret、建立计费 Hold 或访问供应商。
+Secret、建立计费 Hold 或访问供应商。请求通过准入后，若时钟抛错、返回非法值或回拨，
+则以已验证的请求起点作为时间下限，确保熔断状态、并发释放、结果证据及计费收尾不会被
+辅助时钟故障打断，也不会产生负耗时。
 
 策略中的每个 `secretBinding` 对应同名进程环境变量。例如
 `PROVIDER_A_API_KEY`。然后运行：
@@ -461,7 +463,7 @@ Edge Gateway 使用三层测试工具：
 - fast-check：属性测试与可复现 Fuzz，每轮生成 1,800 组限流、并发租约、熔断边界、窗口、畸形令牌、
   签名变异、协议和认证头输入；
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
-  `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、
+  `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、`clock.ts`、
   `concurrency-limit.ts`、`lifecycle.ts`、`node-http-adapter.ts`、
   `node-http-limits.ts`、`provider-secret.ts`、`request-limits.ts`、
   `upstream-response-headers.ts`、`upstream-response-limits.ts`、
@@ -493,6 +495,7 @@ Node HTTP 资源边界为 100%、上游响应限制配置为 100%、上游熔断
 熔断前置与半开探测租约释放的本次行范围变异复验为 100%。
 备用线路计费档案一致性门禁的本次行范围变异复验为 100%。
 请求 ID 归一化模块为 100%，请求上下文构造与有效性门禁的本次行范围变异复验为 100%。
+运行期安全时钟模块为 100%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。

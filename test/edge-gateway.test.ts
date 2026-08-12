@@ -272,6 +272,76 @@ describe('otto edge gateway', () => {
     });
   });
 
+  it.each([
+    () => NOW - 1,
+    () => -1,
+    () => 1.5,
+    () => { throw new Error('runtime clock unavailable'); },
+  ])('contains an unsafe runtime clock after request admission %#', async (runtimeNow) => {
+    let admitted = false;
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(1, 1);
+    const values = await fixture({
+      concurrencyLimiter,
+      now: () => {
+        if (!admitted) {
+          admitted = true;
+          return NOW;
+        }
+        return runtimeNow();
+      },
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe('{}');
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({
+        durationMs: 0,
+        occurredAtMs: NOW,
+        outcome: 'succeeded',
+      }),
+    ]);
+  });
+
+  it('contains a failed runtime clock while closing a failed route', async () => {
+    let calls = 0;
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(1, 1);
+    const circuitBreaker = new InMemoryEdgeRouteCircuitBreaker({
+      failureThreshold: 1,
+      cooldownMs: 1_000,
+      now: () => NOW,
+    });
+    const values = await fixture({
+      circuitBreaker,
+      concurrencyLimiter,
+      fetch: vi.fn<typeof fetch>(async () => { throw new Error('provider unavailable'); }),
+      now: () => {
+        calls += 1;
+        if (calls === 1) return NOW;
+        throw new Error('runtime clock unavailable');
+      },
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(502);
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+    expect(circuitBreaker.snapshot().openRoutes).toBe(1);
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({
+        durationMs: 0,
+        occurredAtMs: NOW,
+        outcome: 'upstream_failed',
+      }),
+    ]);
+  });
+
   it('reports readiness without exposing component details or failure messages', async () => {
     for (const [state, expectedStatus] of [
       ['ready', 200],
