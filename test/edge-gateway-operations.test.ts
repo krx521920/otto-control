@@ -9,6 +9,7 @@ import type {
   EdgeBillingOperationalState,
 } from '../src/edge-gateway/billing-coordinator.js';
 import { InMemoryEdgeConcurrencyLimiter } from '../src/edge-gateway/concurrency-limit.js';
+import { InMemoryEdgeRouteCircuitBreaker } from '../src/edge-gateway/circuit-breaker.js';
 import {
   handleEdgeOperationsRequest,
   loadEdgeOperationsToken,
@@ -73,9 +74,20 @@ describe('Edge Gateway protected operations API', () => {
     const values = billing('degraded');
     const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(10, 2);
     const lease = concurrencyLimiter.acquire('private-subject');
+    const circuitBreaker = new InMemoryEdgeRouteCircuitBreaker({
+      failureThreshold: 2,
+      cooldownMs: 1_000,
+      now: () => 100,
+    });
+    circuitBreaker.acquire('private-route', 100)!.failed(100);
     const response = await handleEdgeOperationsRequest(
       request('/v1/operations/status'),
-      { token: TOKEN, billingCoordinator: values.coordinator, concurrencyLimiter },
+      {
+        token: TOKEN,
+        billingCoordinator: values.coordinator,
+        concurrencyLimiter,
+        circuitBreaker,
+      },
     );
     expect(response?.status).toBe(200);
     const body = await response!.text();
@@ -98,11 +110,21 @@ describe('Edge Gateway protected operations API', () => {
         subjectsAtLimit: 0,
         perSubjectLimit: 2,
       },
+      circuits: {
+        trackedRoutes: 1,
+        failingRoutes: 1,
+        openRoutes: 0,
+        probeReadyRoutes: 0,
+        halfOpenRoutes: 0,
+        failureThreshold: 2,
+        cooldownMs: 1_000,
+      },
     });
     expect(body).not.toContain(TOKEN);
     expect(body).not.toContain('organization');
     expect(body).not.toContain('amount');
     expect(body).not.toContain('private-subject');
+    expect(body).not.toContain('private-route');
     lease!.release();
   });
 

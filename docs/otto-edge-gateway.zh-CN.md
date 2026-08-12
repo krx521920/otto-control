@@ -129,6 +129,9 @@ $env:OTTO_EDGE_BILLING_RETRY_INTERVAL_MS='10000'
 $env:OTTO_EDGE_OPERATIONS_TOKEN_FILE='D:\secure\edge-operations.token'
 $env:OTTO_EDGE_MAX_CONCURRENT_REQUESTS='256'
 $env:OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT='8'
+$env:OTTO_EDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD='5'
+$env:OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS='30000'
+$env:OTTO_EDGE_CIRCUIT_BREAKER_MAXIMUM_ENTRIES='10000'
 npm run dev:edge
 ```
 
@@ -194,6 +197,26 @@ Node 网关在每分钟限流之外，还使用进程内并发槽保护单服务
 进程管理器只启动一个网关实例，或在未来切换为共享并发租约服务，不能把各实例的配置值
 误认为集群总上限。
 
+## 上游线路熔断与半开探测
+
+Node 网关为签名策略中的每个路由维护有界的进程内故障状态。默认连续 5 次连接失败、
+429/502/503/504 或响应流失败后打开线路 30 秒；冷却期间直接跳过该线路并按签名策略
+优先级尝试备用路由，不会读取客户端提供的地址。冷却结束后只允许一个半开探测请求，
+并发请求继续使用备用路由。探测成功会清除连续失败状态，探测失败会重新开始完整冷却；
+客户端主动取消不会被误判为供应商故障。
+
+阈值、冷却时间和最多保留的线路状态分别由
+`OTTO_EDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD`、
+`OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS` 和
+`OTTO_EDGE_CIRCUIT_BREAKER_MAXIMUM_ENTRIES` 配置。状态表达到容量时淘汰最久未更新项，
+避免长期策略轮换导致内存无界增长。熔断器异常时返回 503
+`EDGE_CIRCUIT_BREAKER_UNAVAILABLE` 且不访问供应商。该状态只包含策略路由 ID、连续失败数
+和时间，不保存租户正文、提示词、回复、密钥或账号标识。
+
+熔断以单 Node 进程为边界，适合当前单服务器单进程方案。多个进程各自判断线路健康，
+不能把它宣传为全局线路摘除；多实例正式方案需要共享健康协调器或由云负载均衡/WAF
+承担全局故障检测。
+
 ## 单机持久化计费与可信用量
 
 签名策略可为每条 OpenAI-compatible 路由配置 `metering.type=openai_tokens` 和
@@ -237,7 +260,7 @@ Node 单进程协调器使用独立 Ed25519 私钥生成 `ExecutionReceiptV2`，
 
 - `GET /v1/operations/status`：返回计费状态和聚合计数，不返回请求 ID、企业标识、金额
   或密钥；同时返回当前并发数、全局上限、活跃账号数量和达到单账号上限的账号数量，
-  不返回账号标识；
+  以及故障、打开、可探测和半开线路数量，不返回账号或线路标识；
 - `POST /v1/operations/billing/retry`：只重试已经写入防篡改日志的待处理操作，不能创建、
   修改或跳过凭证，也不能人工改序号或金额。
 
@@ -271,10 +294,11 @@ Control 租约、License、Redis、模型或签名密钥。两个接口都要求
 Edge Gateway 使用三层测试工具：
 
 - Vitest：正向、反向、边界和异常场景；
-- fast-check：属性测试与可复现 Fuzz，每轮生成 1,300 组限流、并发租约、窗口、畸形令牌、
+- fast-check：属性测试与可复现 Fuzz，每轮生成 1,500 组限流、并发租约、熔断边界、窗口、畸形令牌、
   签名变异、协议和认证头输入；
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
-  `control-policy-source.ts`、`control-billing-coordinator.ts`、`concurrency-limit.ts`、`usage-meter.ts`、
+  `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、
+  `concurrency-limit.ts`、`usage-meter.ts`、
   `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`
   和 Control 签发服务
   执行代码变异测试。
@@ -290,8 +314,8 @@ npm run test:mutation
 提示文案的 `StringLiteral` 变异。最低门槛为 80%；最近一次全量正式基线总分为 81.29%，
 已覆盖代码为 81.51%。其中 Redis 分布式限流为 86.62%、限流与输入校验层为 84.38%、
 公钥轮换模块为 81.11%、策略自动同步器为 81.70%、Control 签发服务为 82.77%、
-本次修改后独立复验的网关核心为 80.42%、用量解析器为 80.41%、单机计费协调器为
-81.68%、单机并发限制器为 100%、协议层为
+本次修改后独立复验的网关核心为 80.65%、用量解析器为 80.41%、单机计费协调器为
+81.68%、单机并发限制器为 100%、上游熔断器为 96.06%、协议层为
 77.88%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速

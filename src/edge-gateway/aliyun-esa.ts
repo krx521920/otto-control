@@ -1,5 +1,6 @@
 import type { EdgeGatewayOutcomeV2 } from '../contracts/edge-gateway.js';
 import type { EdgeConcurrencyLimiter } from './concurrency-limit.js';
+import type { EdgeRouteCircuitBreaker } from './circuit-breaker.js';
 import { createOttoEdgeGateway, type EdgeGatewayOutcomeSink } from './gateway.js';
 import { createEdgeSignatureVerifier } from './protocol.js';
 import type { EdgeRateLimiter } from './rate-limit.js';
@@ -15,6 +16,7 @@ export interface AliyunEsaGatewayOptions {
   providerSecret(binding: string): Promise<string | null> | string | null;
   rateLimiter: EdgeRateLimiter;
   concurrencyLimiter: EdgeConcurrencyLimiter;
+  circuitBreaker?: EdgeRouteCircuitBreaker;
   recordOutcome?(outcome: EdgeGatewayOutcomeV2): Promise<void>;
   fetch?: typeof fetch;
   now?: () => number;
@@ -49,6 +51,7 @@ export function createAliyunEsaGateway(options: AliyunEsaGatewayOptions): {
     },
     rateLimiter: options.rateLimiter,
     concurrencyLimiter: options.concurrencyLimiter,
+    circuitBreaker: options.circuitBreaker,
     outcomeSink,
     fetch: options.fetch,
     now: options.now,

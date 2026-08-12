@@ -17,6 +17,10 @@ import {
   InMemoryEdgeConcurrencyLimiter,
 } from '../src/edge-gateway/concurrency-limit.js';
 import {
+  type EdgeRouteCircuitBreaker,
+  InMemoryEdgeRouteCircuitBreaker,
+} from '../src/edge-gateway/circuit-breaker.js';
+import {
   createOttoEdgeGateway,
   type EdgeGatewayReadinessProbe,
 } from '../src/edge-gateway/gateway.js';
@@ -66,6 +70,7 @@ async function fixture(overrides: {
   secrets?: Readonly<Record<string, string>>;
   billingCoordinator?: EdgeBillingCoordinator;
   concurrencyLimiter?: EdgeConcurrencyLimiter;
+  circuitBreaker?: EdgeRouteCircuitBreaker;
   readinessProbe?: EdgeGatewayReadinessProbe;
   now?: () => number;
 } = {}) {
@@ -102,6 +107,7 @@ async function fixture(overrides: {
     secretResolver: { get: async (binding) => secrets[binding] ?? null },
     rateLimiter: overrides.rateLimiter ?? new InMemoryEdgeRateLimiter(),
     concurrencyLimiter: overrides.concurrencyLimiter,
+    circuitBreaker: overrides.circuitBreaker,
     outcomeSink: { record: async (outcome) => { outcomes.push(outcome); } },
     billingCoordinator: overrides.billingCoordinator,
     readinessProbe: overrides.readinessProbe,
@@ -420,6 +426,10 @@ describe('otto edge gateway', () => {
   it('aborts an idle upstream stream and records a content-free timeout outcome', async () => {
     vi.useFakeTimers();
     try {
+      const circuitBreaker = new InMemoryEdgeRouteCircuitBreaker({
+        failureThreshold: 1,
+        now: () => NOW,
+      });
       let providerCancelled = false;
       let providerSignal: AbortSignal | null = null;
       const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
@@ -432,6 +442,7 @@ describe('otto edge gateway', () => {
         }), { headers: { 'content-type': 'text/event-stream' } });
       });
       const values = await fixture({
+        circuitBreaker,
         fetch: fetchMock,
         limits: { ...limits, upstreamIdleTimeoutMs: 1_000 },
       });
@@ -452,6 +463,10 @@ describe('otto edge gateway', () => {
           routeId: 'route_primary',
         }),
       ]);
+      expect(circuitBreaker.snapshot()).toEqual(expect.objectContaining({
+        openRoutes: 1,
+        failingRoutes: 0,
+      }));
     } finally {
       vi.useRealTimers();
     }
@@ -469,7 +484,8 @@ describe('otto edge gateway', () => {
         },
       }), { headers: { 'content-type': 'text/event-stream' } });
     });
-    const values = await fixture({ fetch: fetchMock });
+    const circuitBreaker = new InMemoryEdgeRouteCircuitBreaker({ failureThreshold: 1 });
+    const values = await fixture({ fetch: fetchMock, circuitBreaker });
     const downstream = new AbortController();
     const response = await values.gateway.fetch(values.request({
       model: 'otto-fast', stream: true, messages: [],
@@ -481,6 +497,7 @@ describe('otto edge gateway', () => {
     await expect(content).rejects.toMatchObject({ name: 'AbortError' });
     expect(providerCancelled).toBe(true);
     expect((providerSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect(circuitBreaker.snapshot().trackedRoutes).toBe(0);
     expect(values.outcomes).toEqual([
       expect.objectContaining({
         outcome: 'client_cancelled',
@@ -556,6 +573,10 @@ describe('otto edge gateway', () => {
   });
 
   it('records an upstream stream failure without exposing its error text', async () => {
+    const circuitBreaker = new InMemoryEdgeRouteCircuitBreaker({
+      failureThreshold: 1,
+      now: () => NOW,
+    });
     let providerController: ReadableStreamDefaultController<Uint8Array> | null = null;
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(
       new ReadableStream<Uint8Array>({
@@ -564,7 +585,7 @@ describe('otto edge gateway', () => {
         },
       }),
     ));
-    const values = await fixture({ fetch: fetchMock });
+    const values = await fixture({ circuitBreaker, fetch: fetchMock });
     const response = await values.gateway.fetch(values.request({
       model: 'otto-fast', stream: true, messages: [],
     }));
@@ -577,6 +598,10 @@ describe('otto edge gateway', () => {
       expect.objectContaining({ outcome: 'upstream_failed' }),
     ]);
     expect(JSON.stringify(values.outcomes)).not.toContain('private provider failure');
+    expect(circuitBreaker.snapshot()).toEqual(expect.objectContaining({
+      openRoutes: 1,
+      failingRoutes: 0,
+    }));
   });
 
   it('cancels provider work when the downstream response body is discarded', async () => {
@@ -1004,6 +1029,125 @@ describe('otto edge gateway', () => {
       }))).status).toBe(terminalStatus);
       expect(terminalFetch).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it('opens failed routes, skips them during cooldown, and closes after one successful probe', async () => {
+    let current = NOW;
+    let primaryHealthy = false;
+    const fallbackRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      id: 'route_fallback',
+      upstreamUrl: 'https://provider-b.test/v1/chat/completions',
+      priority: 20,
+      authentication: { type: 'bearer', secretBinding: 'PROVIDER_B_API_KEY' },
+    };
+    const breaker = new InMemoryEdgeRouteCircuitBreaker({
+      failureThreshold: 1,
+      cooldownMs: 1_000,
+      now: () => current,
+    });
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      if (String(url) === primaryRoute.upstreamUrl) {
+        return new Response('{}', { status: primaryHealthy ? 200 : 503 });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const values = await fixture({
+      routes: [primaryRoute, fallbackRoute],
+      circuitBreaker: breaker,
+      fetch: fetchMock as typeof fetch,
+      now: () => current,
+      secrets: {
+        PROVIDER_A_API_KEY: 'provider-a-secret',
+        PROVIDER_B_API_KEY: 'provider-b-secret',
+      },
+    });
+    const send = async () => {
+      const response = await values.gateway.fetch(values.request({
+        model: 'otto-fast', messages: [],
+      }));
+      await response.text();
+      return response;
+    };
+
+    expect((await send()).status).toBe(200);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      primaryRoute.upstreamUrl,
+      fallbackRoute.upstreamUrl,
+    ]);
+    expect(breaker.snapshot().openRoutes).toBe(1);
+
+    expect((await send()).status).toBe(200);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      primaryRoute.upstreamUrl,
+      fallbackRoute.upstreamUrl,
+      fallbackRoute.upstreamUrl,
+    ]);
+
+    current += 1_000;
+    primaryHealthy = true;
+    expect((await send()).status).toBe(200);
+    expect(breaker.snapshot().trackedRoutes).toBe(0);
+    expect((await send()).status).toBe(200);
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(primaryRoute.upstreamUrl);
+  });
+
+  it('opens a terminal retryable route as soon as response headers arrive', async () => {
+    const breaker = new InMemoryEdgeRouteCircuitBreaker({
+      failureThreshold: 1,
+      cooldownMs: 1_000,
+      now: () => NOW,
+    });
+    const fetchMock = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      pull() {
+        // A client may leave an error response body unread.
+      },
+    }), { status: 503 }));
+    const values = await fixture({
+      circuitBreaker: breaker,
+      fetch: fetchMock as typeof fetch,
+      now: () => NOW,
+    });
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(response.status).toBe(503);
+    expect(breaker.snapshot().openRoutes).toBe(1);
+    await response.body!.cancel('discard error body');
+    expect(breaker.snapshot().openRoutes).toBe(1);
+    const skipped = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(skipped.status).toBe(502);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed without provider access when route health admission breaks', async () => {
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(2, 1);
+    const fetchMock = vi.fn(async () => new Response('{}'));
+    const values = await fixture({
+      concurrencyLimiter,
+      circuitBreaker: {
+        acquire() { throw new Error('private circuit state failure'); },
+        snapshot: () => ({
+          trackedRoutes: 0,
+          failingRoutes: 0,
+          openRoutes: 0,
+          probeReadyRoutes: 0,
+          halfOpenRoutes: 0,
+          failureThreshold: 1,
+          cooldownMs: 1_000,
+        }),
+      },
+      fetch: fetchMock as typeof fetch,
+    });
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(response.status).toBe(503);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+    expect(await response.text()).not.toContain('private circuit state failure');
   });
 
   it('contains secret-provider and network exceptions without leaking internal errors', async () => {

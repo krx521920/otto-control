@@ -145,7 +145,10 @@ streams provider responses without sending prompts or conversation context to
 Control. The Node adapter also holds a global and per-subject concurrency slot
 for the complete lifetime of every upstream response stream, preventing slow
 clients from exhausting sockets, memory, or provider credit while remaining
-inside a per-minute request limit. Signed policy also bounds upstream stream-idle time, and downstream
+inside a per-minute request limit. Repeated transport, retryable HTTP, and stream
+failures open a bounded per-route circuit; requests use a signed fallback route
+during cooldown, then exactly one half-open probe decides whether to restore the
+primary. Signed policy also bounds upstream stream-idle time, and downstream
 disconnects cancel provider work instead of continuing to consume tokens. A
 standard Web Service Worker adapter is provided for Alibaba Cloud
 ESA. The Node adapter can also authenticate to Control, coalesce policy refreshes,

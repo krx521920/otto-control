@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { EdgeAccessTokenV1, EdgeModelRouteV1 } from '../src/contracts/edge-gateway.js';
 import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
 import { InMemoryEdgeConcurrencyLimiter } from '../src/edge-gateway/concurrency-limit.js';
+import { InMemoryEdgeRouteCircuitBreaker } from '../src/edge-gateway/circuit-breaker.js';
 import {
   createEdgeSignatureVerifier,
   decodeEdgeAccessTokenEnvelope,
@@ -24,6 +25,36 @@ function signerFixture() {
 }
 
 describe('edge gateway property and fuzz testing', () => {
+  it('opens generated circuits exactly at threshold and admits one boundary probe', () => {
+    fc.assert(fc.property(
+      fc.integer({ min: 1, max: 20 }),
+      fc.integer({ min: 1_000, max: 120_000 }),
+      (failureThreshold, cooldownMs) => {
+        let now = NOW;
+        const breaker = new InMemoryEdgeRouteCircuitBreaker({
+          failureThreshold,
+          cooldownMs,
+          now: () => now,
+        });
+        for (let failure = 0; failure < failureThreshold; failure += 1) {
+          const attempt = breaker.acquire('route-property', now);
+          expect(attempt).not.toBeNull();
+          attempt!.failed(now);
+          if (failure + 1 < failureThreshold) expect(breaker.snapshot().openRoutes).toBe(0);
+          now += 1;
+        }
+        const openedAt = now - 1;
+        expect(breaker.acquire('route-property', openedAt + cooldownMs - 1)).toBeNull();
+        now = openedAt + cooldownMs;
+        const probe = breaker.acquire('route-property', now);
+        expect(probe).not.toBeNull();
+        expect(breaker.acquire('route-property', now)).toBeNull();
+        probe!.succeeded();
+        expect(breaker.snapshot().trackedRoutes).toBe(0);
+      },
+    ), { numRuns: 200 });
+  });
+
   it('never exceeds generated global or per-subject concurrency capacity', () => {
     fc.assert(fc.property(
       fc.integer({ min: 1, max: 40 }).chain((globalLimit) => fc.tuple(

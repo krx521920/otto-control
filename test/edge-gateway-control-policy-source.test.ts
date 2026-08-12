@@ -486,6 +486,11 @@ describe('edge gateway server configuration', () => {
       policy: { type: 'file', policyFile: 'D:\\secure\\policy.json' },
       rateLimit: { type: 'memory' },
       concurrency: { globalLimit: 256, perSubjectLimit: 8 },
+      circuitBreaker: {
+        failureThreshold: 5,
+        cooldownMs: 30_000,
+        maximumEntries: 10_000,
+      },
     });
   });
 
@@ -504,6 +509,9 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_REDIS_ALLOW_INSECURE: 'false',
       OTTO_EDGE_MAX_CONCURRENT_REQUESTS: '512',
       OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT: '12',
+      OTTO_EDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD: '4',
+      OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS: '45000',
+      OTTO_EDGE_CIRCUIT_BREAKER_MAXIMUM_ENTRIES: '2000',
     })).toMatchObject({
       rateLimit: {
         type: 'redis',
@@ -517,6 +525,11 @@ describe('edge gateway server configuration', () => {
         allowInsecure: false,
       },
       concurrency: { globalLimit: 512, perSubjectLimit: 12 },
+      circuitBreaker: {
+        failureThreshold: 4,
+        cooldownMs: 45_000,
+        maximumEntries: 2_000,
+      },
     });
   });
 
@@ -638,5 +651,15 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_MAX_CONCURRENT_REQUESTS: '4',
       OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT: '5',
     })).toThrow('cannot exceed');
+    expect(() => loadEdgeGatewayServerConfiguration({
+      ...common,
+      OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
+      OTTO_EDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD: '0',
+    })).toThrow('OTTO_EDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD');
+    expect(() => loadEdgeGatewayServerConfiguration({
+      ...common,
+      OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
+      OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS: '999',
+    })).toThrow('OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS');
   });
 });

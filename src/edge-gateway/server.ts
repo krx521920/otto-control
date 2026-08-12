@@ -10,6 +10,10 @@ import {
   type EdgeConcurrencyLimiter,
   InMemoryEdgeConcurrencyLimiter,
 } from './concurrency-limit.js';
+import {
+  type EdgeRouteCircuitBreaker,
+  InMemoryEdgeRouteCircuitBreaker,
+} from './circuit-breaker.js';
 import { ControlEdgeBillingCoordinator } from './control-billing-coordinator.js';
 import { ControlEdgeKeyringVerifier } from './control-keyring-verifier.js';
 import { ControlEdgeGatewayPolicySource, type EdgeControlPolicyBinding } from './control-policy-source.js';
@@ -69,6 +73,11 @@ export interface EdgeServerConfiguration {
   concurrency: {
     globalLimit: number;
     perSubjectLimit: number;
+  };
+  circuitBreaker: {
+    failureThreshold: number;
+    cooldownMs: number;
+    maximumEntries: number;
   };
   billing: EdgeBillingConfiguration;
   operationsTokenFile?: string;
@@ -254,6 +263,17 @@ export function loadEdgeGatewayServerConfiguration(
       + 'OTTO_EDGE_MAX_CONCURRENT_REQUESTS',
     );
   }
+  const circuitBreaker = {
+    failureThreshold: optionalInteger(
+      'OTTO_EDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD', environment, 1, 1_000,
+    ) ?? 5,
+    cooldownMs: optionalInteger(
+      'OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS', environment, 1_000, 3_600_000,
+    ) ?? 30_000,
+    maximumEntries: optionalInteger(
+      'OTTO_EDGE_CIRCUIT_BREAKER_MAXIMUM_ENTRIES', environment, 1, 1_000_000,
+    ) ?? 10_000,
+  };
   return {
     host: environment.OTTO_EDGE_HOST?.trim() || '127.0.0.1',
     port,
@@ -264,6 +284,7 @@ export function loadEdgeGatewayServerConfiguration(
       globalLimit: globalConcurrency,
       perSubjectLimit: perSubjectConcurrency,
     },
+    circuitBreaker,
     billing: billingConfiguration(environment, Boolean(controlBaseUrl)),
     ...(environment.OTTO_EDGE_OPERATIONS_TOKEN_FILE?.trim()
       ? { operationsTokenFile: environment.OTTO_EDGE_OPERATIONS_TOKEN_FILE.trim() }
@@ -394,6 +415,7 @@ export async function handleEdgeOperationsRequest(
     token: string;
     billingCoordinator?: EdgeBillingCoordinator;
     concurrencyLimiter?: EdgeConcurrencyLimiter;
+    circuitBreaker?: EdgeRouteCircuitBreaker;
   },
 ): Promise<Response | null> {
   const url = new URL(request.url);
@@ -411,6 +433,7 @@ export async function handleEdgeOperationsRequest(
         service: 'otto-edge-gateway',
         billing: input.billingCoordinator?.operationalStatus?.() ?? null,
         concurrency: input.concurrencyLimiter?.snapshot() ?? null,
+        circuits: input.circuitBreaker?.snapshot() ?? null,
       });
     } catch {
       return operationsResponse(503, {
@@ -531,6 +554,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
     config.concurrency.globalLimit,
     config.concurrency.perSubjectLimit,
   );
+  const circuitBreaker = new InMemoryEdgeRouteCircuitBreaker(config.circuitBreaker);
   const gateway = createOttoEdgeGateway({
     policySource: configuredPolicySource,
     verifier,
@@ -542,6 +566,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
     },
     rateLimiter,
     concurrencyLimiter,
+    circuitBreaker,
     billingCoordinator,
     readinessProbe: createEdgeGatewayReadinessProbe({
       policySource: configuredPolicySource,
@@ -573,6 +598,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
           token: operationsToken,
           billingCoordinator,
           concurrencyLimiter,
+          circuitBreaker,
         })
         .then((operationsResponseResult) => operationsResponseResult ?? gateway.fetch(convertedRequest))
       : gateway.fetch(convertedRequest);
