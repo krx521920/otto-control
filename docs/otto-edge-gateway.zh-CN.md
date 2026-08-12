@@ -143,6 +143,12 @@ Origin、不隔离 Secret Binding；正式部署应升级到 v2。
 访问上游前返回 `EDGE_INVALID_HTTP_REQUEST`。需要供应商查询参数时，应把固定参数纳入
 受签名的 `upstreamUrl`，不能让调用方动态覆盖。
 
+网关不会把客户端 Header 集合复制给供应商。上游请求只重建固定的 `Content-Type`、
+网关请求 ID、策略绑定的认证头和 `Accept`；`Accept` 不采用客户端值，而是由请求体中
+已解析的 `stream === true` 固定选择 `text/event-stream`，其他请求固定使用
+`application/json`。Cookie、客户端访问令牌、代理头以及伪造的供应商认证头不会越过
+网关信任边界。
+
 策略中的每个 `secretBinding` 对应同名进程环境变量。例如
 `PROVIDER_A_API_KEY`。然后运行：
 
@@ -455,6 +461,7 @@ Node HTTP 资源边界为 100%、上游响应限制配置为 100%、上游熔断
 77.88%、本地请求限制配置为 100%、本地上游 Origin 与凭据绑定策略为 99.01%。
 供应商 Secret Header 安全校验模块为 100%。
 模型 API 精确路径判断的本次行范围变异复验为 100%。
+上游 `Accept` 派生和最小 Header 重建的本次行范围变异复验为 100%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。

@@ -152,7 +152,9 @@ fragments are rejected instead of being silently ignored or forwarded. The Node
 adapter uses a fixed internal origin and rejects ambiguous,
 absolute, non-canonical, malformed-percent, non-ASCII, or oversized request targets
 before policy or provider access; an untrusted Host header cannot select its
-routing origin. It also holds a global and per-subject concurrency slot
+routing origin. Upstream headers are rebuilt from a fixed minimum set; client
+cookies and provider-looking headers are never copied, while `Accept` is derived
+from the validated `stream` flag. It also holds a global and per-subject concurrency slot
 for the complete lifetime of every upstream response stream, preventing slow
 clients from exhausting sockets, memory, or provider credit while remaining
 inside a per-minute request limit. Explicit inbound header, request, keep-alive,

@@ -243,13 +243,13 @@ function upstreamHeaders(
   route: EdgeModelRouteV1,
   secret: string,
   requestId: string,
-  accept: string | null,
+  streaming: boolean,
 ): Headers {
   const headers = new Headers({
+    accept: streaming ? 'text/event-stream' : 'application/json',
     'content-type': 'application/json',
     'x-otto-edge-request-id': requestId,
   });
-  if (accept) headers.set('accept', accept);
   if (route.authentication.type === 'bearer') {
     headers.set('authorization', `Bearer ${secret}`);
   } else {
@@ -796,7 +796,12 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             route,
             {
               method: 'POST',
-              headers: upstreamHeaders(route, secret, id, request.headers.get('accept')),
+              headers: upstreamHeaders(
+                route,
+                secret,
+                id,
+                authorized.upstreamBody.stream === true,
+              ),
               body: JSON.stringify(providerRequestBody(authorized.upstreamBody, route)),
               redirect: 'error',
             },

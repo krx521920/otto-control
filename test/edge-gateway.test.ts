@@ -310,6 +310,12 @@ describe('otto edge gateway', () => {
       model: 'otto-fast',
       stream: true,
       messages: [{ role: 'user', content: 'private prompt must stay off Control' }],
+    }, {
+      headers: {
+        accept: 'text/html',
+        cookie: 'private-client-cookie',
+        'x-api-key': 'client-controlled-key',
+      },
     }));
 
     expect(response.status).toBe(200);
@@ -321,6 +327,9 @@ describe('otto edge gateway', () => {
     expect(url).toBe(primaryRoute.upstreamUrl);
     const headers = new Headers(init?.headers);
     expect(headers.get('authorization')).toBe('Bearer provider-secret-value');
+    expect(headers.get('accept')).toBe('text/event-stream');
+    expect(headers.get('cookie')).toBeNull();
+    expect(headers.get('x-api-key')).toBeNull();
     expect(headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
     const sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
     expect(sent.model).toBe('provider-model-v3');
@@ -1682,11 +1691,12 @@ describe('otto edge gateway', () => {
 
     const normalized = await values.gateway.fetch(values.request({
       model: '  otto-fast  ', messages: [],
-    }, { headers: { accept: 'application/json' } }));
+    }, { headers: { accept: 'text/html', cookie: 'private-client-cookie' } }));
     expect(normalized.status).toBe(200);
     await expect(normalized.text()).resolves.toBe('{"ok":true}');
     const upstreamHeaders = new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers);
     expect(upstreamHeaders.get('accept')).toBe('application/json');
+    expect(upstreamHeaders.get('cookie')).toBeNull();
     expect(normalized.headers.get('cache-control')).toBe('no-store');
     expect(normalized.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
     expect(normalized.headers.get('x-ratelimit-remaining')).toBe('7');
