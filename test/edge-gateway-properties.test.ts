@@ -7,6 +7,7 @@ import type { EdgeAccessTokenV1, EdgeModelRouteV1 } from '../src/contracts/edge-
 import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
 import { InMemoryEdgeConcurrencyLimiter } from '../src/edge-gateway/concurrency-limit.js';
 import { InMemoryEdgeRouteCircuitBreaker } from '../src/edge-gateway/circuit-breaker.js';
+import { edgeNodeRequestUrl } from '../src/edge-gateway/node-http-adapter.js';
 import {
   createEdgeSignatureVerifier,
   decodeEdgeAccessTokenEnvelope,
@@ -25,6 +26,22 @@ function signerFixture() {
 }
 
 describe('edge gateway property and fuzz testing', () => {
+  it('never lets arbitrary request targets control the internal adapter origin', () => {
+    fc.assert(fc.property(fc.string({ maxLength: 256 }), (target) => {
+      let result: string;
+      try {
+        result = edgeNodeRequestUrl(target);
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        return;
+      }
+      const parsed = new URL(result);
+      expect(parsed.origin).toBe('http://edge.invalid');
+      expect(target.startsWith('/')).toBe(true);
+      expect(target.startsWith('//')).toBe(false);
+    }), { numRuns: 300 });
+  });
+
   it('opens generated circuits exactly at threshold and admits one boundary probe', () => {
     fc.assert(fc.property(
       fc.integer({ min: 1, max: 20 }),

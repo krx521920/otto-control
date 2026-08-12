@@ -40,6 +40,9 @@ sequenceDiagram
   模型密钥。
 - 客户端只能选择策略公开的模型名，不能提供上游 URL、认证头或密钥绑定。
 - 上游地址必须来自签名策略，并且只能是无凭据、无查询参数的 HTTPS URL。
+- Node HTTP 适配器只接受最长 8 KiB 的 origin-form request-target；客户端 `Host`、绝对 URL、
+  authority-form、反斜线、片段、非法百分号转义、点段、控制字符和非 ASCII 原始字符均不能
+  改变内部路由 origin；`Host` 不进入内部 Web Request。
 - 模型密钥由边缘运行时的 Secret 管理能力提供，不写入策略、KV、日志或仓库。
 - 策略失效、签名错误、令牌失效、密钥缺失时全部 fail-closed。
 - BYOK 模式不经过托管 Edge Gateway，由客户端或私有服务器直连模型供应商。
@@ -308,7 +311,7 @@ Control 租约、License、Redis、模型或签名密钥。两个接口都要求
 Edge Gateway 使用三层测试工具：
 
 - Vitest：正向、反向、边界和异常场景；
-- fast-check：属性测试与可复现 Fuzz，每轮生成 1,500 组限流、并发租约、熔断边界、窗口、畸形令牌、
+- fast-check：属性测试与可复现 Fuzz，每轮生成 1,800 组限流、并发租约、熔断边界、窗口、畸形令牌、
   签名变异、协议和认证头输入；
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
   `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、
@@ -329,7 +332,8 @@ npm run test:mutation
 已覆盖代码为 81.51%。其中 Redis 分布式限流为 86.62%、限流与输入校验层为 84.38%、
 公钥轮换模块为 81.11%、策略自动同步器为 81.70%、Control 签发服务为 82.77%、
 本次修改后独立复验的网关核心为 80.96%、用量解析器为 80.41%、单机计费协调器为
-81.68%、单机并发限制器为 100%、优雅排空状态机为 100%、上游熔断器为 96.06%、协议层为
+81.68%、单机并发限制器为 100%、优雅排空状态机为 100%、Node HTTP 适配器为 100%、
+上游熔断器为 96.06%、协议层为
 77.88%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速

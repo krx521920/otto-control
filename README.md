@@ -142,7 +142,10 @@ npm run dev:edge
 It validates short-lived Control-signed tokens and policies locally, pins model
 provider routes, enforces request/rate bounds, performs bounded failover, and
 streams provider responses without sending prompts or conversation context to
-Control. The Node adapter also holds a global and per-subject concurrency slot
+Control. The Node adapter uses a fixed internal origin and rejects ambiguous,
+absolute, non-canonical, malformed-percent, non-ASCII, or oversized request targets
+before policy or provider access; an untrusted Host header cannot select its
+routing origin. It also holds a global and per-subject concurrency slot
 for the complete lifetime of every upstream response stream, preventing slow
 clients from exhausting sockets, memory, or provider credit while remaining
 inside a per-minute request limit. Repeated transport, retryable HTTP, and stream

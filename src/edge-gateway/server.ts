@@ -1,7 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   createServer,
-  type IncomingMessage,
   type Server,
   type ServerResponse,
 } from 'node:http';
@@ -32,6 +31,7 @@ import {
   type EdgeGatewayLifecycleLease,
   InMemoryEdgeGatewayLifecycle,
 } from './lifecycle.js';
+import { convertEdgeNodeWebRequest } from './node-http-adapter.js';
 import { createEdgeSignatureVerifier } from './protocol.js';
 import { type EdgeRateLimiter, InMemoryEdgeRateLimiter } from './rate-limit.js';
 import { createNodeRedisEdgeRateLimiter } from './redis-rate-limit.js';
@@ -483,29 +483,6 @@ export async function handleEdgeOperationsRequest(
   });
 }
 
-function absoluteRequestUrl(request: IncomingMessage): string {
-  const host = request.headers.host || 'localhost';
-  return `http://${host}${request.url || '/'}`;
-}
-
-function webRequest(request: IncomingMessage, signal: AbortSignal): Request {
-  const method = request.method || 'GET';
-  const headers = new Headers();
-  for (const [name, raw] of Object.entries(request.headers)) {
-    if (Array.isArray(raw)) {
-      for (const value of raw) headers.append(name, value);
-    } else if (raw !== undefined) {
-      headers.set(name, raw);
-    }
-  }
-  const init: RequestInit & { duplex?: 'half' } = { method, headers, signal };
-  if (method !== 'GET' && method !== 'HEAD') {
-    init.body = Readable.toWeb(request) as ReadableStream<Uint8Array>;
-    init.duplex = 'half';
-  }
-  return new Request(absoluteRequestUrl(request), init);
-}
-
 async function writeResponse(response: Response, target: ServerResponse): Promise<void> {
   target.statusCode = response.status;
   target.statusMessage = response.statusText;
@@ -667,7 +644,12 @@ export async function startEdgeGatewayServer(): Promise<void> {
     response.once('close', handleClose);
     response.once('finish', cleanup);
     if (request.aborted) abort();
-    const convertedRequest = webRequest(request, controller.signal);
+    const conversion = convertEdgeNodeWebRequest(request, controller.signal);
+    if (!conversion.ok) {
+      void writeResponse(conversion.response, response).catch(() => response.destroy());
+      return;
+    }
+    const convertedRequest = conversion.request;
     const result = operationsToken
       ? handleEdgeOperationsRequest(convertedRequest, {
           token: operationsToken,
