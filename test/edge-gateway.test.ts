@@ -23,6 +23,7 @@ import {
 import {
   createOttoEdgeGateway,
   type EdgeGatewayReadinessProbe,
+  type EdgeGatewaySecretResolver,
 } from '../src/edge-gateway/gateway.js';
 import {
   type EdgeGatewayLifecycle,
@@ -32,6 +33,7 @@ import {
   createEdgeSignatureVerifier,
   encodeEdgeAccessTokenEnvelope,
 } from '../src/edge-gateway/protocol.js';
+import { StaticEdgeUpstreamOriginPolicy } from '../src/edge-gateway/upstream-origin-policy.js';
 import {
   EdgeRateLimitUnavailableError,
   type EdgeRateLimiter,
@@ -72,12 +74,14 @@ async function fixture(overrides: {
   rateLimiter?: EdgeRateLimiter;
   fetch?: typeof fetch;
   secrets?: Readonly<Record<string, string>>;
+  secretResolver?: EdgeGatewaySecretResolver;
   billingCoordinator?: EdgeBillingCoordinator;
   concurrencyLimiter?: EdgeConcurrencyLimiter;
   circuitBreaker?: EdgeRouteCircuitBreaker;
   lifecycle?: EdgeGatewayLifecycle;
   readinessProbe?: EdgeGatewayReadinessProbe;
   responseLimits?: { maximumBytes: number; maximumDurationMs: number };
+  allowedUpstreamOrigins?: readonly string[];
   now?: () => number;
 } = {}) {
   const { privateKey } = generateKeyPairSync('ed25519');
@@ -90,11 +94,12 @@ async function fixture(overrides: {
     now: () => NOW,
     id: () => `fixture_${++nextId}`,
   });
+  const routes = overrides.routes ?? [primaryRoute];
   const policy = await control.issuePolicy({
     policyVersion: overrides.policyVersion ?? POLICY_VERSION,
     deploymentId: DEPLOYMENT_ID,
     organizationId: ORGANIZATION_ID,
-    routes: overrides.routes ?? [primaryRoute],
+    routes,
     limits: overrides.limits ?? limits,
     durationMs: overrides.policyDurationMs,
   });
@@ -107,10 +112,15 @@ async function fixture(overrides: {
   });
   const outcomes: EdgeGatewayOutcomeV2[] = [];
   const secrets = overrides.secrets ?? { PROVIDER_A_API_KEY: 'provider-secret-value' };
+  const upstreamOriginPolicy = new StaticEdgeUpstreamOriginPolicy(
+    overrides.allowedUpstreamOrigins
+      ?? [...new Set(routes.map((route) => new URL(route.upstreamUrl).origin))],
+  );
   const gateway = createOttoEdgeGateway({
     policySource: { load: async () => policy },
     verifier: createEdgeSignatureVerifier({ [signer.keyId]: signer.publicKeyPem }),
-    secretResolver: { get: async (binding) => secrets[binding] ?? null },
+    secretResolver: overrides.secretResolver
+      ?? { get: async (binding) => secrets[binding] ?? null },
     rateLimiter: overrides.rateLimiter ?? new InMemoryEdgeRateLimiter(),
     concurrencyLimiter: overrides.concurrencyLimiter,
     circuitBreaker: overrides.circuitBreaker,
@@ -119,6 +129,7 @@ async function fixture(overrides: {
     billingCoordinator: overrides.billingCoordinator,
     readinessProbe: overrides.readinessProbe,
     responseLimits: overrides.responseLimits,
+    upstreamOriginPolicy,
     fetch: overrides.fetch ?? (vi.fn(async () => new Response('{}')) as typeof fetch),
     now: overrides.now ?? (() => NOW),
     requestId: () => 'edge_request_fixture',
@@ -137,7 +148,17 @@ async function fixture(overrides: {
       body: JSON.stringify(body),
     },
   );
-  return { access, authorization, control, gateway, outcomes, policy, request, signer };
+  return {
+    access,
+    authorization,
+    control,
+    gateway,
+    outcomes,
+    policy,
+    request,
+    signer,
+    upstreamOriginPolicy,
+  };
 }
 
 function billingCoordinatorFixture() {
@@ -1409,6 +1430,7 @@ describe('otto edge gateway', () => {
       fetch: networkFetch as typeof fetch,
       now: () => NOW,
       requestId: () => 'edge_request_secret_error',
+      upstreamOriginPolicy: values.upstreamOriginPolicy,
     });
     const failed = await unavailable.fetch(values.request({ model: 'otto-fast', messages: [] }));
     expect(failed.status).toBe(502);
@@ -1425,6 +1447,7 @@ describe('otto edge gateway', () => {
       secretResolver: { get: async () => null },
       rateLimiter: new InMemoryEdgeRateLimiter(),
       now: () => NOW + 60_000,
+      upstreamOriginPolicy: expired.upstreamOriginPolicy,
     });
     const expiredResponse = await gateway.fetch(expired.request({
       model: 'otto-fast', messages: [],
@@ -1461,6 +1484,60 @@ describe('otto edge gateway', () => {
       }],
       limits,
     })).rejects.toMatchObject({ code: 'EDGE_INVALID_ENVELOPE' });
+  });
+
+  it('requires local origin approval before reading provider secrets or opening a connection', async () => {
+    const secretGet = vi.fn(async () => 'provider-secret-value');
+    const fetchMock = vi.fn(async () => new Response('{}'));
+    const values = await fixture({
+      allowedUpstreamOrigins: ['https://approved-provider.test'],
+      fetch: fetchMock as typeof fetch,
+      secretResolver: { get: secretGet },
+    });
+
+    const denied = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(denied.status).toBe(503);
+    await expect(denied.json()).resolves.toEqual({
+      error: {
+        code: 'EDGE_UPSTREAM_NOT_ALLOWED',
+        message: 'model routes are not allowed by local upstream policy',
+      },
+    });
+    expect(secretGet).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the local origin policy cannot decide', async () => {
+    const secretGet = vi.fn(async () => 'provider-secret-value');
+    const fetchMock = vi.fn(async () => new Response('{}'));
+    const values = await fixture({ secretResolver: { get: secretGet } });
+    const gateway = createOttoEdgeGateway({
+      policySource: { load: async () => values.policy },
+      verifier: createEdgeSignatureVerifier({
+        [values.signer.keyId]: values.signer.publicKeyPem,
+      }),
+      secretResolver: { get: secretGet },
+      rateLimiter: new InMemoryEdgeRateLimiter(),
+      fetch: fetchMock as typeof fetch,
+      now: () => NOW,
+      upstreamOriginPolicy: {
+        allows() {
+          throw new Error('private local policy failure');
+        },
+      },
+    });
+
+    const denied = await gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(denied.status).toBe(503);
+    expect(await denied.text()).not.toContain('private local policy failure');
+    expect(secretGet).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('parses authorization and normalized model names without accepting token smuggling', async () => {

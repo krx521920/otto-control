@@ -40,6 +40,8 @@ sequenceDiagram
   模型密钥。
 - 客户端只能选择策略公开的模型名，不能提供上游 URL、认证头或密钥绑定。
 - 上游地址必须来自签名策略，并且只能是无凭据、无查询参数的 HTTPS URL。
+- 每条签名路由还必须命中部署环境独立维护的精确 HTTPS Origin 白名单；白名单拒绝或
+  不可用时，在读取供应商 Secret 和建立网络连接之前 fail-closed。
 - Node HTTP 适配器只接受最长 8 KiB 的 origin-form request-target；客户端 `Host`、绝对 URL、
   authority-form、反斜线、片段、非法百分号转义、点段、控制字符和非 ASCII 原始字符均不能
   改变内部路由 origin；`Host` 不进入内部 Web Request。
@@ -85,10 +87,29 @@ PostgreSQL 并一次性消费，跨实例重放会被拒绝。请求体采用字
 
 ## 本地独立运行
 
-先准备两个只读文件：
+先准备三个只读文件：
 
 - `OTTO_EDGE_POLICY_FILE`：Control 签名的 `SignedEdgeGatewayPolicyV1` JSON。
 - `OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE`：`signingKeyId -> Ed25519 SPKI PEM` 的 JSON。
+- `OTTO_EDGE_UPSTREAM_ORIGINS_FILE`：部署方独立维护的上游精确 Origin 白名单。
+
+白名单文件采用固定版本信封，例如：
+
+```json
+{
+  "version": 1,
+  "allowedOrigins": [
+    "https://api.openai.com",
+    "https://model-gateway.example.com:8443"
+  ]
+}
+```
+
+白名单必须包含 1–256 个无凭据、路径、查询或片段的 HTTPS Origin。协议、主机和
+显式非默认端口都参与精确匹配；批准主机不会同时批准其子域名。签名策略仍负责固定
+完整路径，部署白名单只提供第二道独立的目标主机边界。白名单不能替代出站防火墙和
+受控 DNS；生产环境仍应限制网关只能连接批准的公网供应商地址，防范 DNS 重绑定及
+错误的私网解析。
 
 策略中的每个 `secretBinding` 对应同名进程环境变量。例如
 `PROVIDER_A_API_KEY`。然后运行：
@@ -96,6 +117,7 @@ PostgreSQL 并一次性消费，跨实例重放会被拒绝。请求体采用字
 ```powershell
 $env:OTTO_EDGE_POLICY_FILE='D:\secure\edge-policy.json'
 $env:OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE='D:\secure\control-public-keys.json'
+$env:OTTO_EDGE_UPSTREAM_ORIGINS_FILE='D:\secure\edge-upstream-origins.json'
 $env:PROVIDER_A_API_KEY='从密钥管理服务注入的值'
 npm run dev:edge
 ```
@@ -106,17 +128,20 @@ npm run dev:edge
 ## Control 自动同步模式
 
 生产 Node 网关可以不配置静态策略文件，改为从 Control 自动领取短期签名策略。
-准备以下三个只读文件或配置：
+准备以下四个只读文件或配置：
 
 - `OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE`：首次安装时独立核验过的 Control Ed25519
   引导信任根；文件中的每把密钥必须出现在 Control 公布的 Keyring 中；
 - `OTTO_EDGE_DEPLOYMENT_IDENTITY_FILE`：仅包含 `licenseId`、`deploymentId`、
   `organizationId` 和 64 位十六进制 `machineFingerprint` 的 JSON；
 - `OTTO_EDGE_LEASE_TOKEN_FILE`：只包含在线 License 租约令牌，不把令牌放入环境变量。
+- `OTTO_EDGE_UPSTREAM_ORIGINS_FILE`：由部署方独立审批的精确 HTTPS Origin 白名单，
+  不能由 Control 下发的签名策略自动扩宽。
 
 ```powershell
 $env:OTTO_EDGE_CONTROL_URL='https://control.example.com'
 $env:OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE='D:\secure\control-public-keys.json'
+$env:OTTO_EDGE_UPSTREAM_ORIGINS_FILE='D:\secure\edge-upstream-origins.json'
 $env:OTTO_EDGE_DEPLOYMENT_IDENTITY_FILE='D:\secure\edge-identity.json'
 $env:OTTO_EDGE_LEASE_TOKEN_FILE='D:\secure\edge-lease-token'
 $env:OTTO_EDGE_POLICY_REFRESH_BEFORE_EXPIRY_MS='60000'
@@ -154,6 +179,11 @@ HMAC、时间戳和一次性 nonce 认证，并禁止 HTTP、URL 凭据、查询
 检查和签发时间防回滚检查后才会进入内存缓存；伪造、错租户、回滚或冲突策略不会
 污染现有缓存。Control 暂时不可用时，只能继续使用仍处于其签名有效期内的旧策略；
 一旦策略过期即 fail-closed，不会写盘，也不会无限宽限。
+
+签名有效不代表路由自动获准：网关会取“签名策略路由”与本地 Origin 白名单的交集。
+没有可用交集时返回 `EDGE_UPSTREAM_NOT_ALLOWED`；本地策略自身异常时返回
+`EDGE_UPSTREAM_POLICY_UNAVAILABLE`。两种情况都不会解析供应商 Secret、建立上游连接
+或回显本地策略异常详情。更新白名单需要按部署配置变更流程审批并重启网关。
 
 Node 网关会同时从 `/v1/signing-keyring` 同步十分钟有效的签名公钥清单。Keyring
 必须由当前已信任且未撤销的活动密钥签名；新密钥必须先作为 `standby` 出现在旧密钥
@@ -328,7 +358,9 @@ Control 租约、License、Redis、模型或签名密钥。两个接口都要求
 ## 阿里云 ESA 接入
 
 `createAliyunEsaGateway` 接受 ESA `EdgeKV` 读取器、Control 公钥集合、Secret
-解析器和限流器，并返回官方 Web Service Worker 风格的 `fetch(request)` 入口。
+解析器、限流器和必填的 `allowedUpstreamOrigins`，并返回官方 Web Service Worker
+风格的 `fetch(request)` 入口。该白名单应由 ESA 部署配置独立注入，不能直接复用
+EdgeKV 中的签名策略路由列表。
 部署引导层负责构造 `EdgeKV` 以及绑定 ESA 的 Secret，业务核心不引用任何全局
 平台对象。
 
@@ -355,7 +387,7 @@ Edge Gateway 使用三层测试工具：
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
   `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、
   `concurrency-limit.ts`、`lifecycle.ts`、`node-http-adapter.ts`、
-  `node-http-limits.ts`、`upstream-response-limits.ts`、`usage-meter.ts`、
+  `node-http-limits.ts`、`upstream-response-limits.ts`、`upstream-origin-policy.ts`、`usage-meter.ts`、
   `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`
   和 Control 签发服务
   执行代码变异测试。
@@ -374,7 +406,7 @@ npm run test:mutation
 本次修改后独立复验的网关核心为 81.36%、用量解析器为 80.41%、单机计费协调器为
 81.68%、单机并发限制器为 100%、优雅排空状态机为 100%、Node HTTP 适配器为 100%、
 Node HTTP 资源边界为 100%、上游响应限制配置为 100%、上游熔断器为 96.06%、协议层为
-77.88%。
+77.88%、本地上游 Origin 策略为 100%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。

@@ -474,7 +474,10 @@ describe('Control edge gateway policy source', () => {
 });
 
 describe('edge gateway server configuration', () => {
-  const common = { OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE: 'D:\\secure\\keys.json' };
+  const common = {
+    OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE: 'D:\\secure\\keys.json',
+    OTTO_EDGE_UPSTREAM_ORIGINS_FILE: 'D:\\secure\\upstream-origins.json',
+  };
 
   it('keeps file mode for development and offline deployments', () => {
     expect(loadEdgeGatewayServerConfiguration({
@@ -483,6 +486,7 @@ describe('edge gateway server configuration', () => {
     })).toMatchObject({
       host: '127.0.0.1',
       port: 7790,
+      upstreamOriginsFile: 'D:\\secure\\upstream-origins.json',
       policy: { type: 'file', policyFile: 'D:\\secure\\policy.json' },
       rateLimit: { type: 'memory' },
       concurrency: { globalLimit: 256, perSubjectLimit: 8 },
@@ -506,6 +510,13 @@ describe('edge gateway server configuration', () => {
       },
       shutdownGraceMs: 30_000,
     });
+  });
+
+  it('requires an independently managed local upstream origin allowlist', () => {
+    expect(() => loadEdgeGatewayServerConfiguration({
+      OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE: 'D:\\secure\\keys.json',
+      OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
+    })).toThrow('OTTO_EDGE_UPSTREAM_ORIGINS_FILE');
   });
 
   it('loads production Redis limiting, ban and key-privacy configuration', () => {

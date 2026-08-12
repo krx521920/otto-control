@@ -5,6 +5,7 @@ import { createOttoEdgeGateway, type EdgeGatewayOutcomeSink } from './gateway.js
 import { createEdgeSignatureVerifier } from './protocol.js';
 import type { EdgeRateLimiter } from './rate-limit.js';
 import type { EdgeUpstreamResponseLimits } from './upstream-response-limits.js';
+import { StaticEdgeUpstreamOriginPolicy } from './upstream-origin-policy.js';
 
 export interface AliyunEsaEdgeKv {
   get(key: string, options: { type: 'text' }): Promise<string | undefined>;
@@ -23,6 +24,7 @@ export interface AliyunEsaGatewayOptions {
   now?: () => number;
   requestId?: () => string;
   responseLimits?: EdgeUpstreamResponseLimits;
+  allowedUpstreamOrigins: readonly string[];
 }
 
 /**
@@ -59,6 +61,7 @@ export function createAliyunEsaGateway(options: AliyunEsaGatewayOptions): {
     now: options.now,
     requestId: options.requestId,
     responseLimits: options.responseLimits,
+    upstreamOriginPolicy: new StaticEdgeUpstreamOriginPolicy(options.allowedUpstreamOrigins),
   });
   return {
     fetch(request) {

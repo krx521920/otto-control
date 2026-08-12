@@ -45,6 +45,10 @@ import {
   type EdgeUpstreamResponseLimits,
   loadEdgeUpstreamResponseLimits,
 } from './upstream-response-limits.js';
+import {
+  normalizeEdgeUpstreamOriginPolicy,
+  type StaticEdgeUpstreamOriginPolicy,
+} from './upstream-origin-policy.js';
 
 type EdgePolicyConfiguration =
   | { type: 'file'; policyFile: string }
@@ -88,6 +92,7 @@ export interface EdgeServerConfiguration {
   host: string;
   port: number;
   publicKeysFile: string;
+  upstreamOriginsFile: string;
   policy: EdgePolicyConfiguration;
   rateLimit: EdgeRateLimitConfiguration;
   concurrency: {
@@ -301,6 +306,7 @@ export function loadEdgeGatewayServerConfiguration(
     host: environment.OTTO_EDGE_HOST?.trim() || '127.0.0.1',
     port,
     publicKeysFile: requiredEnvironment('OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE', environment),
+    upstreamOriginsFile: requiredEnvironment('OTTO_EDGE_UPSTREAM_ORIGINS_FILE', environment),
     policy,
     rateLimit: rateLimitConfiguration(environment),
     concurrency: {
@@ -358,6 +364,20 @@ async function policySource(
     refreshBeforeExpiryMs: config.refreshBeforeExpiryMs,
     requestTimeoutMs: config.requestTimeoutMs,
   });
+}
+
+async function upstreamOriginPolicy(file: string): Promise<StaticEdgeUpstreamOriginPolicy> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(file, 'utf8')) as unknown;
+  } catch {
+    throw new Error('OTTO_EDGE_UPSTREAM_ORIGINS_FILE could not be read as JSON');
+  }
+  try {
+    return normalizeEdgeUpstreamOriginPolicy(value);
+  } catch {
+    throw new Error('OTTO_EDGE_UPSTREAM_ORIGINS_FILE is invalid');
+  }
 }
 
 async function edgeRateLimiter(config: EdgeRateLimitConfiguration): Promise<EdgeRateLimiter> {
@@ -592,6 +612,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
     ? await loadEdgeOperationsToken(config.operationsTokenFile)
     : undefined;
   const configuredPolicySource = await policySource(config.policy, verifier);
+  const configuredUpstreamOriginPolicy = await upstreamOriginPolicy(config.upstreamOriginsFile);
   const rateLimiter = await edgeRateLimiter(config.rateLimit);
   const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(
     config.concurrency.globalLimit,
@@ -620,6 +641,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
       lifecycle,
     }),
     responseLimits: config.upstreamResponse,
+    upstreamOriginPolicy: configuredUpstreamOriginPolicy,
   });
   const server = createServer(edgeNodeHttpServerOptions(config.http), (request, response) => {
     let lifecycleLease: EdgeGatewayLifecycleLease | null = null;

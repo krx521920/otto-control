@@ -30,6 +30,7 @@ import {
   type EdgeUpstreamResponseLimits,
   normalizeEdgeUpstreamResponseLimits,
 } from './upstream-response-limits.js';
+import type { EdgeUpstreamOriginPolicy } from './upstream-origin-policy.js';
 import {
   decodeEdgeAccessTokenEnvelope,
   EdgeGatewayProtocolError,
@@ -87,6 +88,7 @@ export interface OttoEdgeGatewayOptions {
   now?: () => number;
   requestId?: () => string;
   responseLimits?: EdgeUpstreamResponseLimits;
+  upstreamOriginPolicy: EdgeUpstreamOriginPolicy;
 }
 
 interface AuthorizedRequest {
@@ -94,6 +96,7 @@ interface AuthorizedRequest {
   token: EdgeAccessTokenV1;
   endpoint: EdgeGatewayEndpoint;
   publicModel: string;
+  routes: EdgeModelRouteV1[];
   upstreamBody: Record<string, unknown>;
 }
 
@@ -539,14 +542,33 @@ async function authorize(
   if (!token.allowedModels.includes(publicModel)) {
     throw new EdgeGatewayProtocolError(403, 'EDGE_MODEL_FORBIDDEN', 'model is not allowed');
   }
-  if (matchingRoutes(policy, endpoint, publicModel).length === 0) {
+  const matching = matchingRoutes(policy, endpoint, publicModel);
+  if (matching.length === 0) {
     throw new EdgeGatewayProtocolError(503, 'EDGE_MODEL_UNAVAILABLE', 'model has no active route');
+  }
+  let routes: EdgeModelRouteV1[];
+  try {
+    routes = matching.filter((route) => options.upstreamOriginPolicy.allows(route.upstreamUrl));
+  } catch {
+    throw new EdgeGatewayProtocolError(
+      503,
+      'EDGE_UPSTREAM_POLICY_UNAVAILABLE',
+      'local upstream policy is unavailable',
+    );
+  }
+  if (routes.length === 0) {
+    throw new EdgeGatewayProtocolError(
+      503,
+      'EDGE_UPSTREAM_NOT_ALLOWED',
+      'model routes are not allowed by local upstream policy',
+    );
   }
   return {
     policy,
     token,
     endpoint,
     publicModel,
+    routes,
     upstreamBody: body,
     remaining: rate.remaining,
   };
@@ -682,11 +704,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         );
       }
       const releaseConcurrency = () => concurrencyLease.release();
-      const routes = matchingRoutes(
-        authorized.policy,
-        endpoint,
-        authorized.publicModel,
-      ).slice(0, authorized.policy.limits.maxRouteAttempts);
+      const routes = authorized.routes.slice(0, authorized.policy.limits.maxRouteAttempts);
       let lastStatus: number | null = null;
       let lastRouteId: string | null = null;
       let billingReservation: EdgeBillingReservation | null = null;
