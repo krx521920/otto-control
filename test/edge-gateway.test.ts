@@ -1113,9 +1113,11 @@ describe('otto edge gateway', () => {
 
   it('handles path, method, media, JSON, model, and byte-limit boundaries fail-closed', async () => {
     const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    const secretGet = vi.fn(async () => 'provider-secret-value');
     const values = await fixture({
       allowedModels: ['otto-fast', 'otto-unrouted'],
       fetch: fetchMock as typeof fetch,
+      secretResolver: { get: secretGet },
       limits: { ...limits, maxRequestBytes: 1_024, requestsPerMinute: 100 },
     });
     const raw = (
@@ -1140,6 +1142,17 @@ describe('otto edge gateway', () => {
     }));
     expect(missingRoute.status).toBe(404);
     await expect(errorCode(missingRoute)).resolves.toBe('EDGE_NOT_FOUND');
+
+    for (const path of [
+      '/v1/chat/completions?api-version=untrusted',
+      '/v1/chat/completions#untrusted-fragment',
+    ]) {
+      const ambiguousTarget = await values.gateway.fetch(raw('{}', { path }));
+      expect(ambiguousTarget.status).toBe(400);
+      await expect(errorCode(ambiguousTarget)).resolves.toBe('EDGE_INVALID_HTTP_REQUEST');
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(secretGet).not.toHaveBeenCalled();
 
     const wrongMethod = await values.gateway.fetch(raw(undefined, { method: 'GET' }));
     expect(wrongMethod.status).toBe(405);

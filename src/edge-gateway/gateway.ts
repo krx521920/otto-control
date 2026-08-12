@@ -630,6 +630,9 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
       }
       const endpoint = ENDPOINT_PATHS[url.pathname];
       if (!endpoint) return jsonResponse(404, 'EDGE_NOT_FOUND', 'route not found');
+      if (url.search || url.hash) {
+        return jsonResponse(400, 'EDGE_INVALID_HTTP_REQUEST', 'invalid HTTP request');
+      }
       if (request.method !== 'POST') {
         return jsonResponse(405, 'EDGE_METHOD_NOT_ALLOWED', 'method not allowed', {
           allow: 'POST',

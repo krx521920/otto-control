@@ -147,7 +147,9 @@ provider credentials before constructing an HTTP header or opening an upstream
 connection. It enforces
 request/rate bounds, performs bounded failover, and
 streams provider responses without sending prompts or conversation context to
-Control. The Node adapter uses a fixed internal origin and rejects ambiguous,
+Control. Model API requests must use an exact endpoint path; query strings and
+fragments are rejected instead of being silently ignored or forwarded. The Node
+adapter uses a fixed internal origin and rejects ambiguous,
 absolute, non-canonical, malformed-percent, non-ASCII, or oversized request targets
 before policy or provider access; an untrusted Host header cannot select its
 routing origin. It also holds a global and per-subject concurrency slot
