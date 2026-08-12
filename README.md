@@ -167,7 +167,9 @@ or oversized HTTP connections before they become unbounded process resources.
 Repeated transport, retryable HTTP, and stream failures open a bounded per-route
 circuit; requests use a signed fallback route
 during cooldown, then exactly one half-open probe decides whether to restore the
-primary. A separate local request-body hard cap defaults to 4 MiB and cannot be
+primary. Open routes are rejected before resolving provider credentials, avoiding
+needless KMS or Vault calls during cooldown; a missing probe credential releases
+the half-open lease for a later retry. A separate local request-body hard cap defaults to 4 MiB and cannot be
 expanded by signed Control policy, limiting memory and provider-cost exposure.
 Signed policy also bounds upstream stream-idle time, and downstream
 disconnects cancel provider work instead of continuing to consume tokens. A

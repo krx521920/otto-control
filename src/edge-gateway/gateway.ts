@@ -740,15 +740,6 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
 
       for (let index = 0; index < routes.length; index += 1) {
         const route = routes[index]!;
-        let secret: string | null;
-        try {
-          secret = normalizeEdgeProviderSecret(
-            await options.secretResolver.get(route.authentication.secretBinding),
-          );
-        } catch {
-          secret = null;
-        }
-        if (!secret) continue;
         let routeAttempt: EdgeRouteAttempt | null;
         try {
           routeAttempt = circuitBreaker.acquire(route.id, startedAt);
@@ -762,6 +753,18 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           );
         }
         if (!routeAttempt) continue;
+        let secret: string | null;
+        try {
+          secret = normalizeEdgeProviderSecret(
+            await options.secretResolver.get(route.authentication.secretBinding),
+          );
+        } catch {
+          secret = null;
+        }
+        if (!secret) {
+          routeAttempt.cancelled();
+          continue;
+        }
         lastRouteId = route.id;
         if (route.metering && !billingReservation) {
           if (!options.billingCoordinator) {

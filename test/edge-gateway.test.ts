@@ -1369,6 +1369,7 @@ describe('otto edge gateway', () => {
   it('opens failed routes, skips them during cooldown, and closes after one successful probe', async () => {
     let current = NOW;
     let primaryHealthy = false;
+    let primarySecretAvailable = true;
     const fallbackRoute: EdgeModelRouteV1 = {
       ...primaryRoute,
       id: 'route_fallback',
@@ -1387,15 +1388,18 @@ describe('otto edge gateway', () => {
       }
       return new Response('{}', { status: 200 });
     });
+    const secretGet = vi.fn(async (binding: string) => {
+      if (binding === 'PROVIDER_A_API_KEY') {
+        return primarySecretAvailable ? 'provider-a-secret' : null;
+      }
+      return binding === 'PROVIDER_B_API_KEY' ? 'provider-b-secret' : null;
+    });
     const values = await fixture({
       routes: [primaryRoute, fallbackRoute],
       circuitBreaker: breaker,
       fetch: fetchMock as typeof fetch,
       now: () => current,
-      secrets: {
-        PROVIDER_A_API_KEY: 'provider-a-secret',
-        PROVIDER_B_API_KEY: 'provider-b-secret',
-      },
+      secretResolver: { get: secretGet },
     });
     const send = async () => {
       const response = await values.gateway.fetch(values.request({
@@ -1410,6 +1414,8 @@ describe('otto edge gateway', () => {
       primaryRoute.upstreamUrl,
       fallbackRoute.upstreamUrl,
     ]);
+    expect(secretGet.mock.calls.filter(([binding]) => binding === 'PROVIDER_A_API_KEY'))
+      .toHaveLength(1);
     expect(breaker.snapshot().openRoutes).toBe(1);
 
     expect((await send()).status).toBe(200);
@@ -1418,8 +1424,17 @@ describe('otto edge gateway', () => {
       fallbackRoute.upstreamUrl,
       fallbackRoute.upstreamUrl,
     ]);
+    expect(secretGet.mock.calls.filter(([binding]) => binding === 'PROVIDER_A_API_KEY'))
+      .toHaveLength(1);
 
     current += 1_000;
+    primarySecretAvailable = false;
+    expect((await send()).status).toBe(200);
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(fallbackRoute.upstreamUrl);
+    expect(breaker.snapshot().halfOpenRoutes).toBe(0);
+    expect(breaker.snapshot().probeReadyRoutes).toBe(1);
+
+    primarySecretAvailable = true;
     primaryHealthy = true;
     expect((await send()).status).toBe(200);
     expect(breaker.snapshot().trackedRoutes).toBe(0);
