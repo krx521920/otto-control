@@ -77,6 +77,7 @@ async function fixture(overrides: {
   circuitBreaker?: EdgeRouteCircuitBreaker;
   lifecycle?: EdgeGatewayLifecycle;
   readinessProbe?: EdgeGatewayReadinessProbe;
+  responseLimits?: { maximumBytes: number; maximumDurationMs: number };
   now?: () => number;
 } = {}) {
   const { privateKey } = generateKeyPairSync('ed25519');
@@ -117,6 +118,7 @@ async function fixture(overrides: {
     outcomeSink: { record: async (outcome) => { outcomes.push(outcome); } },
     billingCoordinator: overrides.billingCoordinator,
     readinessProbe: overrides.readinessProbe,
+    responseLimits: overrides.responseLimits,
     fetch: overrides.fetch ?? (vi.fn(async () => new Response('{}')) as typeof fetch),
     now: overrides.now ?? (() => NOW),
     requestId: () => 'edge_request_fixture',
@@ -535,6 +537,137 @@ describe('otto edge gateway', () => {
     }
   });
 
+  it('aborts a response that exceeds the local byte cap and preserves billing uncertainty', async () => {
+    const billing = billingCoordinatorFixture();
+    const circuitBreaker = new InMemoryEdgeRouteCircuitBreaker({
+      failureThreshold: 1,
+      now: () => NOW,
+    });
+    const meteredRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 2_000 },
+    };
+    let providerCancelled = false;
+    let providerSignal: AbortSignal | null = null;
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      providerSignal = init?.signal ?? null;
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(1_024));
+          controller.enqueue(new Uint8Array([1]));
+        },
+        cancel() {
+          providerCancelled = true;
+        },
+      }));
+    });
+    const values = await fixture({
+      billingCoordinator: billing.coordinator,
+      circuitBreaker,
+      fetch: fetchMock,
+      responseLimits: { maximumBytes: 1_024, maximumDurationMs: 60_000 },
+      routes: [meteredRoute],
+    });
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', stream: true, messages: [],
+    }));
+
+    await expect(response.arrayBuffer()).rejects.toMatchObject({ name: 'QuotaExceededError' });
+    await vi.waitFor(() => expect(billing.markUncertain).toHaveBeenCalledOnce());
+
+    expect(providerCancelled).toBe(true);
+    expect((providerSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({ outcome: 'response_limit_exceeded' }),
+    ]);
+    expect(billing.markUncertain).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'response_limit_exceeded',
+    }));
+    expect(circuitBreaker.snapshot().openRoutes).toBe(1);
+  });
+
+  it('allows an upstream response exactly at the local byte cap', async () => {
+    const bytes = new Uint8Array(1_024);
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(bytes));
+    const values = await fixture({
+      fetch: fetchMock,
+      responseLimits: { maximumBytes: bytes.byteLength, maximumDurationMs: 60_000 },
+    });
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect((await response.arrayBuffer()).byteLength).toBe(bytes.byteLength);
+    expect(values.outcomes).toEqual([expect.objectContaining({ outcome: 'succeeded' })]);
+  });
+
+  it('clears the total response deadline after a stream completes', async () => {
+    vi.useFakeTimers();
+    try {
+      let providerSignal: AbortSignal | null = null;
+      const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+        providerSignal = init?.signal ?? null;
+        return new Response('complete');
+      });
+      const values = await fixture({
+        fetch: fetchMock,
+        responseLimits: { maximumBytes: 1_024, maximumDurationMs: 1_000 },
+      });
+      const response = await values.gateway.fetch(values.request({
+        model: 'otto-fast', messages: [],
+      }));
+
+      await expect(response.text()).resolves.toBe('complete');
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((providerSignal as AbortSignal | null)?.aborted).toBe(false);
+      expect(values.outcomes).toEqual([expect.objectContaining({ outcome: 'succeeded' })]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('enforces a total response deadline even while chunks reset the idle timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      let providerController: ReadableStreamDefaultController<Uint8Array> | null = null;
+      let providerSignal: AbortSignal | null = null;
+      const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+        providerSignal = init?.signal ?? null;
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            providerController = controller;
+          },
+        }));
+      });
+      const values = await fixture({
+        fetch: fetchMock,
+        limits: { ...limits, upstreamIdleTimeoutMs: 1_000 },
+        responseLimits: { maximumBytes: 1_024, maximumDurationMs: 2_000 },
+      });
+      const response = await values.gateway.fetch(values.request({
+        model: 'otto-fast', stream: true, messages: [],
+      }));
+      const content = expect(response.text()).rejects.toMatchObject({ name: 'TimeoutError' });
+
+      providerController!.enqueue(encoder.encode('first'));
+      await vi.advanceTimersByTimeAsync(900);
+      providerController!.enqueue(encoder.encode('second'));
+      await vi.advanceTimersByTimeAsync(900);
+      providerController!.enqueue(encoder.encode('third'));
+      await vi.advanceTimersByTimeAsync(200);
+
+      await content;
+      expect((providerSignal as AbortSignal | null)?.aborted).toBe(true);
+      expect(values.outcomes).toEqual([
+        expect.objectContaining({ outcome: 'stream_timed_out' }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('cancels provider work when the downstream request disconnects', async () => {
     let providerCancelled = false;
     let providerSignal: AbortSignal | null = null;
@@ -568,6 +701,36 @@ describe('otto edge gateway', () => {
         routeId: 'route_primary',
       }),
     ]);
+  });
+
+  it('does not start response deadlines for a client that already disconnected', async () => {
+    vi.useFakeTimers();
+    try {
+      let providerSignal: AbortSignal | null = null;
+      const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+        providerSignal = init?.signal ?? null;
+        return new Response('unreachable');
+      });
+      const values = await fixture({
+        fetch: fetchMock,
+        responseLimits: { maximumBytes: 1_024, maximumDurationMs: 1_000 },
+      });
+      const downstream = new AbortController();
+      downstream.abort(new DOMException('already disconnected', 'AbortError'));
+
+      const response = await values.gateway.fetch(values.request({
+        model: 'otto-fast', messages: [],
+      }, { signal: downstream.signal }));
+
+      await expect(response.text()).rejects.toMatchObject({ name: 'AbortError' });
+      expect((providerSignal as AbortSignal | null)?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(values.outcomes).toEqual([
+        expect.objectContaining({ outcome: 'client_cancelled' }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('enforces the response-header connection timeout before retrying or failing', async () => {

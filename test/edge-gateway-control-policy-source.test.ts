@@ -499,6 +499,10 @@ describe('edge gateway server configuration', () => {
         maximumHeaders: 100,
         maximumRequestsPerSocket: 1_000,
       },
+      upstreamResponse: {
+        maximumBytes: 64 * 1_024 * 1_024,
+        maximumDurationMs: 15 * 60 * 1_000,
+      },
       shutdownGraceMs: 30_000,
     });
   });
@@ -527,6 +531,8 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_HTTP_MAX_HEADER_BYTES: '8192',
       OTTO_EDGE_HTTP_MAX_HEADERS_COUNT: '80',
       OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET: '500',
+      OTTO_EDGE_UPSTREAM_MAX_RESPONSE_BYTES: '16777216',
+      OTTO_EDGE_UPSTREAM_MAX_RESPONSE_DURATION_MS: '300000',
       OTTO_EDGE_SHUTDOWN_GRACE_MS: '45000',
     })).toMatchObject({
       rateLimit: {
@@ -553,6 +559,10 @@ describe('edge gateway server configuration', () => {
         maximumHeaderBytes: 8_192,
         maximumHeaders: 80,
         maximumRequestsPerSocket: 500,
+      },
+      upstreamResponse: {
+        maximumBytes: 16 * 1_024 * 1_024,
+        maximumDurationMs: 300_000,
       },
       shutdownGraceMs: 45_000,
     });

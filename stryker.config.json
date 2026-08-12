@@ -16,6 +16,7 @@
     "src/edge-gateway/rate-limit.ts",
     "src/edge-gateway/redis-rate-limit.ts",
     "src/edge-gateway/usage-meter.ts",
+    "src/edge-gateway/upstream-response-limits.ts",
     "src/modules/edge-gateway/service.ts"
   ],
   "testFiles": [
@@ -32,6 +33,7 @@
     "test/edge-gateway-node-http-limits.test.ts",
     "test/edge-gateway-redis-rate-limit.test.ts",
     "test/edge-gateway-usage-meter.test.ts",
+    "test/edge-gateway-upstream-response-limits.test.ts",
     "test/edge-gateway-protocol.test.ts"
   ],
   "coverageAnalysis": "perTest",

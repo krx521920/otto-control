@@ -241,7 +241,13 @@ function journalPayload(value: unknown, expectedIndex: number, previousHash: str
   }
   if (body.type === 'uncertain') {
     if (typeof body.routeId !== 'string' || !IDENTIFIER.test(body.routeId)
-      || !['client_cancelled', 'provider_error', 'stream_timed_out', 'usage_unavailable']
+      || ![
+        'client_cancelled',
+        'provider_error',
+        'response_limit_exceeded',
+        'stream_timed_out',
+        'usage_unavailable',
+      ]
         .includes(String(body.reason))
       || !Number.isSafeInteger(body.occurredAtMs) || Number(body.occurredAtMs) < 1) {
       configurationError('billing journal uncertain event');

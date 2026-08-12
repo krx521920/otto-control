@@ -27,6 +27,10 @@ import type { EdgeGatewayLifecycle } from './lifecycle.js';
 import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
 import { OpenAiUsageMeter } from './usage-meter.js';
 import {
+  type EdgeUpstreamResponseLimits,
+  normalizeEdgeUpstreamResponseLimits,
+} from './upstream-response-limits.js';
+import {
   decodeEdgeAccessTokenEnvelope,
   EdgeGatewayProtocolError,
   normalizeSignedEdgeGatewayPolicy,
@@ -82,6 +86,7 @@ export interface OttoEdgeGatewayOptions {
   fetch?: typeof fetch;
   now?: () => number;
   requestId?: () => string;
+  responseLimits?: EdgeUpstreamResponseLimits;
 }
 
 interface AuthorizedRequest {
@@ -116,6 +121,7 @@ function billingIdentity(evidence: RequestEvidence): EdgeBillingRequestIdentity 
 type EdgeStreamCompletion =
   | 'completed'
   | 'client_cancelled'
+  | 'response_limit_exceeded'
   | 'stream_timed_out'
   | 'stream_failed';
 
@@ -294,6 +300,7 @@ function managedUpstreamBody(
   upstreamController: AbortController,
   clientSignal: AbortSignal,
   idleTimeoutMs: number,
+  responseLimits: EdgeUpstreamResponseLimits,
   meterUsage: boolean,
   onComplete: (completion: EdgeStreamCompletion, usage: EdgeModelUsageV1 | null) => void,
 ): ReadableStream<Uint8Array> | null {
@@ -305,16 +312,23 @@ function managedUpstreamBody(
   let usageMeter: OpenAiUsageMeter | null = meterUsage ? new OpenAiUsageMeter() : null;
   let completed = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let totalTimer: ReturnType<typeof setTimeout> | undefined;
+  let responseBytes = 0;
   let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
 
   const clearIdleTimer = () => {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = undefined;
   };
+  const clearTotalTimer = () => {
+    if (totalTimer !== undefined) clearTimeout(totalTimer);
+    totalTimer = undefined;
+  };
   const complete = (completion: EdgeStreamCompletion) => {
     if (completed) return;
     completed = true;
     clearIdleTimer();
+    clearTotalTimer();
     clientSignal.removeEventListener('abort', abortForClient);
     let usage: EdgeModelUsageV1 | null = null;
     if (completion === 'completed' && usageMeter) {
@@ -347,8 +361,26 @@ function managedUpstreamBody(
   return new ReadableStream<Uint8Array>({
     start(controller) {
       streamController = controller;
-      if (clientSignal.aborted) abortForClient();
-      else clientSignal.addEventListener('abort', abortForClient, { once: true });
+      if (clientSignal.aborted) {
+        abortForClient();
+        return;
+      }
+      clientSignal.addEventListener('abort', abortForClient, { once: true });
+      const timeoutError = new DOMException(
+        'upstream response exceeded its total duration',
+        'TimeoutError',
+      );
+      totalTimer = setTimeout(() => {
+        if (completed) return;
+        upstreamController.abort(timeoutError);
+        cancelReader(timeoutError);
+        complete('stream_timed_out');
+        try {
+          controller.error(timeoutError);
+        } catch {
+          // A concurrent downstream cancellation already closed the stream.
+        }
+      }, responseLimits.maximumDurationMs);
     },
     async pull(controller) {
       if (completed) return;
@@ -372,6 +404,18 @@ function managedUpstreamBody(
           complete('completed');
           controller.close();
         } else {
+          responseBytes += result.value.byteLength;
+          if (responseBytes > responseLimits.maximumBytes) {
+            const limitError = new DOMException(
+              'upstream response exceeded its byte limit',
+              'QuotaExceededError',
+            );
+            upstreamController.abort(limitError);
+            cancelReader(limitError);
+            complete('response_limit_exceeded');
+            controller.error(limitError);
+            return;
+          }
           if (usageMeter) {
             try {
               usageMeter.push(result.value);
@@ -424,6 +468,7 @@ function scheduleBackground(
 
 function uncertainReason(completion: EdgeStreamCompletion): EdgeBillingUncertainReason {
   if (completion === 'client_cancelled') return 'client_cancelled';
+  if (completion === 'response_limit_exceeded') return 'response_limit_exceeded';
   if (completion === 'stream_timed_out') return 'stream_timed_out';
   if (completion === 'stream_failed') return 'provider_error';
   return 'usage_unavailable';
@@ -517,6 +562,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
   const circuitBreaker = options.circuitBreaker
     ?? new InMemoryEdgeRouteCircuitBreaker({ now });
   const requestId = options.requestId ?? (() => crypto.randomUUID());
+  const responseLimits = normalizeEdgeUpstreamResponseLimits(options.responseLimits);
 
   return {
     async fetch(request, context) {
@@ -748,6 +794,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             connection.controller,
             request.signal,
             authorized.policy.limits.upstreamIdleTimeoutMs,
+            responseLimits,
             Boolean(route.metering),
             (completion, usage) => {
               releaseConcurrency();
@@ -773,6 +820,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
                     ? 'client_cancelled'
                     : completion === 'stream_timed_out'
                       ? 'stream_timed_out'
+                      : completion === 'response_limit_exceeded'
+                        ? 'response_limit_exceeded'
                       : 'upstream_failed',
                 durationMs: Math.max(0, completedAt - evidence.startedAt),
                 occurredAtMs: completedAt,

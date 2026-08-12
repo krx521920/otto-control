@@ -733,7 +733,7 @@ describe('Control-backed Edge billing coordinator', () => {
       ...uncertainRequest,
       reservation: uncertain,
       routeId: 'route_primary',
-      reason: 'stream_timed_out',
+      reason: 'response_limit_exceeded',
       occurredAtMs: NOW + 1_000,
     });
     expect(coordinator.operationalStatus()).toMatchObject({
@@ -748,7 +748,7 @@ describe('Control-backed Edge billing coordinator', () => {
 
     expect(paths.filter((path) => path.endsWith('/release'))).toHaveLength(1);
     const journal = await readFile(join(directory, 'billing.ndjson'), 'utf8');
-    expect(journal).toContain('stream_timed_out');
+    expect(journal).toContain('response_limit_exceeded');
     expect(journal).toContain('route_primary');
     expect(journal).not.toContain('messages');
     coordinator.close();

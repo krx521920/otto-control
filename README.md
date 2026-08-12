@@ -156,6 +156,9 @@ use a signed fallback route
 during cooldown, then exactly one half-open probe decides whether to restore the
 primary. Signed policy also bounds upstream stream-idle time, and downstream
 disconnects cancel provider work instead of continuing to consume tokens. A
+separate local hard cap aborts responses that exceed 64 MiB or 15 minutes even
+when a provider continuously sends data and never triggers the idle timeout;
+metered requests remain explicitly uncertain instead of being undercharged. A
 standard Web Service Worker adapter is provided for Alibaba Cloud
 ESA. The Node adapter can also authenticate to Control, coalesce policy refreshes,
 verify tenant-bound signatures before caching, and fail closed when the last

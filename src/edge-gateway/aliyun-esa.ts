@@ -4,6 +4,7 @@ import type { EdgeRouteCircuitBreaker } from './circuit-breaker.js';
 import { createOttoEdgeGateway, type EdgeGatewayOutcomeSink } from './gateway.js';
 import { createEdgeSignatureVerifier } from './protocol.js';
 import type { EdgeRateLimiter } from './rate-limit.js';
+import type { EdgeUpstreamResponseLimits } from './upstream-response-limits.js';
 
 export interface AliyunEsaEdgeKv {
   get(key: string, options: { type: 'text' }): Promise<string | undefined>;
@@ -21,6 +22,7 @@ export interface AliyunEsaGatewayOptions {
   fetch?: typeof fetch;
   now?: () => number;
   requestId?: () => string;
+  responseLimits?: EdgeUpstreamResponseLimits;
 }
 
 /**
@@ -56,6 +58,7 @@ export function createAliyunEsaGateway(options: AliyunEsaGatewayOptions): {
     fetch: options.fetch,
     now: options.now,
     requestId: options.requestId,
+    responseLimits: options.responseLimits,
   });
   return {
     fetch(request) {

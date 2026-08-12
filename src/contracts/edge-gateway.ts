@@ -103,6 +103,7 @@ export interface EdgeGatewayOutcomeV2 {
     | 'rejected'
     | 'upstream_failed'
     | 'client_cancelled'
+    | 'response_limit_exceeded'
     | 'stream_timed_out';
   durationMs: number;
   occurredAtMs: number;

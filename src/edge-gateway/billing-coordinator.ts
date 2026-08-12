@@ -43,6 +43,7 @@ export interface EdgeBillingReleaseRequest extends EdgeBillingRequestIdentity {
 export type EdgeBillingUncertainReason =
   | 'client_cancelled'
   | 'provider_error'
+  | 'response_limit_exceeded'
   | 'stream_timed_out'
   | 'usage_unavailable';
 
