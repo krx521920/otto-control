@@ -31,6 +31,7 @@ import type {
   CreditStatement,
   CreditTransactionRecord,
   ExecutionReceiptKeyRecord,
+  ExecutionReceiptHoldMutationResult,
   ExecutionReceiptMutationResult,
   ExecutionReceiptRecord,
   SignedExecutionReceiptV2,
@@ -623,6 +624,15 @@ export interface ControlStore {
     metadata: Record<string, unknown>;
     receivedAt: Date;
   }): Promise<ExecutionReceiptMutationResult>;
+  settleCreditHoldWithExecutionReceipt(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    amount: number;
+    envelope: SignedExecutionReceiptV2;
+    metadata: Record<string, unknown>;
+    receivedAt: Date;
+  }): Promise<ExecutionReceiptHoldMutationResult | null>;
   getExecutionReceipt(receiptId: string): Promise<ExecutionReceiptRecord | null>;
   listExecutionReceipts(input: {
     customerId: string;

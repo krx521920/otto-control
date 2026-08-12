@@ -145,7 +145,22 @@ streams provider responses without sending prompts or conversation context to
 Control. Signed policy also bounds upstream stream-idle time, and downstream
 disconnects cancel provider work instead of continuing to consume tokens. A
 standard Web Service Worker adapter is provided for Alibaba Cloud
-ESA. See [`docs/otto-edge-gateway.zh-CN.md`](docs/otto-edge-gateway.zh-CN.md) for
+ESA. The Node adapter can also authenticate to Control, coalesce policy refreshes,
+verify tenant-bound signatures before caching, and fail closed when the last
+signed policy expires. It consumes Control's signed public keyring with two-phase
+standby activation, bounded revocation polling, rollback protection, and a
+bootstrap trust-root requirement. A Redis Lua adapter enforces atomic cross-replica
+limits, HMAC-obscured subject keys, bounded abuse strikes, temporary bans, and
+fail-closed behavior without falling back to process memory. In single-server
+mode, metered routes reserve credits before provider access, extract only bounded
+OpenAI-compatible usage, and atomically settle an Ed25519 receipt against the
+hold. Pending settlement state is kept in a hash-chained, fsynced local journal
+and replayed after restart. Liveness and readiness are separate, and an optional
+file-backed operations token protects aggregate billing status and idempotent
+queue retry endpoints without allowing receipt, sequence, or amount mutation.
+Multi-instance deployments require a shared ordered
+aggregator instead of sharing this file over NFS/SMB. See
+[`docs/otto-edge-gateway.zh-CN.md`](docs/otto-edge-gateway.zh-CN.md) for
 the trust boundary, configuration, and remaining production gates.
 
 Control persists deployment-scoped Edge policies in PostgreSQL and exposes
@@ -871,6 +886,11 @@ settles the actual amount and immediately releases any remainder; explicit
 release and automatic expiry both return unused credits. Direct usage calls and
 every hold mutation require an enterprise-scoped idempotency key. Reusing that key
 with different parameters fails with `409` instead of silently changing money.
+`POST /v1/billing/holds/:holdId/execution-receipts` performs signature verification,
+actual capture, unused-credit release, receipt persistence, and sequence advance in
+one transaction so the Edge Gateway does not double charge by combining a hold
+with direct receipt consumption. Insufficient hold balance is reported as HTTP
+402 `CREDIT_REQUIRED` rather than inferred from mutable error text.
 
 Administrators can query an enterprise account by passing `organizationId` to
 `/v1/admin/billing/customers/:customerId/account`; top-ups must also include the

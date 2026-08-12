@@ -11,6 +11,11 @@ export type EdgeProviderAuthentication =
       secretBinding: string;
     };
 
+export interface EdgeRouteMeteringV1 {
+  type: 'openai_tokens';
+  reserveUnits: number;
+}
+
 /**
  * A route is selected exclusively from a Control-signed policy. Client input can
  * select publicModel, but can never supply an upstream URL or secret binding.
@@ -23,6 +28,7 @@ export interface EdgeModelRouteV1 {
   upstreamUrl: string;
   priority: number;
   authentication: EdgeProviderAuthentication;
+  metering?: EdgeRouteMeteringV1;
 }
 
 export interface EdgeGatewayLimitsV1 {
@@ -75,8 +81,14 @@ export interface SignedEdgeAccessTokenV1 {
  * billing until a trusted usage aggregator has added provider token counts and
  * produced an ExecutionReceiptV2.
  */
-export interface EdgeGatewayOutcomeV1 {
-  version: 1;
+export interface EdgeModelUsageV1 {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export interface EdgeGatewayOutcomeV2 {
+  version: 2;
   requestId: string;
   tokenId: string;
   deploymentId: string;
@@ -94,4 +106,5 @@ export interface EdgeGatewayOutcomeV1 {
     | 'stream_timed_out';
   durationMs: number;
   occurredAtMs: number;
+  usage: EdgeModelUsageV1 | null;
 }

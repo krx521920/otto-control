@@ -252,4 +252,19 @@ export async function registerBillingRoutes(
       bearerToken(request),
     ),
   );
+
+  app.post<{ Params: { holdId: string } }>(
+    '/v1/billing/holds/:holdId/execution-receipts',
+    {
+      config: { rateLimit: { max: 600, timeWindow: '1 minute', ban: 20 } },
+    },
+    async (request, reply) => {
+      const result = await options.service.settleHoldWithExecutionReceipt(
+        request.params.holdId,
+        request.body,
+        bearerToken(request),
+      );
+      return reply.code(result.replayed ? 200 : 201).send(result);
+    },
+  );
 }

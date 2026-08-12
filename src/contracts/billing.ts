@@ -160,6 +160,10 @@ export interface ExecutionReceiptMutationResult extends CreditMutationResult {
   receipt: ExecutionReceiptRecord;
 }
 
+export interface ExecutionReceiptHoldMutationResult extends ExecutionReceiptMutationResult {
+  hold: CreditHoldRecord;
+}
+
 export function isOttoBillingModule(value: string): value is OttoBillingModule {
   return (OTTO_BILLING_MODULES as readonly string[]).includes(value);
 }

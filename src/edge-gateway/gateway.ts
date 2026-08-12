@@ -1,11 +1,20 @@
 import type {
   EdgeAccessTokenV1,
   EdgeGatewayEndpoint,
-  EdgeGatewayOutcomeV1,
+  EdgeGatewayOutcomeV2,
+  EdgeModelUsageV1,
   EdgeGatewayPolicyV1,
   EdgeModelRouteV1,
 } from '../contracts/edge-gateway.js';
-import type { EdgeRateLimiter } from './rate-limit.js';
+import {
+  EdgeBillingAdmissionError,
+  type EdgeBillingCoordinator,
+  type EdgeBillingRequestIdentity,
+  type EdgeBillingReservation,
+  type EdgeBillingUncertainReason,
+} from './billing-coordinator.js';
+import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
+import { OpenAiUsageMeter } from './usage-meter.js';
 import {
   decodeEdgeAccessTokenEnvelope,
   EdgeGatewayProtocolError,
@@ -35,11 +44,17 @@ export interface EdgeGatewaySecretResolver {
 }
 
 export interface EdgeGatewayOutcomeSink {
-  record(outcome: EdgeGatewayOutcomeV1): Promise<void>;
+  record(outcome: EdgeGatewayOutcomeV2): Promise<void>;
 }
 
 export interface EdgeGatewayBackgroundContext {
   waitUntil?(task: Promise<unknown>): void;
+}
+
+export type EdgeGatewayReadinessState = 'ready' | 'degraded' | 'unavailable';
+
+export interface EdgeGatewayReadinessProbe {
+  check(): Promise<EdgeGatewayReadinessState>;
 }
 
 export interface OttoEdgeGatewayOptions {
@@ -48,6 +63,8 @@ export interface OttoEdgeGatewayOptions {
   secretResolver: EdgeGatewaySecretResolver;
   rateLimiter: EdgeRateLimiter;
   outcomeSink?: EdgeGatewayOutcomeSink;
+  billingCoordinator?: EdgeBillingCoordinator;
+  readinessProbe?: EdgeGatewayReadinessProbe;
   fetch?: typeof fetch;
   now?: () => number;
   requestId?: () => string;
@@ -67,6 +84,19 @@ interface RequestEvidence {
   endpoint: EdgeGatewayEndpoint;
   publicModel: string;
   token: EdgeAccessTokenV1;
+}
+
+function billingIdentity(evidence: RequestEvidence): EdgeBillingRequestIdentity {
+  return {
+    requestId: evidence.requestId,
+    tokenId: evidence.token.tokenId,
+    deploymentId: evidence.token.deploymentId,
+    organizationId: evidence.token.organizationId,
+    subjectId: evidence.token.subjectId,
+    endpoint: evidence.endpoint,
+    publicModel: evidence.publicModel,
+    policyVersion: evidence.token.policyVersion,
+  };
 }
 
 type EdgeStreamCompletion =
@@ -250,13 +280,15 @@ function managedUpstreamBody(
   upstreamController: AbortController,
   clientSignal: AbortSignal,
   idleTimeoutMs: number,
-  onComplete: (completion: EdgeStreamCompletion) => void,
+  meterUsage: boolean,
+  onComplete: (completion: EdgeStreamCompletion, usage: EdgeModelUsageV1 | null) => void,
 ): ReadableStream<Uint8Array> | null {
   if (!body) {
-    onComplete('completed');
+    onComplete('completed', null);
     return null;
   }
   const reader = body.getReader();
+  let usageMeter: OpenAiUsageMeter | null = meterUsage ? new OpenAiUsageMeter() : null;
   let completed = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -270,7 +302,16 @@ function managedUpstreamBody(
     completed = true;
     clearIdleTimer();
     clientSignal.removeEventListener('abort', abortForClient);
-    onComplete(completion);
+    let usage: EdgeModelUsageV1 | null = null;
+    if (completion === 'completed' && usageMeter) {
+      try {
+        usage = usageMeter.finish();
+      } catch {
+        usage = null;
+      }
+    }
+    usageMeter = null;
+    onComplete(completion, usage);
   };
   const cancelReader = (reason: unknown) => {
     void reader.cancel(reason).catch(() => undefined);
@@ -317,6 +358,13 @@ function managedUpstreamBody(
           complete('completed');
           controller.close();
         } else {
+          if (usageMeter) {
+            try {
+              usageMeter.push(result.value);
+            } catch {
+              usageMeter = null;
+            }
+          }
           controller.enqueue(result.value);
         }
       } catch (error) {
@@ -343,12 +391,44 @@ function managedUpstreamBody(
 function scheduleOutcome(
   sink: EdgeGatewayOutcomeSink | undefined,
   context: EdgeGatewayBackgroundContext | undefined,
-  outcome: EdgeGatewayOutcomeV1,
+  outcome: EdgeGatewayOutcomeV2,
 ): void {
   if (!sink) return;
   const task = sink.record(outcome).catch(() => undefined);
   if (context?.waitUntil) context.waitUntil(task);
   else void task;
+}
+
+function scheduleBackground(
+  context: EdgeGatewayBackgroundContext | undefined,
+  operation: () => Promise<unknown>,
+): void {
+  const guarded = Promise.resolve().then(operation).catch(() => undefined);
+  if (context?.waitUntil) context.waitUntil(guarded);
+  else void guarded;
+}
+
+function uncertainReason(completion: EdgeStreamCompletion): EdgeBillingUncertainReason {
+  if (completion === 'client_cancelled') return 'client_cancelled';
+  if (completion === 'stream_timed_out') return 'stream_timed_out';
+  if (completion === 'stream_failed') return 'provider_error';
+  return 'usage_unavailable';
+}
+
+function providerRequestBody(
+  body: Record<string, unknown>,
+  route: EdgeModelRouteV1,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...body, model: route.upstreamModel };
+  if (!route.metering || result.stream !== true) return result;
+  const existing = result.stream_options;
+  result.stream_options = {
+    ...(existing && typeof existing === 'object' && !Array.isArray(existing)
+      ? existing as Record<string, unknown>
+      : {}),
+    include_usage: true,
+  };
+  return result;
 }
 
 async function authorize(
@@ -391,7 +471,7 @@ async function authorize(
   if (!rate.allowed) {
     throw new EdgeGatewayProtocolError(
       429,
-      'EDGE_RATE_LIMITED',
+      rate.banned ? 'EDGE_TRAFFIC_BANNED' : 'EDGE_RATE_LIMITED',
       String(rate.retryAfterSeconds),
     );
   }
@@ -434,6 +514,21 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           },
         });
       }
+      if (request.method === 'GET' && url.pathname === '/readyz') {
+        let state: EdgeGatewayReadinessState = 'ready';
+        try {
+          state = await options.readinessProbe?.check() ?? 'ready';
+        } catch {
+          state = 'unavailable';
+        }
+        return new Response(JSON.stringify({ status: state, service: 'otto-edge-gateway' }), {
+          status: state === 'unavailable' ? 503 : 200,
+          headers: {
+            'cache-control': 'no-store',
+            'content-type': 'application/json; charset=utf-8',
+          },
+        });
+      }
       const endpoint = ENDPOINT_PATHS[url.pathname];
       if (!endpoint) return jsonResponse(404, 'EDGE_NOT_FOUND', 'route not found');
       if (request.method !== 'POST') {
@@ -446,12 +541,22 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
       try {
         authorized = await authorize(request, endpoint, options, startedAt);
       } catch (error) {
+        if (error instanceof EdgeRateLimitUnavailableError) {
+          return jsonResponse(
+            503,
+            'EDGE_RATE_LIMIT_UNAVAILABLE',
+            'gateway rate limiter is unavailable',
+            { 'x-otto-edge-request-id': id },
+          );
+        }
         if (error instanceof EdgeGatewayProtocolError) {
           const headers: Record<string, string> = { 'x-otto-edge-request-id': id };
           let message = error.message;
-          if (error.code === 'EDGE_RATE_LIMITED') {
+          if (error.code === 'EDGE_RATE_LIMITED' || error.code === 'EDGE_TRAFFIC_BANNED') {
             headers['retry-after'] = error.message;
-            message = 'request rate limit exceeded';
+            message = error.code === 'EDGE_TRAFFIC_BANNED'
+              ? 'request source is temporarily blocked'
+              : 'request rate limit exceeded';
           }
           return jsonResponse(error.status, error.code, message, headers);
         }
@@ -477,6 +582,11 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
       ).slice(0, authorized.policy.limits.maxRouteAttempts);
       let lastStatus: number | null = null;
       let lastRouteId: string | null = null;
+      let billingReservation: EdgeBillingReservation | null = null;
+      const reserveUnits = routes.reduce(
+        (maximum, route) => Math.max(maximum, route.metering?.reserveUnits ?? 0),
+        0,
+      );
 
       for (let index = 0; index < routes.length; index += 1) {
         const route = routes[index]!;
@@ -488,6 +598,39 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           secret = null;
         }
         if (!secret) continue;
+        if (route.metering && !billingReservation) {
+          if (!options.billingCoordinator) {
+            return jsonResponse(
+              503,
+              'EDGE_BILLING_UNAVAILABLE',
+              'gateway billing coordinator is unavailable',
+              { 'x-otto-edge-request-id': id },
+            );
+          }
+          try {
+            billingReservation = await options.billingCoordinator.reserve({
+              ...billingIdentity(evidence),
+              reserveUnits,
+            });
+          } catch (error) {
+            if (error instanceof EdgeBillingAdmissionError) {
+              return jsonResponse(
+                error.status,
+                error.code,
+                error.code === 'EDGE_CREDIT_REQUIRED'
+                  ? 'insufficient credits for this request'
+                  : 'gateway billing coordinator is unavailable',
+                { 'x-otto-edge-request-id': id },
+              );
+            }
+            return jsonResponse(
+              503,
+              'EDGE_BILLING_UNAVAILABLE',
+              'gateway billing coordinator is unavailable',
+              { 'x-otto-edge-request-id': id },
+            );
+          }
+        }
         let connection: EdgeUpstreamConnection;
         try {
           connection = await fetchWithConnectTimeout(
@@ -496,7 +639,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             {
               method: 'POST',
               headers: upstreamHeaders(route, secret, id, request.headers.get('accept')),
-              body: JSON.stringify({ ...authorized.upstreamBody, model: route.upstreamModel }),
+              body: JSON.stringify(providerRequestBody(authorized.upstreamBody, route)),
               redirect: 'error',
             },
             authorized.policy.limits.upstreamConnectTimeoutMs,
@@ -522,10 +665,11 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           connection.controller,
           request.signal,
           authorized.policy.limits.upstreamIdleTimeoutMs,
-          (completion) => {
+          Boolean(route.metering),
+          (completion, usage) => {
             const completedAt = now();
             scheduleOutcome(options.outcomeSink, context, {
-              version: 1,
+              version: 2,
               requestId: evidence.requestId,
               tokenId: evidence.token.tokenId,
               deploymentId: evidence.token.deploymentId,
@@ -544,14 +688,50 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
                     : 'upstream_failed',
               durationMs: Math.max(0, completedAt - evidence.startedAt),
               occurredAtMs: completedAt,
+              usage,
             });
+            const reservation = billingReservation;
+            const billingCoordinator = options.billingCoordinator;
+            if (reservation && billingCoordinator) {
+              const identity = billingIdentity(evidence);
+              const operation = () => !route.metering
+                ? billingCoordinator.release({
+                    ...identity,
+                    reservation,
+                    reason: 'unmetered_route',
+                    occurredAtMs: completedAt,
+                  })
+                : usage?.totalTokens === 0
+                  ? billingCoordinator.release({
+                      ...identity,
+                      reservation,
+                      reason: 'zero_usage',
+                      occurredAtMs: completedAt,
+                    })
+                : usage
+                  ? billingCoordinator.settle({
+                      ...identity,
+                      reservation,
+                      routeId: route.id,
+                      usage,
+                      occurredAtMs: completedAt,
+                    })
+                  : billingCoordinator.markUncertain({
+                      ...identity,
+                      reservation,
+                      routeId: route.id,
+                      reason: uncertainReason(completion),
+                      occurredAtMs: completedAt,
+                    });
+              scheduleBackground(context, operation);
+            }
           },
         );
         return clientResponse(upstream, body, id, authorized.remaining);
       }
 
       scheduleOutcome(options.outcomeSink, context, {
-        version: 1,
+        version: 2,
         requestId: evidence.requestId,
         tokenId: evidence.token.tokenId,
         deploymentId: evidence.token.deploymentId,
@@ -564,7 +744,16 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         outcome: 'upstream_failed',
         durationMs: Math.max(0, now() - evidence.startedAt),
         occurredAtMs: now(),
+        usage: null,
       });
+      if (billingReservation && options.billingCoordinator) {
+        scheduleBackground(context, () => options.billingCoordinator!.release({
+          ...billingIdentity(evidence),
+          reservation: billingReservation,
+          reason: 'no_usable_route',
+          occurredAtMs: now(),
+        }));
+      }
       return jsonResponse(
         502,
         'EDGE_UPSTREAM_UNAVAILABLE',

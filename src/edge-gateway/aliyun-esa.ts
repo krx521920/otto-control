@@ -1,4 +1,4 @@
-import type { EdgeGatewayOutcomeV1 } from '../contracts/edge-gateway.js';
+import type { EdgeGatewayOutcomeV2 } from '../contracts/edge-gateway.js';
 import { createOttoEdgeGateway, type EdgeGatewayOutcomeSink } from './gateway.js';
 import { createEdgeSignatureVerifier } from './protocol.js';
 import type { EdgeRateLimiter } from './rate-limit.js';
@@ -13,7 +13,7 @@ export interface AliyunEsaGatewayOptions {
   controlPublicKeys: Readonly<Record<string, string>>;
   providerSecret(binding: string): Promise<string | null> | string | null;
   rateLimiter: EdgeRateLimiter;
-  recordOutcome?(outcome: EdgeGatewayOutcomeV1): Promise<void>;
+  recordOutcome?(outcome: EdgeGatewayOutcomeV2): Promise<void>;
   fetch?: typeof fetch;
   now?: () => number;
   requestId?: () => string;

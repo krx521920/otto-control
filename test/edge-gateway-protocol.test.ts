@@ -195,6 +195,39 @@ describe('edge gateway signed protocol boundaries', () => {
     });
   });
 
+  it('normalizes exact usage metering policies and rejects unsafe reservation bounds', () => {
+    for (const reserveUnits of [1, 10_000_000]) {
+      const normalized = normalizeSignedEdgeGatewayPolicy({
+        ...policy,
+        policy: {
+          ...policy.policy,
+          routes: [{
+            ...route,
+            metering: { type: 'openai_tokens', reserveUnits },
+          }],
+        },
+      }, NOW);
+      expect(normalized.policy.routes[0]?.metering).toEqual({
+        type: 'openai_tokens',
+        reserveUnits,
+      });
+    }
+    for (const metering of [
+      null,
+      {},
+      { type: 'unknown', reserveUnits: 1 },
+      { type: 'openai_tokens', reserveUnits: 0 },
+      { type: 'openai_tokens', reserveUnits: 10_000_001 },
+      { type: 'openai_tokens', reserveUnits: 1.5 },
+      { type: 'openai_tokens', reserveUnits: 1, extra: true },
+    ]) {
+      invalidPolicy({
+        ...policy,
+        policy: { ...policy.policy, routes: [{ ...route, metering }] },
+      });
+    }
+  });
+
   it('accepts exact limit boundaries and rejects every adjacent out-of-range value', () => {
     const cases = [
       ['maxRequestBytes', 1_024, 20 * 1_024 * 1_024, 1_023, 20 * 1_024 * 1_024 + 1],

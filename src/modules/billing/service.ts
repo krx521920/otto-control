@@ -5,12 +5,19 @@ import type {
   CreditMutationResult,
   CreditStatement,
   CreditTransactionRecord,
+  ExecutionReceiptHoldMutationResult,
   ExecutionReceiptMutationResult,
   ExecutionReceiptRecord,
   OttoBillingModule,
 } from '../../contracts/billing.js';
 import { isOttoBillingModule } from '../../contracts/billing.js';
-import { conflict, invalidRequest, notFound, unauthorized } from '../../errors.js';
+import {
+  conflict,
+  creditHoldUnavailable,
+  invalidRequest,
+  notFound,
+  unauthorized,
+} from '../../errors.js';
 import type { ControlStore } from '../../storage/control-store.js';
 import type { ControlTokenIssuer } from '../commercial-control/token-issuer.js';
 import {
@@ -506,6 +513,88 @@ export class BillingService {
           customerId: authenticated.customerId,
           organizationId: authenticated.organizationId,
           deploymentId: authenticated.deploymentId,
+          taskId: result.receipt.taskId,
+          module: result.receipt.moduleId,
+          units: result.receipt.units,
+          sequence: result.receipt.sequence,
+          transactionId: result.transaction.id,
+        },
+      });
+    }
+    return result;
+  }
+
+  async settleHoldWithExecutionReceipt(
+    id: string,
+    raw: unknown,
+    bearerToken: string,
+  ): Promise<ExecutionReceiptHoldMutationResult> {
+    const body = objectValue(raw);
+    exactFields(body, RECEIPT_REQUEST_FIELDS, 'execution receipt settlement request');
+    const now = this.#now();
+    const envelope = normalizeExecutionReceiptEnvelope(body.envelope, now);
+    const authenticated = await this.#authenticateDeployment({
+      licenseId: body.licenseId,
+      machineFingerprint: body.machineFingerprint,
+      deploymentId: envelope.receipt.deploymentId,
+      organizationId: envelope.receipt.organizationId,
+    }, bearerToken, true);
+    await this.#releaseExpiredHolds(authenticated.customerId);
+    const hold = await this.#store.getCreditHold(id);
+    if (!hold || hold.customerId !== authenticated.customerId) {
+      throw notFound('credit hold not found');
+    }
+    if (hold.status === 'released' || hold.status === 'expired') {
+      throw creditHoldUnavailable('credit hold is no longer active');
+    }
+    if (hold.deploymentId !== authenticated.deploymentId
+      || hold.organizationId !== authenticated.organizationId) {
+      throw unauthorized('credit hold does not belong to this deployment');
+    }
+    if (hold.module !== envelope.receipt.moduleId) {
+      throw conflict('execution receipt module does not match credit hold');
+    }
+    const key = await this.#store.getExecutionReceiptKey(
+      authenticated.deploymentId,
+      envelope.signingKeyId,
+    );
+    if (!key) throw unauthorized('execution receipt signing key is unknown');
+    verifyExecutionReceipt(envelope, key);
+    const amount = await this.#price(
+      authenticated.customerId,
+      envelope.receipt.moduleId,
+      envelope.receipt.units,
+    );
+    const result = await this.#store.settleCreditHoldWithExecutionReceipt({
+      transactionId: transactionId(),
+      holdId: id,
+      customerId: authenticated.customerId,
+      amount,
+      envelope,
+      metadata: {
+        evidenceTrust: 'deployment_signed_receipt_v2',
+        executionReceiptId: envelope.receipt.receiptId,
+        receiptVerificationStatus: 'verified',
+        signingKeyId: envelope.signingKeyId,
+        sequence: envelope.receipt.sequence,
+        policyVersion: envelope.receipt.policyVersion,
+        units: envelope.receipt.units,
+        model: envelope.receipt.model,
+      },
+      receivedAt: new Date(now),
+    });
+    if (!result) throw notFound('credit hold not found');
+    if (!result.replayed) {
+      await this.#store.appendAuditEvent({
+        actorId: `deployment:${authenticated.deploymentId}`,
+        action: 'billing.execution_receipt.hold_settled',
+        targetType: 'execution_receipt',
+        targetId: result.receipt.receiptId,
+        detail: {
+          customerId: authenticated.customerId,
+          organizationId: authenticated.organizationId,
+          deploymentId: authenticated.deploymentId,
+          holdId: result.hold.id,
           taskId: result.receipt.taskId,
           module: result.receipt.moduleId,
           units: result.receipt.units,

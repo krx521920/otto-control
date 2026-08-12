@@ -112,6 +112,12 @@ async function fixture(options: { registerReceiptKey?: boolean } = {}) {
     token,
     signReceipt,
     request,
+    binding: {
+      licenseId: LICENSE_ID,
+      deploymentId: DEPLOYMENT_ID,
+      organizationId: ORGANIZATION_ID,
+      machineFingerprint: FINGERPRINT,
+    },
     setClock: (value: number) => { clock = value; },
     now: clock,
   };
@@ -194,6 +200,99 @@ describe('signed execution receipt v2', () => {
     const csv = await service.exportCsv(CUSTOMER_ID, {});
     expect(csv).toContain(envelope.receipt.receiptId);
     expect(csv).toContain('receiptVerificationStatus');
+  });
+
+  it('atomically settles a credit hold with signed usage and releases the unused amount', async () => {
+    const {
+      service, token, signReceipt, request, binding,
+    } = await fixture();
+    const held = await service.createHold({
+      ...binding,
+      module: 'model_gateway',
+      units: 3_000,
+      expiresInSeconds: 600,
+      idempotencyKey: 'hold:edge-request-1',
+    }, token);
+    expect(held.hold.amount).toBe(9);
+    expect(held.account).toMatchObject({ availableBalance: 91, frozenBalance: 9 });
+
+    const envelope = await signReceipt();
+    const settled = await service.settleHoldWithExecutionReceipt(
+      held.hold.id,
+      request(envelope),
+      token,
+    );
+    expect(settled.replayed).toBe(false);
+    expect(settled.hold.status).toBe('captured');
+    expect(settled.transaction).toMatchObject({
+      type: 'capture',
+      billedAmount: 6,
+      metadata: {
+        holdId: held.hold.id,
+        executionReceiptId: envelope.receipt.receiptId,
+        receiptVerificationStatus: 'verified',
+      },
+    });
+    expect(settled.account).toMatchObject({
+      availableBalance: 94,
+      frozenBalance: 0,
+      totalConsumed: 6,
+    });
+    expect(settled.receipt.transactionId).toBe(settled.transaction.id);
+
+    const replay = await service.settleHoldWithExecutionReceipt(
+      held.hold.id,
+      request(envelope),
+      token,
+    );
+    expect(replay.replayed).toBe(true);
+    expect(replay.transaction.id).toBe(settled.transaction.id);
+    expect((await service.account(CUSTOMER_ID, ORGANIZATION_ID))).toMatchObject({
+      availableBalance: 94,
+      frozenBalance: 0,
+      totalConsumed: 6,
+    });
+  });
+
+  it('rejects forged, mismatched, expired, and content-bearing hold settlements', async () => {
+    const {
+      service, token, signReceipt, request, binding, setClock, now,
+    } = await fixture();
+    const held = await service.createHold({
+      ...binding,
+      module: 'model_gateway',
+      units: 2_000,
+      expiresInSeconds: 60,
+      idempotencyKey: 'hold:edge-security',
+    }, token);
+    const envelope = await signReceipt();
+
+    await expect(service.settleHoldWithExecutionReceipt(held.hold.id, request({
+      ...envelope,
+      receipt: { ...envelope.receipt, units: 1_002 },
+    }), token)).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    await expect(service.settleHoldWithExecutionReceipt(held.hold.id, {
+      ...request(envelope),
+      prompt: 'must never reach Control',
+    }, token)).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+
+    const wrongModule = await signReceipt({ moduleId: 'meeting_agent' });
+    await expect(service.settleHoldWithExecutionReceipt(
+      held.hold.id,
+      request(wrongModule),
+      token,
+    )).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    setClock(now + 61_000);
+    await expect(service.settleHoldWithExecutionReceipt(
+      held.hold.id,
+      request(envelope),
+      token,
+    )).rejects.toMatchObject({ code: 'CREDIT_HOLD_UNAVAILABLE' });
+    expect((await service.account(CUSTOMER_ID, ORGANIZATION_ID))).toMatchObject({
+      availableBalance: 100,
+      frozenBalance: 0,
+    });
   });
 
   it('isolates enterprise wallets inside a shared licensed deployment', async () => {

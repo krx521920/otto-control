@@ -48,6 +48,7 @@ import type {
   CreditStatement,
   CreditTransactionRecord,
   ExecutionReceiptKeyRecord,
+  ExecutionReceiptHoldMutationResult,
   ExecutionReceiptMutationResult,
   ExecutionReceiptRecord,
   OttoBillingModule,
@@ -75,7 +76,7 @@ import type {
   AuditWitnessReceiptRecord,
 } from '../../src/contracts/audit-witness.js';
 import { AUDIT_GENESIS_HASH, auditEventHash } from '../../src/audit-chain.js';
-import { conflict } from '../../src/errors.js';
+import { conflict, creditRequired } from '../../src/errors.js';
 
 const role = (
   id: string,
@@ -1350,7 +1351,9 @@ export class MemoryControlStore implements ControlStore {
         replayed: true,
       };
     }
-    if (current.availableBalance < input.amount) throw conflict('insufficient available credits');
+    if (current.availableBalance < input.amount) {
+      throw creditRequired('insufficient available credits');
+    }
     const account = this.#updateCreditAccount(current, {
       availableBalance: current.availableBalance - input.amount,
       frozenBalance: current.frozenBalance + input.amount,
@@ -1763,6 +1766,123 @@ export class MemoryControlStore implements ControlStore {
     this.executionReceipts.set(receipt.receiptId, receipt);
     this.executionReceiptSequences.set(receipt.deploymentId, receipt.sequence);
     return { account, transaction, receipt, replayed: false };
+  }
+
+  async settleCreditHoldWithExecutionReceipt(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    amount: number;
+    envelope: SignedExecutionReceiptV2;
+    metadata: Record<string, unknown>;
+    receivedAt: Date;
+  }): Promise<ExecutionReceiptHoldMutationResult | null> {
+    const evidence = input.envelope.receipt;
+    const hold = this.creditHolds.get(input.holdId);
+    if (!hold || hold.customerId !== input.customerId) return null;
+    const current = this.#creditAccount(input.customerId, hold.organizationId);
+    if (!current) return null;
+    const replay = this.executionReceipts.get(evidence.receiptId);
+    if (replay) {
+      const replayEvidence = {
+        receipt: {
+          version: replay.version,
+          receiptId: replay.receiptId,
+          deploymentId: replay.deploymentId,
+          organizationId: replay.organizationId,
+          taskId: replay.taskId,
+          moduleId: replay.moduleId,
+          units: replay.units,
+          model: replay.model,
+          issuedAtMs: replay.issuedAtMs,
+          expiresAtMs: replay.expiresAtMs,
+          sequence: replay.sequence,
+          policyVersion: replay.policyVersion,
+        },
+        signingKeyId: replay.signingKeyId,
+        signature: replay.signature,
+      };
+      const transaction = this.creditTransactions.get(replay.transactionId);
+      if (replay.customerId !== input.customerId
+        || JSON.stringify(replayEvidence) !== JSON.stringify(input.envelope)
+        || !transaction || transaction.type !== 'capture'
+        || transaction.metadata.holdId !== input.holdId) {
+        throw conflict('execution receipt id was already used for different evidence');
+      }
+      return { account: current, hold, transaction, receipt: replay, replayed: true };
+    }
+    if (hold.status !== 'active') throw conflict('credit hold is no longer active');
+    if (hold.expiresAt.getTime() <= input.receivedAt.getTime()) {
+      throw conflict('credit hold has expired');
+    }
+    if (hold.deploymentId !== evidence.deploymentId
+      || hold.organizationId !== evidence.organizationId
+      || hold.module !== evidence.moduleId) {
+      throw conflict('execution receipt does not match the credit hold');
+    }
+    const key = await this.getExecutionReceiptKey(evidence.deploymentId, input.envelope.signingKeyId);
+    if (!key || key.status !== 'active') throw conflict('execution receipt signing key is inactive');
+    const expectedSequence = (this.executionReceiptSequences.get(evidence.deploymentId) ?? 0) + 1;
+    if (evidence.sequence !== expectedSequence) {
+      throw conflict(`execution receipt sequence must be ${expectedSequence}`);
+    }
+    if ([...this.executionReceipts.values()].some((record) => (
+      record.deploymentId === evidence.deploymentId && record.taskId === evidence.taskId
+    ))) throw conflict('task already has a billed execution receipt');
+    const availableDelta = hold.amount - input.amount;
+    if (current.availableBalance + availableDelta < 0) {
+      throw conflict('insufficient available credits for settlement');
+    }
+    const account = this.#updateCreditAccount(current, {
+      availableBalance: current.availableBalance + availableDelta,
+      frozenBalance: current.frozenBalance - hold.amount,
+      totalConsumed: current.totalConsumed + input.amount,
+    }, input.receivedAt);
+    const updatedHold: CreditHoldRecord = {
+      ...hold,
+      status: 'captured',
+      updatedAt: input.receivedAt,
+    };
+    const metadata = {
+      ...input.metadata,
+      holdId: input.holdId,
+      executionReceiptId: evidence.receiptId,
+      receiptVerificationStatus: 'verified',
+    };
+    const transaction: CreditTransactionRecord = {
+      id: input.transactionId,
+      customerId: input.customerId,
+      organizationId: evidence.organizationId,
+      deploymentId: evidence.deploymentId,
+      module: evidence.moduleId,
+      type: 'capture',
+      availableDelta,
+      frozenDelta: -hold.amount,
+      billedAmount: input.amount,
+      availableAfter: account.availableBalance,
+      frozenAfter: account.frozenBalance,
+      idempotencyKey: `receipt:${evidence.receiptId}`,
+      referenceId: evidence.taskId,
+      relatedTransactionId: null,
+      description: 'Verified signed execution receipt settled against hold',
+      metadata,
+      occurredAt: new Date(evidence.issuedAtMs),
+      createdAt: input.receivedAt,
+    };
+    const receipt: ExecutionReceiptRecord = {
+      ...evidence,
+      customerId: input.customerId,
+      signingKeyId: input.envelope.signingKeyId,
+      signature: input.envelope.signature,
+      transactionId: input.transactionId,
+      verificationStatus: 'verified',
+      receivedAt: input.receivedAt,
+    };
+    this.creditHolds.set(updatedHold.id, updatedHold);
+    this.creditTransactions.set(transaction.id, transaction);
+    this.executionReceipts.set(receipt.receiptId, receipt);
+    this.executionReceiptSequences.set(receipt.deploymentId, receipt.sequence);
+    return { account, hold: updatedHold, transaction, receipt, replayed: false };
   }
 
   async getExecutionReceipt(receiptId: string): Promise<ExecutionReceiptRecord | null> {

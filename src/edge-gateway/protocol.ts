@@ -5,6 +5,7 @@ import type {
   EdgeGatewayPolicyV1,
   EdgeModelRouteV1,
   EdgeProviderAuthentication,
+  EdgeRouteMeteringV1,
   SignedEdgeAccessTokenV1,
   SignedEdgeGatewayPolicyV1,
 } from '../contracts/edge-gateway.js';
@@ -29,6 +30,7 @@ const POLICY_FIELDS = new Set([
 const ROUTE_FIELDS = new Set([
   'id', 'endpoint', 'publicModel', 'upstreamModel', 'upstreamUrl', 'priority',
   'authentication',
+  'metering',
 ]);
 const LIMIT_FIELDS = new Set([
   'maxRequestBytes', 'requestsPerMinute', 'upstreamConnectTimeoutMs',
@@ -36,6 +38,7 @@ const LIMIT_FIELDS = new Set([
 ]);
 const AUTH_BEARER_FIELDS = new Set(['type', 'secretBinding']);
 const AUTH_HEADER_FIELDS = new Set(['type', 'headerName', 'secretBinding']);
+const METERING_FIELDS = new Set(['type', 'reserveUnits']);
 const FORBIDDEN_AUTH_HEADERS = new Set([
   'authorization', 'cookie', 'host', 'proxy-authorization', 'set-cookie',
   'transfer-encoding',
@@ -176,6 +179,19 @@ function authentication(value: unknown): EdgeProviderAuthentication {
   return { type, headerName, secretBinding };
 }
 
+function metering(value: unknown): EdgeRouteMeteringV1 | undefined {
+  if (value === undefined) return undefined;
+  const body = objectValue(value, 'route.metering');
+  exactFields(body, METERING_FIELDS, 'route.metering');
+  if (body.type !== 'openai_tokens') {
+    protocolError(400, 'EDGE_INVALID_ENVELOPE', 'route.metering.type is invalid');
+  }
+  return {
+    type: 'openai_tokens',
+    reserveUnits: safeInteger(body, 'reserveUnits', 1, 10_000_000),
+  };
+}
+
 function route(value: unknown): EdgeModelRouteV1 {
   const body = objectValue(value, 'gateway route');
   exactFields(body, ROUTE_FIELDS, 'gateway route');
@@ -194,6 +210,7 @@ function route(value: unknown): EdgeModelRouteV1 {
       'route upstreamUrl must be HTTPS without credentials, query, or fragment',
     );
   }
+  const routeMetering = metering(body.metering);
   return {
     id: identifier(body, 'id'),
     endpoint: endpoint(body.endpoint),
@@ -202,6 +219,7 @@ function route(value: unknown): EdgeModelRouteV1 {
     upstreamUrl: parsed.toString(),
     priority: safeInteger(body, 'priority', 0, 10_000),
     authentication: authentication(body.authentication),
+    ...(routeMetering ? { metering: routeMetering } : {}),
   };
 }
 

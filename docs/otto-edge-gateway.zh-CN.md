@@ -3,9 +3,11 @@
 ## 当前交付状态
 
 本阶段建立了可执行的 Edge Gateway 核心、Node 独立进程入口、阿里云 ESA
-Web Service Worker 适配器、PostgreSQL 策略配置、Control 正式签发 API 和安全
-回归测试。Control 已校验部署、企业、在线 License、机器指纹、租约令牌和余额
-准入，但完整计费预留、分布式限流及云部署自动化尚未完成，因此仍不能标记为
+Web Service Worker 适配器、PostgreSQL 策略配置、Control 正式签发 API、Node
+策略自动同步与安全内存缓存、签名公钥轮换、Redis 原子限流与临时封禁，以及安全
+回归测试。Control 已校验部署、企业、在线 License、机器指纹和租约令牌；Node 单机
+协调器已完成请求前额度预留、流式用量采集、签名凭证结算、失败释放及重启重放。
+云边缘多地域共享聚合、真实环境演练和云部署自动化仍未完成，因此仍不能标记为
 正式生产版本。
 
 核心代码只依赖标准 Web API：`Request`、`Response`、`fetch`、
@@ -98,6 +100,132 @@ npm run dev:edge
 默认只监听 `127.0.0.1:7790`。生产环境应在前方终止 TLS，且必须改用正式的
 分布式限流器；内置 `InMemoryEdgeRateLimiter` 只适合开发和单隔离实例。
 
+## Control 自动同步模式
+
+生产 Node 网关可以不配置静态策略文件，改为从 Control 自动领取短期签名策略。
+准备以下三个只读文件或配置：
+
+- `OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE`：首次安装时独立核验过的 Control Ed25519
+  引导信任根；文件中的每把密钥必须出现在 Control 公布的 Keyring 中；
+- `OTTO_EDGE_DEPLOYMENT_IDENTITY_FILE`：仅包含 `licenseId`、`deploymentId`、
+  `organizationId` 和 64 位十六进制 `machineFingerprint` 的 JSON；
+- `OTTO_EDGE_LEASE_TOKEN_FILE`：只包含在线 License 租约令牌，不把令牌放入环境变量。
+
+```powershell
+$env:OTTO_EDGE_CONTROL_URL='https://control.example.com'
+$env:OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE='D:\secure\control-public-keys.json'
+$env:OTTO_EDGE_DEPLOYMENT_IDENTITY_FILE='D:\secure\edge-identity.json'
+$env:OTTO_EDGE_LEASE_TOKEN_FILE='D:\secure\edge-lease-token'
+$env:OTTO_EDGE_POLICY_REFRESH_BEFORE_EXPIRY_MS='60000'
+$env:OTTO_EDGE_CONTROL_TIMEOUT_MS='10000'
+$env:OTTO_EDGE_KEYRING_REFRESH_INTERVAL_MS='60000'
+$env:OTTO_EDGE_KEYRING_REFRESH_BEFORE_EXPIRY_MS='60000'
+$env:OTTO_EDGE_UNKNOWN_KEY_RETRY_MS='10000'
+$env:OTTO_EDGE_KEYRING_FAILURE_RETRY_MS='5000'
+$env:OTTO_EDGE_BILLING_BACKEND='control'
+$env:OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE='D:\secure\edge-receipt-private.pem'
+$env:OTTO_EDGE_BILLING_JOURNAL_FILE='D:\state\edge-billing.ndjson'
+$env:OTTO_EDGE_BILLING_RETRY_INTERVAL_MS='10000'
+$env:OTTO_EDGE_OPERATIONS_TOKEN_FILE='D:\secure\edge-operations.token'
+npm run dev:edge
+```
+
+`OTTO_EDGE_CONTROL_URL` 与 `OTTO_EDGE_POLICY_FILE` 互斥。自动同步请求使用租约令牌
+HMAC、时间戳和一次性 nonce 认证，并禁止 HTTP、URL 凭据、查询和片段。并发刷新
+会合并为一个请求。新策略只有在本地完成结构校验、Ed25519 验签、部署/企业绑定
+检查和签发时间防回滚检查后才会进入内存缓存；伪造、错租户、回滚或冲突策略不会
+污染现有缓存。Control 暂时不可用时，只能继续使用仍处于其签名有效期内的旧策略；
+一旦策略过期即 fail-closed，不会写盘，也不会无限宽限。
+
+Node 网关会同时从 `/v1/signing-keyring` 同步十分钟有效的签名公钥清单。Keyring
+必须由当前已信任且未撤销的活动密钥签名；新密钥必须先作为 `standby` 出现在旧密钥
+签名的清单里，随后才能激活并签发下一版清单。刷新后，`revoked` 密钥立即停止验证
+策略和访问令牌。Keyring 版本回退、同版本状态冲突、删除既有密钥、替换同 ID 公钥
+或恢复已撤销密钥都会 fail-closed。正常情况下每分钟检查一次；失败请求有退避，同一
+未知 Key ID 也有强制发现频率限制，避免攻击者放大 Control 流量。Control 断开时只
+能使用尚未过期的已验证 Keyring，超过签名有效期后停止验签。
+
+引导信任根仍需通过安装包签名、受控配置或带外指纹核验交付，不能通过首次联网直接
+信任。轮换顺序必须是“发布 standby—等待网关同步—激活—验证—退役/撤销”；紧急
+撤销也必须使用已提前分发的替代密钥签发新 Keyring。
+
+## Redis 分布式限流与异常封禁
+
+Node 网关可使用 Redis 作为跨实例权威限流器。限流窗口、超限异常计数和临时封禁在
+同一个 Lua 脚本中原子更新，三个键使用相同 Redis Cluster hash tag，多个网关实例不会
+各自放大配额。Redis 键只包含使用独立密钥计算的 HMAC-SHA-256，不包含部署、企业或
+账号原文。普通超限返回 `EDGE_RATE_LIMITED`；在异常计数窗口内连续超限达到阈值后
+返回 `EDGE_TRAFFIC_BANNED`。两者均提供整数秒 `Retry-After`。
+
+```powershell
+$env:OTTO_EDGE_RATE_LIMIT_BACKEND='redis'
+$env:OTTO_EDGE_REDIS_URL='rediss://edge:<password>@redis.internal:6379/2'
+$env:OTTO_EDGE_RATE_LIMIT_KEY_FILE='D:\secure\edge-rate-limit.key'
+$env:OTTO_EDGE_RATE_LIMIT_PREFIX='otto-production'
+$env:OTTO_EDGE_REDIS_CONNECT_TIMEOUT_MS='10000'
+$env:OTTO_EDGE_RATE_LIMIT_BAN_THRESHOLD='20'
+$env:OTTO_EDGE_RATE_LIMIT_STRIKE_WINDOW_MS='300000'
+$env:OTTO_EDGE_RATE_LIMIT_BAN_MS='900000'
+```
+
+HMAC 密钥文件必须是 32–4096 字节的独立随机秘密，不能复用 License、Control、模型或
+数据库密钥，也不能写入环境变量、日志和镜像。默认只接受 `rediss://`；仅隔离开发网络
+可以显式设置 `OTTO_EDGE_REDIS_ALLOW_INSECURE=true` 使用 `redis://`。启动时连接或
+PING 失败会拒绝启动；运行期间 Redis 超时、断开或返回畸形结果时网关返回
+`EDGE_RATE_LIMIT_UNAVAILABLE`，不得回退进程内计数。内存后端仍保留给开发和明确的
+单隔离实例。
+
+## 单机持久化计费与可信用量
+
+签名策略可为每条 OpenAI-compatible 路由配置 `metering.type=openai_tokens` 和
+`reserveUnits`。计费路由在首次访问供应商前必须由协调器调用
+`POST /v1/billing/holds` 完成额度预留；余额不足返回 402 `EDGE_CREDIT_REQUIRED`，
+Control 或本地协调器不可用返回 503 `EDGE_BILLING_UNAVAILABLE`，两种情况都不会调用
+模型供应商。Control 新增
+`POST /v1/billing/holds/:holdId/execution-receipts`，在同一数据库事务中验证签名执行
+凭证、捕获实际费用、释放剩余额度并写入凭证，避免 Hold 与直接消费造成双扣。
+
+流式 Chat Completions 请求会强制设置 `stream_options.include_usage=true`，同时保留
+供应商已有的其他 `stream_options`。扫描器逐块检查最终 `usage`，支持 Responses API
+和 Chat Completions 两套完整字段组，只接受非负安全整数且要求
+`input + output = total`。它不会缓冲提示词或回复；唯一可能暂存的是最大 16 KiB 的
+`usage` JSON 对象，客户端收到的字节不被修改。供应商已经开始执行但流被取消、超时、
+失败或缺失可信 usage 时，Hold 标记为待核对而不是按零用量释放。
+
+Node 单进程协调器使用独立 Ed25519 私钥生成 `ExecutionReceiptV2`，启动时向 Control
+登记公钥。严格递增序列、待结算、待释放和不确定状态写入只追加、逐条 SHA-256 链接、
+每次 `fsync` 的 NDJSON 日志；启动时任何截断或哈希错误都会 fail-closed。断网后会按
+序重试，同一请求使用稳定幂等键。以下配置必须指向权限受控的持久卷和只读密钥文件：
+
+- `OTTO_EDGE_BILLING_BACKEND=control`；
+- `OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE`：Ed25519 PKCS#8 PEM 私钥；
+- `OTTO_EDGE_BILLING_JOURNAL_FILE`：本机追加日志，不能放在 NFS/SMB；
+- `OTTO_EDGE_BILLING_RETRY_INTERVAL_MS`：1 秒至 1 小时，默认 10 秒。
+
+该日志方案只适合用户当前要求的单服务器、单 Edge 进程模式。多进程或多地域不能共享
+日志文件，必须替换为 PostgreSQL/专用队列上的单一有序聚合器，否则严格递增凭证序列
+会产生竞争。
+
+## 健康检查与受保护恢复
+
+`GET /healthz` 只表示进程仍存活，不读取策略、Redis、Control 或本地计费日志。
+`GET /readyz` 会实际检查当前签名策略和限流后端，并汇总计费协调器状态：`ready` 和
+`degraded` 返回 200，无法安全接单的 `unavailable` 返回 503。公开响应只包含服务名和
+分类，不披露租户、请求、余额、文件路径或内部地址。重启后尚未归档的 Hold、待核对
+用量会标记为 `degraded`；未能同步的结算或释放队列会标记为 `unavailable`。
+
+如配置 `OTTO_EDGE_OPERATIONS_TOKEN_FILE`，Node 网关额外启用：
+
+- `GET /v1/operations/status`：返回计费状态和聚合计数，不返回请求 ID、企业标识、金额
+  或密钥；
+- `POST /v1/operations/billing/retry`：只重试已经写入防篡改日志的待处理操作，不能创建、
+  修改或跳过凭证，也不能人工改序号或金额。
+
+运维令牌必须是独立的 32–8192 字符不透明随机字符串，通过只读文件挂载，不能复用
+Control 租约、License、Redis、模型或签名密钥。两个接口都要求 Bearer 认证、禁止缓存，
+错误响应不会回显内部异常。重试完成后若队列仍未清空，接口继续返回 503，不会将失败
+伪装成恢复成功。
+
 ## 阿里云 ESA 接入
 
 `createAliyunEsaGateway` 接受 ESA `EdgeKV` 读取器、Control 公钥集合、Secret
@@ -107,26 +235,16 @@ npm run dev:edge
 
 签名策略适合放入 ESA EdgeKV，因为策略属于低频写、高频读的配置。ESA EdgeKV
 是最终一致性存储，不得用于严格的跨节点计费、一次性令牌消费或全局配额。生产
-速率控制应组合 ESA 原生流量规则和一个支持原子消费的限流器。Control 当前会在
-`billingEnforcement=enforce` 时检查企业信用账户至少有可用余额，但这只是签发
-准入，不是额度预留；正式计费仍应在发令牌前预留，并由可信用量聚合器结算。
+速率控制应组合 ESA 原生流量规则和一个支持原子消费的限流器。ESA 适配器当前仍只有
+余额准入，尚未接入 Node 的本地持久化计费协调器；正式 ESA 计费必须由共享有序聚合
+服务处理，不能在每个边缘节点各自生成凭证序列。
 
 ## 运行结果与计费边界
 
-`EdgeGatewayOutcomeV1` 只包含请求 ID、令牌 ID、租户绑定、模型、路由、HTTP
-状态、耗时以及成功、上游失败、客户端取消或流超时结果。结果在响应流完成或终止时
-记录，而不是在刚收到响应头时提前记为成功。它不包含消息或 Token 数，因此只是
-运维证据，不能直接作为正式账单。
-
-生产计费仍需增加：
-
-1. 从模型供应商可信 usage 字段或专用计量接口采集输入/输出 Token；
-2. 对流式响应在不记录内容的前提下提取最终 usage；
-3. 进入有幂等、去重、重放防护和持久序列的用量聚合器；
-4. 由聚合器生成现有 `ExecutionReceiptV2`，再交给 Control 结算。
-
-不能让多个边缘实例直接生成现有严格递增 `sequence` 的执行凭证，否则会产生
-跨节点竞争和错误拒绝。
+`EdgeGatewayOutcomeV2` 只包含请求 ID、令牌 ID、租户绑定、模型、路由、HTTP 状态、
+耗时、终止结果及校验后的 Token 汇总，不包含消息、提示词、回复或密钥。它用于运维
+和对账；正式扣费只信任由协调器持久化并签名的 `ExecutionReceiptV2`。多个边缘实例
+不能各自生成严格递增凭证，否则会产生跨节点竞争和错误拒绝。
 
 ## 测试工具与门禁
 
@@ -135,7 +253,10 @@ Edge Gateway 使用三层测试工具：
 - Vitest：正向、反向、边界和异常场景；
 - fast-check：属性测试与可复现 Fuzz，每轮生成 1,100 组限流、窗口、畸形令牌、
   签名变异、协议和认证头输入；
-- Stryker + Vitest Runner：对 `gateway.ts`、`protocol.ts` 和 `rate-limit.ts`
+- Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
+  `control-policy-source.ts`、`control-billing-coordinator.ts`、`usage-meter.ts`、
+  `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`
+  和 Control 签发服务
   执行代码变异测试。
 
 ```bash
@@ -146,19 +267,23 @@ npm run test:mutation
 ```
 
 变异门禁保留条件、比较、正则、逻辑、数组、对象和代码块变异，排除只改变错误
-提示文案的 `StringLiteral` 变异。最低门槛为 80%；当前正式总分为 80.36%，
-已覆盖变异得分为 80.79%。其中 Control 签发服务为 82.77%、网关核心正式总分为
-80.19%、限流为 86.54%、协议层正式总分为 77.88%。单个协议文件低于总体
-门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
+提示文案的 `StringLiteral` 变异。最低门槛为 80%；最近一次全量正式基线总分为 81.29%，
+已覆盖代码为 81.51%。其中 Redis 分布式限流为 86.62%、限流与输入校验层为 84.38%、
+公钥轮换模块为 81.11%、策略自动同步器为 81.70%、Control 签发服务为 82.77%、
+本次修改后独立复验的网关核心为 80.42%、用量解析器为 80.41%、单机计费协调器为
+81.68%、协议层为
+77.88%。
+单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。
 
 ## 正式生产前剩余门禁
 
-- 将当前余额准入升级为按令牌额度预留、过期释放和最终用量结算；
-- 实现生产分布式限流适配器与异常流量封禁；
-- 实现可信 Token 用量采集、聚合、签名执行凭证和对账；
+- 将 Node 单机凭证日志升级为多实例共享的 PostgreSQL/队列有序聚合器；
+- 在真实 Redis Cluster/哨兵环境完成故障转移、时钟边界、热 Key 和封禁解除演练；
+- 为非 OpenAI-compatible 供应商增加已审查的用量适配器，并完成账单对账演练；
 - 完成 ESA Secret、KV、WAF、域名、TLS、灰度、回滚和 Terraform/ROS 部署；
+- 将签名 Keyring 的同等撤销语义接入 ESA 分发，并完成双钥重叠、紧急撤销和回滚演练；
 - 增加断网、跨地域策略轮换和至少 24 小时长稳测试；慢流超时和连接中断已有确定性
   回归测试，但仍需纳入长稳与故障注入环境；
 - 完成外部安全审计、成本压测和模型供应商数据处理协议审查。

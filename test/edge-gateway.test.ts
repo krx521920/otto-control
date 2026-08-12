@@ -4,16 +4,27 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type {
   EdgeGatewayLimitsV1,
-  EdgeGatewayOutcomeV1,
+  EdgeGatewayOutcomeV2,
   EdgeModelRouteV1,
 } from '../src/contracts/edge-gateway.js';
 import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
-import { createOttoEdgeGateway } from '../src/edge-gateway/gateway.js';
+import {
+  EdgeBillingAdmissionError,
+  type EdgeBillingCoordinator,
+} from '../src/edge-gateway/billing-coordinator.js';
+import {
+  createOttoEdgeGateway,
+  type EdgeGatewayReadinessProbe,
+} from '../src/edge-gateway/gateway.js';
 import {
   createEdgeSignatureVerifier,
   encodeEdgeAccessTokenEnvelope,
 } from '../src/edge-gateway/protocol.js';
-import { InMemoryEdgeRateLimiter } from '../src/edge-gateway/rate-limit.js';
+import {
+  EdgeRateLimitUnavailableError,
+  type EdgeRateLimiter,
+  InMemoryEdgeRateLimiter,
+} from '../src/edge-gateway/rate-limit.js';
 import { EdgeGatewayControlService } from '../src/modules/edge-gateway/service.js';
 
 const NOW = Date.parse('2026-08-11T08:00:00.000Z');
@@ -46,9 +57,12 @@ async function fixture(overrides: {
   tokenPolicyVersion?: string;
   allowedModels?: string[];
   policyDurationMs?: number;
-  rateLimiter?: InMemoryEdgeRateLimiter;
+  rateLimiter?: EdgeRateLimiter;
   fetch?: typeof fetch;
   secrets?: Readonly<Record<string, string>>;
+  billingCoordinator?: EdgeBillingCoordinator;
+  readinessProbe?: EdgeGatewayReadinessProbe;
+  now?: () => number;
 } = {}) {
   const { privateKey } = generateKeyPairSync('ed25519');
   const signer = new LocalEd25519Signer(
@@ -75,7 +89,7 @@ async function fixture(overrides: {
     policyVersion: overrides.tokenPolicyVersion ?? POLICY_VERSION,
     allowedModels: overrides.allowedModels ?? ['otto-fast'],
   });
-  const outcomes: EdgeGatewayOutcomeV1[] = [];
+  const outcomes: EdgeGatewayOutcomeV2[] = [];
   const secrets = overrides.secrets ?? { PROVIDER_A_API_KEY: 'provider-secret-value' };
   const gateway = createOttoEdgeGateway({
     policySource: { load: async () => policy },
@@ -83,8 +97,10 @@ async function fixture(overrides: {
     secretResolver: { get: async (binding) => secrets[binding] ?? null },
     rateLimiter: overrides.rateLimiter ?? new InMemoryEdgeRateLimiter(),
     outcomeSink: { record: async (outcome) => { outcomes.push(outcome); } },
+    billingCoordinator: overrides.billingCoordinator,
+    readinessProbe: overrides.readinessProbe,
     fetch: overrides.fetch ?? (vi.fn(async () => new Response('{}')) as typeof fetch),
-    now: () => NOW,
+    now: overrides.now ?? (() => NOW),
     requestId: () => 'edge_request_fixture',
   });
   const authorization = `Bearer ${encodeEdgeAccessTokenEnvelope(access)}`;
@@ -104,6 +120,24 @@ async function fixture(overrides: {
   return { access, authorization, control, gateway, outcomes, policy, request, signer };
 }
 
+function billingCoordinatorFixture() {
+  const reserve = vi.fn<EdgeBillingCoordinator['reserve']>(async () => ({
+    reservationId: 'hold_edge_request_fixture',
+  }));
+  const settle = vi.fn<EdgeBillingCoordinator['settle']>(async () => undefined);
+  const release = vi.fn<EdgeBillingCoordinator['release']>(async () => undefined);
+  const markUncertain = vi.fn<EdgeBillingCoordinator['markUncertain']>(
+    async () => undefined,
+  );
+  return {
+    coordinator: { reserve, settle, release, markUncertain } satisfies EdgeBillingCoordinator,
+    markUncertain,
+    release,
+    reserve,
+    settle,
+  };
+}
+
 describe('otto edge gateway', () => {
   it('exposes a minimal health endpoint without loading policy or secrets', async () => {
     const values = await fixture();
@@ -111,6 +145,41 @@ describe('otto edge gateway', () => {
     await expect(response.json()).resolves.toEqual({ status: 'ok', service: 'otto-edge-gateway' });
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('reports readiness without exposing component details or failure messages', async () => {
+    for (const [state, expectedStatus] of [
+      ['ready', 200],
+      ['degraded', 200],
+      ['unavailable', 503],
+    ] as const) {
+      const check = vi.fn(async () => state);
+      const values = await fixture({ readinessProbe: { check } });
+      const response = await values.gateway.fetch(new Request('https://edge.otto.test/readyz'));
+      expect(response.status).toBe(expectedStatus);
+      await expect(response.json()).resolves.toEqual({
+        status: state,
+        service: 'otto-edge-gateway',
+      });
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(check).toHaveBeenCalledOnce();
+    }
+
+    const values = await fixture({
+      readinessProbe: { check: async () => { throw new Error('private Redis endpoint'); } },
+    });
+    const response = await values.gateway.fetch(new Request('https://edge.otto.test/readyz'));
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain('private Redis endpoint');
+
+    const defaults = await fixture();
+    const defaultResponse = await defaults.gateway.fetch(
+      new Request('https://edge.otto.test/readyz'),
+    );
+    expect(defaultResponse.status).toBe(200);
+    await expect(defaultResponse.json()).resolves.toEqual({
+      status: 'ready', service: 'otto-edge-gateway',
+    });
   });
 
   it('verifies Control signatures, pins the upstream route, and streams without content logging', async () => {
@@ -158,6 +227,188 @@ describe('otto edge gateway', () => {
     const evidence = JSON.stringify(values.outcomes);
     expect(evidence).not.toContain('private prompt');
     expect(evidence).not.toContain('provider-secret-value');
+  });
+
+  it('requests provider stream usage, preserves response bytes, and records only token counts', async () => {
+    const meteredRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 10_000 },
+    };
+    const providerBytes = [
+      'data: {"choices":[{"delta":{"content":"private answer"}}],"usage":null}\n\n',
+      'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const part of providerBytes) controller.enqueue(new TextEncoder().encode(part));
+          controller.close();
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    ));
+    const billing = billingCoordinatorFixture();
+    const values = await fixture({
+      routes: [meteredRoute], fetch: fetchMock, billingCoordinator: billing.coordinator,
+    });
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast',
+      stream: true,
+      stream_options: { custom_provider_option: 'preserved' },
+      messages: [{ role: 'user', content: 'private prompt' }],
+    }));
+
+    await expect(response.text()).resolves.toBe(providerBytes.join(''));
+    const sent = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      stream_options?: Record<string, unknown>;
+    };
+    expect(sent.stream_options).toEqual({
+      custom_provider_option: 'preserved',
+      include_usage: true,
+    });
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({
+        version: 2,
+        outcome: 'succeeded',
+        usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+      }),
+    ]);
+    expect(billing.reserve).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: 'edge_request_fixture',
+      reserveUnits: 10_000,
+      policyVersion: POLICY_VERSION,
+    }));
+    expect(billing.settle).toHaveBeenCalledWith(expect.objectContaining({
+      reservation: { reservationId: 'hold_edge_request_fixture' },
+      routeId: 'route_primary',
+      usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+    }));
+    expect(billing.release).not.toHaveBeenCalled();
+    expect(billing.markUncertain).not.toHaveBeenCalled();
+    expect(JSON.stringify(values.outcomes)).not.toContain('private');
+  });
+
+  it('records unavailable usage instead of trusting malformed provider totals', async () => {
+    const meteredRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 10_000 },
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      choices: [],
+      usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 11 },
+    }), { headers: { 'content-type': 'application/json' } }));
+    const billing = billingCoordinatorFixture();
+    const values = await fixture({
+      routes: [meteredRoute], fetch: fetchMock, billingCoordinator: billing.coordinator,
+    });
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(200);
+    await response.arrayBuffer();
+    expect(values.outcomes[0]).toEqual(expect.objectContaining({
+      outcome: 'succeeded',
+      usage: null,
+    }));
+    expect(billing.markUncertain).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'usage_unavailable',
+      routeId: 'route_primary',
+    }));
+    expect(billing.settle).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before contacting a metered provider when billing is unavailable', async () => {
+    const meteredRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 2_000 },
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const withoutCoordinator = await fixture({ routes: [meteredRoute], fetch: fetchMock });
+    const unavailable = await withoutCoordinator.gateway.fetch(withoutCoordinator.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    await expect(unavailable.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_BILLING_UNAVAILABLE' },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const billing = billingCoordinatorFixture();
+    billing.reserve.mockRejectedValueOnce(new EdgeBillingAdmissionError(
+      402, 'EDGE_CREDIT_REQUIRED', 'internal balance details must not leak',
+    ));
+    const insufficient = await fixture({
+      routes: [meteredRoute], fetch: fetchMock, billingCoordinator: billing.coordinator,
+    });
+    const denied = await insufficient.gateway.fetch(insufficient.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(denied.status).toBe(402);
+    expect(denied.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    await expect(denied.json()).resolves.toEqual({
+      error: { code: 'EDGE_CREDIT_REQUIRED', message: 'insufficient credits for this request' },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const failedBilling = billingCoordinatorFixture();
+    failedBilling.reserve.mockRejectedValueOnce(new Error('private billing endpoint'));
+    const broken = await fixture({
+      routes: [meteredRoute], fetch: fetchMock, billingCoordinator: failedBilling.coordinator,
+    });
+    const failed = await broken.gateway.fetch(broken.request({ model: 'otto-fast', messages: [] }));
+    expect(failed.status).toBe(503);
+    expect(failed.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    expect(await failed.text()).not.toContain('private billing endpoint');
+  });
+
+  it('releases a reservation when no provider was reached or fallback is unmetered', async () => {
+    const meteredRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 2_000 },
+    };
+    const failedBilling = billingCoordinatorFixture();
+    const failedFetch = vi.fn<typeof fetch>(async () => { throw new Error('offline'); });
+    const failed = await fixture({
+      routes: [meteredRoute],
+      fetch: failedFetch,
+      billingCoordinator: failedBilling.coordinator,
+      limits: { ...limits, maxRouteAttempts: 1 },
+    });
+    const failure = await failed.gateway.fetch(failed.request({ model: 'otto-fast', messages: [] }));
+    expect(failure.status).toBe(502);
+    await Promise.resolve();
+    expect(failedBilling.release).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'no_usable_route',
+    }));
+
+    const fallbackRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      id: 'route_unmetered_fallback',
+      upstreamUrl: 'https://provider-b.test/v1/chat/completions',
+      priority: 20,
+      metering: undefined,
+    };
+    const fallbackFetch = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('unavailable', { status: 503 }))
+      .mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }));
+    const fallbackBilling = billingCoordinatorFixture();
+    const fallback = await fixture({
+      routes: [meteredRoute, fallbackRoute],
+      fetch: fallbackFetch,
+      billingCoordinator: fallbackBilling.coordinator,
+    });
+    const response = await fallback.gateway.fetch(fallback.request({
+      model: 'otto-fast', messages: [],
+    }));
+    await response.arrayBuffer();
+    expect(fallbackBilling.reserve).toHaveBeenCalledTimes(1);
+    expect(fallbackBilling.release).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'unmetered_route',
+    }));
+    expect(fallbackBilling.settle).not.toHaveBeenCalled();
   });
 
   it('aborts an idle upstream stream and records a content-free timeout outcome', async () => {
@@ -434,6 +685,45 @@ describe('otto edge gateway', () => {
     expect(second.headers.get('retry-after')).toBe('60');
   });
 
+  it('distinguishes temporary traffic bans and fails closed when distributed limiting is unavailable', async () => {
+    const banned = await fixture({
+      rateLimiter: {
+        consume: async () => ({
+          allowed: false, remaining: 0, retryAfterSeconds: 900, banned: true,
+        }),
+      },
+    });
+    const blocked = await banned.gateway.fetch(banned.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get('retry-after')).toBe('900');
+    await expect(blocked.json()).resolves.toEqual({
+      error: {
+        code: 'EDGE_TRAFFIC_BANNED',
+        message: 'request source is temporarily blocked',
+      },
+    });
+
+    const unavailable = await fixture({
+      rateLimiter: {
+        consume: async () => { throw new EdgeRateLimitUnavailableError(); },
+      },
+    });
+    const failed = await unavailable.gateway.fetch(unavailable.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(failed.status).toBe(503);
+    expect(failed.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    expect(failed.headers.get('retry-after')).toBeNull();
+    await expect(failed.json()).resolves.toEqual({
+      error: {
+        code: 'EDGE_RATE_LIMIT_UNAVAILABLE',
+        message: 'gateway rate limiter is unavailable',
+      },
+    });
+  });
+
   it('handles path, method, media, JSON, model, and byte-limit boundaries fail-closed', async () => {
     const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
     const values = await fixture({
@@ -490,6 +780,13 @@ describe('otto edge gateway', () => {
     }));
     expect(invalidLength.status).toBe(400);
     await expect(errorCode(invalidLength)).resolves.toBe('EDGE_INVALID_REQUEST');
+    for (const contentLength of ['-1', '1.5']) {
+      const response = await values.gateway.fetch(raw('{}', {
+        headers: { 'content-length': contentLength },
+      }));
+      expect(response.status).toBe(400);
+      await expect(errorCode(response)).resolves.toBe('EDGE_INVALID_REQUEST');
+    }
 
     const declaredTooLarge = await values.gateway.fetch(raw('{}', {
       headers: { 'content-length': '1025' },
@@ -501,7 +798,9 @@ describe('otto edge gateway', () => {
     const suffix = '"}';
     const exactBody = `${prefix}${'x'.repeat(1_024 - prefix.length - suffix.length)}${suffix}`;
     expect(new TextEncoder().encode(exactBody)).toHaveLength(1_024);
-    expect((await values.gateway.fetch(raw(exactBody))).status).toBe(200);
+    expect((await values.gateway.fetch(raw(exactBody, {
+      headers: { 'content-length': '1024' },
+    }))).status).toBe(200);
     const overBody = `${prefix}${'x'.repeat(1_025 - prefix.length - suffix.length)}${suffix}`;
     const overResponse = await values.gateway.fetch(raw(overBody));
     expect(overResponse.status).toBe(413);
@@ -539,12 +838,19 @@ describe('otto edge gateway', () => {
         PROVIDER_B_API_KEY: 'secondary-secret',
       },
     });
-    const rejectedOverride = await values.gateway.fetch(values.request({
-      model: 'otto-fast',
-      messages: [],
-      upstreamUrl: 'https://attacker.test/',
-    }));
-    expect(rejectedOverride.status).toBe(400);
+    for (const field of [
+      'apiKey', 'api_key', 'authentication', 'headers', 'providerSecret',
+      'secretBinding', 'upstreamUrl', 'upstream_url',
+    ]) {
+      const rejectedOverride = await values.gateway.fetch(values.request({
+        model: 'otto-fast',
+        messages: [],
+        [field]: field === 'headers' ? {} : 'attacker-controlled',
+      }));
+      expect(rejectedOverride.status).toBe(400);
+      expect(rejectedOverride.headers.get('x-otto-edge-request-id'))
+        .toBe('edge_request_fixture');
+    }
     expect(fetchMock).not.toHaveBeenCalled();
 
     const response = await values.gateway.fetch(values.request({
@@ -559,19 +865,39 @@ describe('otto edge gateway', () => {
     expect(new Headers(fetchMock.mock.calls[1]![1]?.headers).get('x-api-key'))
       .toBe('secondary-secret');
 
-    const clientErrorFetch = vi.fn(async () => new Response('bad request', { status: 400 }));
-    const noRetry = await fixture({
-      routes: [primaryRoute, secondary],
-      fetch: clientErrorFetch as typeof fetch,
-      secrets: {
-        PROVIDER_A_API_KEY: 'primary-secret',
-        PROVIDER_B_API_KEY: 'secondary-secret',
-      },
-    });
-    expect((await noRetry.gateway.fetch(noRetry.request({
-      model: 'otto-fast', messages: [],
-    }))).status).toBe(400);
-    expect(clientErrorFetch).toHaveBeenCalledTimes(1);
+    for (const retryableStatus of [429, 502, 504]) {
+      const retryableFetch = vi.fn()
+        .mockResolvedValueOnce(new Response('retry', { status: retryableStatus }))
+        .mockResolvedValueOnce(new Response('{}', { status: 200 }));
+      const retryable = await fixture({
+        routes: [primaryRoute, secondary],
+        fetch: retryableFetch as typeof fetch,
+        secrets: {
+          PROVIDER_A_API_KEY: 'primary-secret',
+          PROVIDER_B_API_KEY: 'secondary-secret',
+        },
+      });
+      expect((await retryable.gateway.fetch(retryable.request({
+        model: 'otto-fast', messages: [],
+      }))).status).toBe(200);
+      expect(retryableFetch).toHaveBeenCalledTimes(2);
+    }
+
+    for (const terminalStatus of [400, 500]) {
+      const terminalFetch = vi.fn(async () => new Response('terminal', { status: terminalStatus }));
+      const noRetry = await fixture({
+        routes: [primaryRoute, secondary],
+        fetch: terminalFetch as typeof fetch,
+        secrets: {
+          PROVIDER_A_API_KEY: 'primary-secret',
+          PROVIDER_B_API_KEY: 'secondary-secret',
+        },
+      });
+      expect((await noRetry.gateway.fetch(noRetry.request({
+        model: 'otto-fast', messages: [],
+      }))).status).toBe(terminalStatus);
+      expect(terminalFetch).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('contains secret-provider and network exceptions without leaking internal errors', async () => {
@@ -678,17 +1004,53 @@ describe('otto edge gateway', () => {
       expect(response.status).toBe(401);
     }
 
+    for (const authorization of [
+      `  ${values.authorization}  `,
+      `Bearer  ${values.authorization.slice('Bearer '.length)}`,
+    ]) {
+      const response = await values.gateway.fetch(values.request(body, {
+        headers: { authorization },
+      }));
+      expect(response.status).toBe(200);
+    }
+
     const normalized = await values.gateway.fetch(values.request({
       model: '  otto-fast  ', messages: [],
     }, { headers: { accept: 'application/json' } }));
     expect(normalized.status).toBe(200);
     await expect(normalized.text()).resolves.toBe('{"ok":true}');
-    const upstreamHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    const upstreamHeaders = new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers);
     expect(upstreamHeaders.get('accept')).toBe('application/json');
     expect(normalized.headers.get('cache-control')).toBe('no-store');
     expect(normalized.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
-    expect(normalized.headers.get('x-ratelimit-remaining')).toBe('9');
-    expect(values.outcomes[0]?.durationMs).toBe(0);
+    expect(normalized.headers.get('x-ratelimit-remaining')).toBe('7');
+    expect(values.outcomes.at(-1)?.durationMs).toBe(0);
+  });
+
+  it('preserves request tracing, exact model boundaries, and measured duration', async () => {
+    const publicModel = 'm'.repeat(160);
+    const route: EdgeModelRouteV1 = { ...primaryRoute, publicModel };
+    let currentTime = NOW;
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const values = await fixture({
+      routes: [route],
+      allowedModels: [publicModel],
+      fetch: fetchMock,
+      now: () => {
+        const value = currentTime;
+        currentTime += 125;
+        return value;
+      },
+    });
+    const response = await values.gateway.fetch(values.request({ model: publicModel, messages: [] }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    await expect(response.text()).resolves.toBe('{}');
+    expect(values.outcomes.at(-1)?.durationMs).toBe(125);
+
+    const rejected = await values.gateway.fetch(values.request({ model: 7, messages: [] }));
+    expect(rejected.status).toBe(400);
+    expect(rejected.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
   });
 
   it('keeps endpoint selection and equal-priority failover deterministic', async () => {
