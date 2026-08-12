@@ -156,7 +156,9 @@ routing origin. Upstream headers are rebuilt from a fixed minimum set; client
 cookies and provider-looking headers are never copied, while `Accept` is derived
 from the validated `stream` flag. Provider response metadata is normalized too:
 unknown media types become `application/octet-stream` with `nosniff`, and only
-bounded visible request IDs are exposed. It also holds a global and per-subject concurrency slot
+bounded visible request IDs are exposed. The `stream` field is accepted only as
+a boolean so provider behavior, response parsing, and billing cannot disagree.
+It also holds a global and per-subject concurrency slot
 for the complete lifetime of every upstream response stream, preventing slow
 clients from exhausting sockets, memory, or provider credit while remaining
 inside a per-minute request limit. Explicit inbound header, request, keep-alive,

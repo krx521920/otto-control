@@ -155,6 +155,10 @@ Origin、不隔离 Secret Binding；正式部署应升级到 v2。
 `x-request-id` 只有在去除首尾空白后为 1–256 个可见 ASCII 字符时，才会作为
 `x-upstream-request-id` 暴露；异常值直接丢弃，不进入响应或日志。
 
+请求体的 `stream` 字段只能缺省或使用 JSON 布尔值。字符串、数字、`null`、数组和
+对象会在读取供应商 Secret 及访问上游前以 `EDGE_INVALID_REQUEST` 拒绝，避免供应商
+按流式执行而网关按非流式进行 Header、用量和计费处理。
+
 策略中的每个 `secretBinding` 对应同名进程环境变量。例如
 `PROVIDER_A_API_KEY`。然后运行：
 
@@ -470,6 +474,7 @@ Node HTTP 资源边界为 100%、上游响应限制配置为 100%、上游熔断
 模型 API 精确路径判断的本次行范围变异复验为 100%。
 上游 `Accept` 派生和最小 Header 重建的本次行范围变异复验为 100%。
 供应商响应 Header 归一化模块为 100%。
+`stream` 布尔协议判断的本次行范围变异复验为 100%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。

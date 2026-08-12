@@ -226,6 +226,13 @@ function requestedModel(body: Record<string, unknown>): string {
       'client routing and provider credential fields are forbidden',
     );
   }
+  if ('stream' in body && typeof body.stream !== 'boolean') {
+    throw new EdgeGatewayProtocolError(
+      400,
+      'EDGE_INVALID_REQUEST',
+      'stream must be a boolean',
+    );
+  }
   const value = typeof body.model === 'string' ? body.model.trim() : '';
   if (!value || value.length > 160) {
     throw new EdgeGatewayProtocolError(400, 'EDGE_INVALID_REQUEST', 'model is invalid');

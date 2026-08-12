@@ -1196,11 +1196,23 @@ describe('otto edge gateway', () => {
     expect(wrongMedia.status).toBe(415);
     await expect(errorCode(wrongMedia)).resolves.toBe('EDGE_UNSUPPORTED_MEDIA_TYPE');
 
-    for (const invalidBody of ['{', '[]', 'null', '{}', '{"model":7}']) {
+    for (const invalidBody of [
+      '{',
+      '[]',
+      'null',
+      '{}',
+      '{"model":7}',
+      '{"model":"otto-fast","stream":null}',
+      '{"model":"otto-fast","stream":1}',
+      '{"model":"otto-fast","stream":"true"}',
+      '{"model":"otto-fast","stream":{}}',
+    ]) {
       const response = await values.gateway.fetch(raw(invalidBody));
       expect(response.status).toBe(400);
       await expect(errorCode(response)).resolves.toBe('EDGE_INVALID_REQUEST');
     }
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(secretGet).not.toHaveBeenCalled();
 
     const malformedUtf8 = await values.gateway.fetch(raw(new Uint8Array([0xff, 0xfe])));
     expect(malformedUtf8.status).toBe(400);
@@ -1712,7 +1724,7 @@ describe('otto edge gateway', () => {
     }
 
     const normalized = await values.gateway.fetch(values.request({
-      model: '  otto-fast  ', messages: [],
+      model: '  otto-fast  ', stream: false, messages: [],
     }, { headers: { accept: 'text/html', cookie: 'private-client-cookie' } }));
     expect(normalized.status).toBe(200);
     await expect(normalized.text()).resolves.toBe('{"ok":true}');
