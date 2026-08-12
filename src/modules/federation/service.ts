@@ -4,6 +4,7 @@ import {
   FEDERATION_MESSAGE_TYPES,
   FEDERATION_PROTOCOL_VERSION,
   type FederationA2aGrantRecord,
+  type FederationAttachmentRecord,
   type FederationDeploymentRecord,
   type FederationEnvelope,
   type FederationSignedRequest,
@@ -19,6 +20,7 @@ import {
 } from '../../errors.js';
 import { ciphertextSha256, normalizeFederationPublicKey, verifyFederationSignature } from './crypto.js';
 import type { FederationStore } from './store.js';
+import type { FederationAttachmentObjectStore } from './attachment-object-store.js';
 
 const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/u;
 const NONCE_PATTERN = /^[A-Za-z0-9_-]{16,128}$/u;
@@ -118,6 +120,7 @@ function grantView(grant: FederationA2aGrantRecord): Record<string, unknown> {
 
 export interface FederationServiceOptions {
   store: FederationStore;
+  attachmentStore?: FederationAttachmentObjectStore | null;
   maximumClockSkewMs?: number;
   maximumEnvelopeTtlMs?: number;
   maximumRequestTtlMs?: number;
@@ -125,11 +128,15 @@ export interface FederationServiceOptions {
   maximumClaimBytes?: number;
   claimTtlMs?: number;
   deliveredRetentionMs?: number;
+  maximumAttachmentBytes?: number;
+  attachmentUploadTtlMs?: number;
+  attachmentDownloadTtlMs?: number;
   now?: () => number;
 }
 
 export class FederationService {
   readonly #store: FederationStore;
+  readonly #attachmentStore: FederationAttachmentObjectStore | null;
   readonly #maximumClockSkewMs: number;
   readonly #maximumEnvelopeTtlMs: number;
   readonly #maximumRequestTtlMs: number;
@@ -137,10 +144,14 @@ export class FederationService {
   readonly #maximumClaimBytes: number;
   readonly #claimTtlMs: number;
   readonly #deliveredRetentionMs: number;
+  readonly #maximumAttachmentBytes: number;
+  readonly #attachmentUploadTtlMs: number;
+  readonly #attachmentDownloadTtlMs: number;
   readonly #now: () => number;
 
   constructor(options: FederationServiceOptions) {
     this.#store = options.store;
+    this.#attachmentStore = options.attachmentStore ?? null;
     this.#maximumClockSkewMs = options.maximumClockSkewMs ?? 5 * 60_000;
     this.#maximumEnvelopeTtlMs = options.maximumEnvelopeTtlMs ?? 7 * 24 * 60 * 60_000;
     this.#maximumRequestTtlMs = options.maximumRequestTtlMs ?? 5 * 60_000;
@@ -149,6 +160,9 @@ export class FederationService {
       ?? Math.max(this.#maximumCiphertextBytes, 4 * 1024 * 1024);
     this.#claimTtlMs = options.claimTtlMs ?? 60_000;
     this.#deliveredRetentionMs = options.deliveredRetentionMs ?? 7 * 24 * 60 * 60_000;
+    this.#maximumAttachmentBytes = options.maximumAttachmentBytes ?? 1024 * 1024 * 1024;
+    this.#attachmentUploadTtlMs = options.attachmentUploadTtlMs ?? 15 * 60_000;
+    this.#attachmentDownloadTtlMs = options.attachmentDownloadTtlMs ?? 5 * 60_000;
     this.#now = options.now ?? Date.now;
   }
 
@@ -428,6 +442,137 @@ export class FederationService {
     return { revoked: true };
   }
 
+  async createAttachmentUpload(
+    rawSigned: FederationSignedRequest<Record<string, unknown>>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.#attachmentStore) throw conflict('federation attachment storage is unavailable');
+    const request = await this.#verifySignedRequest(rawSigned);
+    const senderDeploymentId = request.deploymentId;
+    const recipientDeploymentId = identifier(request.recipientDeploymentId, 'recipientDeploymentId');
+    await this.#requireAttachmentRoute(senderDeploymentId, recipientDeploymentId);
+    const attachmentId = identifier(request.attachmentId, 'attachmentId');
+    const ciphertextBytes = boundedInteger(
+      request.ciphertextBytes,
+      'ciphertextBytes',
+      1,
+      this.#maximumAttachmentBytes,
+    );
+    const ciphertextSha256 = requiredText(request.ciphertextSha256, 'ciphertextSha256', 64);
+    if (!/^[a-f0-9]{64}$/u.test(ciphertextSha256)) {
+      throw invalidRequest('ciphertextSha256 must be a lowercase SHA-256 digest');
+    }
+    const expiresAt = timestamp(request.attachmentExpiresAt, 'attachmentExpiresAt');
+    const now = new Date(this.#now());
+    if (
+      expiresAt <= now ||
+      expiresAt.getTime() - now.getTime() > this.#maximumEnvelopeTtlMs
+    ) {
+      throw invalidRequest('attachment expiry exceeds the federation retention window');
+    }
+    const created = await this.#store.createAttachment({
+      id: attachmentId,
+      senderDeploymentId,
+      recipientDeploymentId,
+      objectKey: this.#attachmentStore.objectKey(attachmentId),
+      ciphertextBytes,
+      ciphertextSha256,
+      expiresAt,
+      now,
+    });
+    const uploadExpiresAt = new Date(Math.min(
+      expiresAt.getTime(),
+      now.getTime() + this.#attachmentUploadTtlMs,
+    ));
+    const upload = created.attachment.status === 'ready'
+      ? null
+      : await this.#attachmentStore.createUpload({
+          objectKey: created.attachment.objectKey,
+          sha256: ciphertextSha256,
+          sizeBytes: ciphertextBytes,
+          expiresAt: uploadExpiresAt,
+        });
+    if (!created.duplicate) {
+      await this.#store.appendAuditEvent({
+        actorDeploymentId: senderDeploymentId,
+        action: 'federation.attachment.create',
+        targetType: 'federation_attachment',
+        targetId: attachmentId,
+        details: { recipientDeploymentId, ciphertextBytes, ciphertextSha256 },
+        occurredAt: now,
+      });
+    }
+    return {
+      attachment: this.#attachmentView(created.attachment),
+      duplicate: created.duplicate,
+      upload,
+    };
+  }
+
+  async completeAttachmentUpload(
+    rawSigned: FederationSignedRequest<Record<string, unknown>>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.#attachmentStore) throw conflict('federation attachment storage is unavailable');
+    const request = await this.#verifySignedRequest(rawSigned);
+    const attachmentId = identifier(request.attachmentId, 'attachmentId');
+    const attachment = await this.#store.getAttachment(attachmentId);
+    if (!attachment || attachment.senderDeploymentId !== request.deploymentId) {
+      throw notFound('federation attachment upload was not found');
+    }
+    const stored = await this.#attachmentStore.inspect(attachment.objectKey);
+    if (
+      stored.sizeBytes !== attachment.ciphertextBytes ||
+      stored.checksumSha256 !== attachment.ciphertextSha256
+    ) {
+      throw conflict('federation attachment object does not match its signed metadata');
+    }
+    const ready = await this.#store.markAttachmentReady(attachment.id, new Date(this.#now()));
+    if (!ready) throw conflict('federation attachment has expired');
+    await this.#store.appendAuditEvent({
+      actorDeploymentId: request.deploymentId,
+      action: 'federation.attachment.ready',
+      targetType: 'federation_attachment',
+      targetId: attachment.id,
+      details: { recipientDeploymentId: attachment.recipientDeploymentId },
+      occurredAt: new Date(this.#now()),
+    });
+    return { attachment: this.#attachmentView(ready) };
+  }
+
+  async createAttachmentDownload(
+    rawSigned: FederationSignedRequest<Record<string, unknown>>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.#attachmentStore) throw conflict('federation attachment storage is unavailable');
+    const request = await this.#verifySignedRequest(rawSigned);
+    const attachment = await this.#store.getAttachment(
+      identifier(request.attachmentId, 'attachmentId'),
+    );
+    const now = new Date(this.#now());
+    if (
+      !attachment ||
+      attachment.recipientDeploymentId !== request.deploymentId ||
+      attachment.status !== 'ready' ||
+      attachment.expiresAt <= now
+    ) {
+      throw notFound('ready federation attachment was not found');
+    }
+    const download = await this.#attachmentStore.createDownload({
+      objectKey: attachment.objectKey,
+      expiresAt: new Date(Math.min(
+        attachment.expiresAt.getTime(),
+        now.getTime() + this.#attachmentDownloadTtlMs,
+      )),
+    });
+    await this.#store.appendAuditEvent({
+      actorDeploymentId: request.deploymentId,
+      action: 'federation.attachment.download',
+      targetType: 'federation_attachment',
+      targetId: attachment.id,
+      details: { senderDeploymentId: attachment.senderDeploymentId },
+      occurredAt: now,
+    });
+    return { attachment: this.#attachmentView(attachment), download };
+  }
+
   async enqueue(raw: SignedFederationEnvelope): Promise<Record<string, unknown>> {
     const signed = await this.#validateEnvelope(raw);
     const now = new Date(this.#now());
@@ -517,6 +662,11 @@ export class FederationService {
         gatewayCanDecrypt: false,
         visibleMetadata: ['deployment ids', 'message type', 'timestamps', 'size', 'delivery status'],
       },
+      attachments: {
+        configured: this.#attachmentStore !== null,
+        ciphertextOnly: true,
+        maximumBytes: this.#maximumAttachmentBytes,
+      },
     };
     if (includeQueue) {
       status.queue = await this.#store.queueStats();
@@ -527,10 +677,50 @@ export class FederationService {
 
   async expire(): Promise<{ expired: number; purged: number }> {
     const now = new Date(this.#now());
-    return this.#store.expireMessages(
+    const messages = await this.#store.expireMessages(
       now,
       new Date(now.getTime() - this.#deliveredRetentionMs),
     );
+    const attachments = await this.#store.expireAttachments(now);
+    if (this.#attachmentStore) {
+      await Promise.allSettled(
+        attachments.map((attachment) => this.#attachmentStore!.remove(attachment.objectKey)),
+      );
+    }
+    return messages;
+  }
+
+  #attachmentView(attachment: FederationAttachmentRecord): Record<string, unknown> {
+    return {
+      id: attachment.id,
+      senderDeploymentId: attachment.senderDeploymentId,
+      recipientDeploymentId: attachment.recipientDeploymentId,
+      ciphertextBytes: attachment.ciphertextBytes,
+      ciphertextSha256: attachment.ciphertextSha256,
+      status: attachment.status,
+      expiresAt: attachment.expiresAt.toISOString(),
+      readyAt: attachment.readyAt?.toISOString() ?? null,
+      createdAt: attachment.createdAt.toISOString(),
+    };
+  }
+
+  async #requireAttachmentRoute(senderDeploymentId: string, recipientDeploymentId: string): Promise<void> {
+    if (senderDeploymentId === recipientDeploymentId) {
+      throw invalidRequest('federation attachments must cross deployment boundaries');
+    }
+    const sender = await this.#activeDeployment(senderDeploymentId);
+    const recipient = await this.#activeDeployment(recipientDeploymentId);
+    for (const deployment of [sender, recipient]) {
+      if (
+        !deployment.capabilities.includes('federation.v1') ||
+        !deployment.capabilities.includes('attachment.e2ee')
+      ) {
+        throw forbidden('both deployments must advertise federation.v1 and attachment.e2ee');
+      }
+    }
+    if (await this.#store.isBlocked(senderDeploymentId, recipientDeploymentId)) {
+      throw forbidden('federation route is blocked');
+    }
   }
 
   async #verifySignedRequest(
@@ -627,7 +817,27 @@ export class FederationService {
       ...(envelope.routing.a2aScope === undefined ? {} : {
         a2aScope: requiredText(envelope.routing.a2aScope, 'a2aScope', MAX_ROUTING_VALUE),
       }),
+      ...(envelope.routing.attachmentIds === undefined ? {} : {
+        attachmentIds: stringList(
+          envelope.routing.attachmentIds,
+          'attachmentIds',
+          ID_PATTERN,
+          6,
+        ),
+      }),
     };
+    for (const attachmentId of envelope.routing.attachmentIds ?? []) {
+      const attachment = await this.#store.getAttachment(attachmentId);
+      if (
+        !attachment ||
+        attachment.status !== 'ready' ||
+        attachment.senderDeploymentId !== envelope.senderDeploymentId ||
+        attachment.recipientDeploymentId !== envelope.recipientDeploymentId ||
+        attachment.expiresAt < new Date(envelope.expiresAt)
+      ) {
+        throw forbidden('federation attachment is not ready or does not match the message route');
+      }
+    }
     if (envelope.type === 'a2a.request' && (!envelope.routing.a2aGrantId || !envelope.routing.a2aScope)) {
       throw forbidden('A2A request requires a scoped one-time grant');
     }

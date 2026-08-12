@@ -10,6 +10,7 @@ secrets/
 signing/
 signing-staging/
 backups/
+compose.*.resolved.yaml
 *.log
 .DS_Store
 Thumbs.db

@@ -171,13 +171,23 @@ jobs:
 
       - name: Prove all Federation instances and encrypted relay are ready
         run: |
+          mkdir -p backups/reports
           for instance in federation-a federation-b federation-c; do
             docker compose -f compose.ci.resolved.yaml \
               exec -T "$instance" node -e \
               "fetch('http://127.0.0.1:7790/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
           done
           docker compose -f compose.ci.resolved.yaml \
-            exec -T federation-a node --input-type=module < scripts/smoke-federation.mjs
+            exec -T -e FEDERATION_SMOKE_SOURCE_COMMIT="$GITHUB_SHA" \
+            federation-a node --input-type=module < scripts/smoke-federation.mjs \
+            > backups/reports/federation-three-replica.json
+
+      - name: Prove the Federation edge survives every replica failure
+        env:
+          OTTO_CONTROL_COMPOSE_FILE: ${{ github.workspace }}/compose.ci.resolved.yaml
+          OTTO_CONTROL_FEDERATION_FAILOVER_EDGE_URL: http://127.0.0.1:18081
+          OTTO_CONTROL_SOURCE_COMMIT: ${{ github.sha }}
+        run: sh deploy/drill-federation-failover.sh --confirm=FAILOVER_OTTO_FEDERATION_REPLICAS
 
       - name: Prove logical backup restores the exact commercial state
         env:
@@ -238,6 +248,15 @@ jobs:
         run: >-
           docker compose -f compose.production.yaml --env-file .env.production
           run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile
+
+      - name: Upload sanitized HA and recovery evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: control-ha-evidence-${{ github.run_id }}
+          path: backups/reports/**
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Print diagnostics and clean up
         if: always()

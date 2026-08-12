@@ -36,6 +36,10 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
         <label><span id="mfa-label">6 位动态验证码</span><input id="mfa-code" inputmode="numeric" autocomplete="one-time-code" required></label>
         <p id="login-error" class="error-text" role="alert"></p>
         <button id="login-button" class="primary" type="submit">进入控制台</button>
+        <div class="login-secondary-actions">
+          <button id="activate-enrollment-button" class="secondary" type="button">激活新管理员</button>
+          <button id="bootstrap-admin-button" class="secondary" type="button">首次部署初始化</button>
+        </div>
       </form>
     </section>
 
@@ -71,6 +75,27 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
         <div id="licenses-panel" class="table-panel" role="tabpanel"><table><thead><tr><th>客户</th><th>方案</th><th>席位</th><th>方式</th><th>状态</th><th>到期时间</th><th>操作</th></tr></thead><tbody id="licenses-body"></tbody></table></div>
         <div id="deployments-panel" class="table-panel hidden" role="tabpanel"><table><thead><tr><th>部署</th><th>客户</th><th>企业 ID</th><th>状态</th><th>更新时间</th></tr></thead><tbody id="deployments-body"></tbody></table></div>
         <div id="customers-panel" class="table-panel hidden" role="tabpanel"><table><thead><tr><th>客户</th><th>客户 ID</th><th>状态</th><th>更新时间</th><th>交付资料</th></tr></thead><tbody id="customers-body"></tbody></table></div>
+      </section>
+
+      <section id="admin-identity-center" class="section-block hidden">
+        <div class="section-heading">
+          <div><p class="section-label">ADMIN IDENTITY</p><h2>管理员与角色</h2></div>
+          <div class="write-actions">
+            <span id="admin-pending-count" class="status-pill neutral">0 个待激活</span>
+            <button id="create-admin-button" class="primary compact hidden" type="button">新建管理员</button>
+          </div>
+        </div>
+        <p class="inline-message">管理员使用独立账号、MFA 和短期会话；角色变更与账号停用会立即撤销该账号的现有会话。</p>
+        <div class="identity-overview">
+          <div>
+            <div class="subheading"><h3>管理员账号</h3><span><strong id="admin-account-count">0</strong> 个</span></div>
+            <div class="table-panel"><table class="identity-table"><thead><tr><th>管理员</th><th>角色</th><th>MFA</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="admin-accounts-body"></tbody></table></div>
+          </div>
+          <div>
+            <div class="subheading"><h3>系统角色与权限</h3><span>服务端强制校验</span></div>
+            <div id="admin-role-list" class="identity-role-list"></div>
+          </div>
+        </div>
       </section>
 
       <section id="approval-center" class="section-block hidden">
@@ -231,6 +256,80 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
     <dl class="license-summary"><div><dt>操作</dt><dd id="approval-operation">-</dd></div><div><dt>目标</dt><dd id="approval-target">-</dd></div><div><dt>申请人</dt><dd id="approval-requester">-</dd></div><div><dt>审批到期</dt><dd id="approval-expiry">-</dd></div></dl>
     <section class="lifecycle-section"><h3>请求内容</h3><pre id="approval-request-payload" class="approval-payload">{}</pre></section>
     <form id="approval-decision-form"><label>复核说明<textarea id="approval-reason" maxlength="500" rows="3" placeholder="批准时可选；拒绝时必须填写原因"></textarea></label><p class="form-error" role="alert"></p><div class="dialog-actions"><button id="reject-approval" class="danger-button" type="button">拒绝</button><button id="approve-approval" class="primary compact" type="button">批准</button></div></form>
+  </dialog>
+
+  <dialog id="create-admin-dialog" class="action-dialog wide">
+    <form id="create-admin-form">
+      <div class="dialog-heading"><div><p class="section-label">ADMIN ACCOUNT</p><h2>新建管理员</h2></div><button class="icon-close" data-close="create-admin-dialog" type="button" aria-label="关闭">×</button></div>
+      <div class="form-grid">
+        <label>登录账号<input id="create-admin-username" maxlength="80" autocomplete="off" required></label>
+        <label>显示名称<input id="create-admin-name" maxlength="100" required></label>
+        <label>临时密码<input id="create-admin-password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+        <label>确认密码<input id="create-admin-password-confirm" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+      </div>
+      <fieldset><legend>分配角色</legend><div id="create-admin-role-picker" class="role-picker"></div></fieldset>
+      <p class="inline-message">创建后会生成一次性激活包。请通过安全渠道交给该管理员，由本人绑定验证器并保存恢复码。</p>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="secondary" data-close="create-admin-dialog" type="button">取消</button><button class="primary compact" type="submit">创建并生成激活包</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="admin-role-dialog" class="action-dialog wide">
+    <form id="admin-role-form">
+      <div class="dialog-heading"><div><p class="section-label">ROLE ASSIGNMENT</p><h2 id="admin-role-title">调整管理员角色</h2></div><button class="icon-close" data-close="admin-role-dialog" type="button" aria-label="关闭">×</button></div>
+      <div id="admin-role-picker" class="role-picker"></div>
+      <p class="inline-message">保存后，该管理员的所有现有会话会被撤销；下次登录立即使用新权限。</p>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="secondary" data-close="admin-role-dialog" type="button">取消</button><button class="primary compact" type="submit">保存角色</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="enrollment-dialog" class="action-dialog wide">
+    <div class="dialog-heading"><div><p class="section-label">ONE-TIME ENROLLMENT</p><h2>管理员激活包已生成</h2></div><button class="icon-close" data-close="enrollment-dialog" type="button" aria-label="关闭">×</button></div>
+    <p class="sensitive-note">以下内容只显示在本次会话中，包含 MFA 密钥和一次性激活凭证。不要通过普通群聊或公开邮件发送。</p>
+    <dl class="enrollment-grid">
+      <dt>管理员</dt><dd id="enrollment-account">-</dd>
+      <dt>账号 ID</dt><dd id="enrollment-id">-</dd>
+      <dt>MFA 密钥</dt><dd id="enrollment-secret" class="enrollment-secret">-</dd>
+      <dt>验证器 URI</dt><dd id="enrollment-uri" class="enrollment-secret">-</dd>
+    </dl>
+    <div class="dialog-actions"><button id="copy-enrollment-secret" class="secondary" type="button">复制 MFA 密钥</button><button id="download-enrollment" class="primary compact" type="button">下载一次性激活包</button></div>
+  </dialog>
+
+  <dialog id="activation-dialog" class="action-dialog wide">
+    <form id="activation-form">
+      <div class="dialog-heading"><div><p class="section-label">MFA ENROLLMENT</p><h2>激活管理员账号</h2></div><button class="icon-close" data-close="activation-dialog" type="button" aria-label="关闭">×</button></div>
+      <label class="activation-import">选择一次性激活包<input id="activation-package-file" type="file" accept="application/json,.json"></label>
+      <dl class="enrollment-grid"><dt>管理员</dt><dd id="activation-account-name">尚未导入</dd><dt>MFA 密钥</dt><dd id="activation-secret-display" class="enrollment-secret">-</dd></dl>
+      <input id="activation-account-id" type="hidden"><input id="activation-token" type="hidden"><input id="activation-secret" type="hidden">
+      <label>验证器生成的 6 位动态码<input id="activation-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required></label>
+      <p class="inline-message">先把 MFA 密钥加入验证器，再输入动态码。激活成功后会立即显示仅一次的恢复码。</p>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="secondary" data-close="activation-dialog" type="button">取消</button><button class="primary compact" type="submit">激活并登录</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="bootstrap-dialog" class="action-dialog wide">
+    <form id="bootstrap-form">
+      <div class="dialog-heading"><div><p class="section-label">FIRST DEPLOYMENT</p><h2>初始化首位管理员</h2></div><button class="icon-close" data-close="bootstrap-dialog" type="button" aria-label="关闭">×</button></div>
+      <p class="sensitive-note">仅用于全新 Control 部署。Bootstrap Token 只完成第一次初始化，之后所有业务管理均使用管理员账号、MFA 与 RBAC。</p>
+      <label>Bootstrap Token<input id="bootstrap-token" type="password" autocomplete="off" required></label>
+      <div class="form-grid">
+        <label>登录账号<input id="bootstrap-username" maxlength="80" autocomplete="username" required></label>
+        <label>显示名称<input id="bootstrap-name" maxlength="100" required></label>
+        <label>管理员密码<input id="bootstrap-password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+        <label>确认密码<input id="bootstrap-password-confirm" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+      </div>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="secondary" data-close="bootstrap-dialog" type="button">取消</button><button class="primary compact" type="submit">生成首位管理员激活包</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="recovery-codes-dialog" class="action-dialog">
+    <div class="dialog-heading"><div><p class="section-label">RECOVERY CODES</p><h2>保存管理员恢复码</h2></div></div>
+    <p class="sensitive-note">每个恢复码只能使用一次。关闭后服务器不会再次返回这些明文恢复码。</p>
+    <div id="recovery-code-list" class="recovery-code-list"></div>
+    <div class="dialog-actions"><button id="download-recovery-codes" class="secondary" type="button">下载恢复码</button><button class="primary compact" data-close="recovery-codes-dialog" type="button">我已安全保存</button></div>
   </dialog>
 
   <div id="toast" class="toast hidden" role="status"></div>
@@ -589,6 +688,7 @@ async function refreshDashboard() {
     }),
     refreshApprovals(),
     refreshAudit(true),
+    refreshAdminIdentity(),
   ]);
   if (state.token) setStatus(byId('service-state'), '已连接', 'good');
 }

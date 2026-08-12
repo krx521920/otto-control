@@ -20,6 +20,7 @@
     "drill:restore:production": "sh deploy/drill-restore-postgres.sh",
     "drill:failover:production": "sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL",
     "drill:control:production": "sh deploy/drill-control-failover.sh --confirm=FAILOVER_OTTO_CONTROL_REPLICAS",
+    "drill:federation:production": "sh deploy/drill-federation-failover.sh --confirm=FAILOVER_OTTO_FEDERATION_REPLICAS",
     "drill:pitr:production": "sh deploy/drill-pitr-postgres.sh",
     "drill:signing:provider": "node scripts/drill-signing-provider.mjs",
     "drill:signing:rotation": "node scripts/drill-signing-rotation.mjs",

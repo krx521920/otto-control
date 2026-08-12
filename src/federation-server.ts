@@ -4,6 +4,7 @@ import { buildFederationApp } from './federation-app.js';
 import { loadFederationConfig } from './federation-config.js';
 import { PostgresFederationStore } from './modules/federation/postgres-store.js';
 import { FederationService } from './modules/federation/service.js';
+import { S3FederationAttachmentObjectStore } from './modules/federation/s3-attachment-object-store.js';
 
 let app: FastifyInstance | null = null;
 let closing = false;
@@ -27,12 +28,22 @@ try {
   });
   const service = new FederationService({
     store,
+    attachmentStore: config.attachmentStorage
+      ? new S3FederationAttachmentObjectStore(config.attachmentStorage)
+      : null,
     maximumClockSkewMs: config.maximumClockSkewMs,
     maximumEnvelopeTtlMs: config.maximumEnvelopeTtlMs,
     maximumCiphertextBytes: config.maximumCiphertextBytes,
     maximumClaimBytes: config.maximumClaimBytes,
     claimTtlMs: config.claimTtlMs,
     deliveredRetentionMs: config.deliveredRetentionMs,
+    maximumAttachmentBytes: config.maximumAttachmentBytes,
+    attachmentUploadTtlMs: config.attachmentStorage
+      ? config.attachmentStorage.uploadTtlSeconds * 1000
+      : undefined,
+    attachmentDownloadTtlMs: config.attachmentStorage
+      ? config.attachmentStorage.downloadTtlSeconds * 1000
+      : undefined,
   });
   app = await buildFederationApp({ config, service });
   process.once('SIGINT', () => void close('SIGINT'));

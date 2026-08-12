@@ -30,6 +30,10 @@ export async function registerAdminIdentityRoutes(
   app: FastifyInstance,
   options: AdminIdentityRouteOptions,
 ): Promise<void> {
+  app.get('/v1/admin-auth/bootstrap/status', async () => ({
+    required: !(await options.identity.hasAccounts()),
+  }));
+
   app.post('/v1/admin-auth/bootstrap', {
     config: { rateLimit: { max: 5, timeWindow: '15 minutes' } },
   }, async (request, reply) => {

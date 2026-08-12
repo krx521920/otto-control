@@ -1275,7 +1275,28 @@ const MIGRATIONS: Migration[] = [
     ],
   },
   {
-    id: '029_edge_gateway_control_plane',
+    id: '029_federation_attachment_relay',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_federation_attachments (
+        id TEXT PRIMARY KEY,
+        sender_deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id),
+        recipient_deployment_id TEXT NOT NULL REFERENCES control_federation_deployments(id),
+        object_key TEXT NOT NULL UNIQUE,
+        ciphertext_bytes BIGINT NOT NULL CHECK (ciphertext_bytes BETWEEN 1 AND 5368709120),
+        ciphertext_sha256 TEXT NOT NULL CHECK (ciphertext_sha256 ~ '^[a-f0-9]{64}$'),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'ready', 'expired')),
+        expires_at TIMESTAMPTZ NOT NULL,
+        ready_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_federation_attachments_recipient
+       ON control_federation_attachments(recipient_deployment_id, status, expires_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_control_federation_attachments_expiry
+       ON control_federation_attachments(status, expires_at)`,
+    ],
+  },
+  {
+    id: '030_edge_gateway_control_plane',
     statements: [
       `CREATE TABLE IF NOT EXISTS control_edge_gateway_policies (
         deployment_id TEXT PRIMARY KEY REFERENCES control_deployments(id) ON DELETE CASCADE,

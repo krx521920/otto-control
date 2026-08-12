@@ -5,6 +5,7 @@ import pg, { type PoolClient } from 'pg';
 import type {
   FederationA2aGrantRecord,
   FederationAuditEventInput,
+  FederationAttachmentRecord,
   FederationBlockRecord,
   FederationClaimedMessage,
   FederationDeploymentKeyRecord,
@@ -20,6 +21,7 @@ import { claimTokenHash } from './crypto.js';
 import {
   messageFromEnvelope,
   type CreateFederationGrantInput,
+  type CreateFederationAttachmentInput,
   type EnqueueFederationMessageInput,
   type EnqueueFederationMessageResult,
   type FederationStore,
@@ -96,6 +98,19 @@ interface MessageRow {
   created_at: Date;
 }
 
+interface AttachmentRow {
+  id: string;
+  sender_deployment_id: string;
+  recipient_deployment_id: string;
+  object_key: string;
+  ciphertext_bytes: string;
+  ciphertext_sha256: string;
+  status: FederationAttachmentRecord['status'];
+  expires_at: Date;
+  ready_at: Date | null;
+  created_at: Date;
+}
+
 function deploymentFromRow(row: DeploymentRow): FederationDeploymentRecord {
   return {
     id: row.id,
@@ -161,6 +176,21 @@ function messageFromRow(row: MessageRow): FederationStoredMessage {
     attempts: row.attempts,
     claimedUntil: row.claimed_until,
     deliveredAt: row.delivered_at,
+    createdAt: row.created_at,
+  };
+}
+
+function attachmentFromRow(row: AttachmentRow): FederationAttachmentRecord {
+  return {
+    id: row.id,
+    senderDeploymentId: row.sender_deployment_id,
+    recipientDeploymentId: row.recipient_deployment_id,
+    objectKey: row.object_key,
+    ciphertextBytes: Number(row.ciphertext_bytes),
+    ciphertextSha256: row.ciphertext_sha256,
+    status: row.status,
+    expiresAt: row.expires_at,
+    readyAt: row.ready_at,
     createdAt: row.created_at,
   };
 }
@@ -424,6 +454,69 @@ export class PostgresFederationStore implements FederationStore {
       [grantId, ownerDeploymentId, now],
     );
     return (result.rowCount ?? 0) > 0;
+  }
+
+  async createAttachment(input: CreateFederationAttachmentInput): Promise<{
+    attachment: FederationAttachmentRecord;
+    duplicate: boolean;
+  }> {
+    return this.#transaction(async (client) => {
+      const current = await client.query<AttachmentRow>(
+        'SELECT * FROM control_federation_attachments WHERE id = $1 FOR UPDATE',
+        [input.id],
+      );
+      if (current.rows[0]) {
+        const attachment = attachmentFromRow(current.rows[0]);
+        if (
+          attachment.senderDeploymentId !== input.senderDeploymentId ||
+          attachment.recipientDeploymentId !== input.recipientDeploymentId ||
+          attachment.ciphertextBytes !== input.ciphertextBytes ||
+          attachment.ciphertextSha256 !== input.ciphertextSha256
+        ) {
+          throw conflict('attachment id already belongs to another ciphertext object');
+        }
+        return { attachment, duplicate: true };
+      }
+      const result = await client.query<AttachmentRow>(
+        `INSERT INTO control_federation_attachments
+         (id, sender_deployment_id, recipient_deployment_id, object_key,
+          ciphertext_bytes, ciphertext_sha256, status, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
+         RETURNING *`,
+        [input.id, input.senderDeploymentId, input.recipientDeploymentId,
+          input.objectKey, input.ciphertextBytes, input.ciphertextSha256,
+          input.expiresAt, input.now],
+      );
+      return { attachment: attachmentFromRow(result.rows[0]!), duplicate: false };
+    });
+  }
+
+  async getAttachment(attachmentId: string): Promise<FederationAttachmentRecord | null> {
+    const result = await this.#pool.query<AttachmentRow>(
+      'SELECT * FROM control_federation_attachments WHERE id = $1',
+      [attachmentId],
+    );
+    return result.rows[0] ? attachmentFromRow(result.rows[0]) : null;
+  }
+
+  async markAttachmentReady(attachmentId: string, now: Date): Promise<FederationAttachmentRecord | null> {
+    const result = await this.#pool.query<AttachmentRow>(
+      `UPDATE control_federation_attachments
+       SET status = 'ready', ready_at = COALESCE(ready_at, $2)
+       WHERE id = $1 AND status IN ('pending', 'ready') AND expires_at > $2
+       RETURNING *`,
+      [attachmentId, now],
+    );
+    return result.rows[0] ? attachmentFromRow(result.rows[0]) : null;
+  }
+
+  async expireAttachments(now: Date): Promise<FederationAttachmentRecord[]> {
+    const result = await this.#pool.query<AttachmentRow>(
+      `UPDATE control_federation_attachments SET status = 'expired'
+       WHERE status IN ('pending', 'ready') AND expires_at <= $1 RETURNING *`,
+      [now],
+    );
+    return result.rows.map(attachmentFromRow);
   }
 
   async enqueueMessage(input: EnqueueFederationMessageInput): Promise<EnqueueFederationMessageResult> {

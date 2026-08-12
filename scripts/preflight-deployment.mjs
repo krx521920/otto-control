@@ -508,6 +508,43 @@ async function main() {
   );
   validatePostgresIdentity(secretDirectory, errors);
 
+  const federationAttachmentStorageRequired =
+    environment.get('FEDERATION_ATTACHMENT_STORAGE_REQUIRED') === 'true';
+  if (
+    deploymentEnvironment === 'production' &&
+    !federationAttachmentStorageRequired &&
+    !allowUnmanagedArtifactsForTest
+  ) {
+    errors.push('production must require federation attachment object storage');
+  }
+  if (federationAttachmentStorageRequired) {
+    const endpointValue = requireValue('FEDERATION_ATTACHMENT_S3_ENDPOINT');
+    const bucketValue = requireValue('FEDERATION_ATTACHMENT_S3_BUCKET');
+    try {
+      const endpoint = new URL(endpointValue);
+      if (
+        endpoint.protocol !== 'https:' || endpoint.username || endpoint.password ||
+        endpoint.search || endpoint.hash
+      ) {
+        errors.push('FEDERATION_ATTACHMENT_S3_ENDPOINT must be a credential-free HTTPS origin');
+      }
+    } catch {
+      errors.push('FEDERATION_ATTACHMENT_S3_ENDPOINT is invalid');
+    }
+    if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/u.test(bucketValue)) {
+      errors.push('FEDERATION_ATTACHMENT_S3_BUCKET is invalid');
+    }
+    for (const [name, expectedPath, localName] of [
+      ['FEDERATION_ATTACHMENT_S3_ACCESS_KEY_ID_FILE', '/run/secrets/artifact_s3_access_key_id', 'artifact_s3_access_key_id'],
+      ['FEDERATION_ATTACHMENT_S3_SECRET_ACCESS_KEY_FILE', '/run/secrets/artifact_s3_secret_access_key', 'artifact_s3_secret_access_key'],
+    ]) {
+      if (environment.get(name) !== expectedPath) {
+        errors.push(`${name} must reference the Compose file-backed secret`);
+      }
+      readRequiredFile(resolve(secretDirectory, localName), errors);
+    }
+  }
+
   const artifactStorageRequired = environment.get('CONTROL_ARTIFACT_STORAGE_REQUIRED') === 'true';
   const unmanagedArtifactsTestMarker = environment.get('CI') === 'true'
     && environment.get('CONTROL_ALLOW_UNMANAGED_ARTIFACTS_FOR_TESTS') === 'true';

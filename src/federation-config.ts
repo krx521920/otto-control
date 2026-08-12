@@ -1,5 +1,10 @@
 import { readFileSync } from 'node:fs';
 
+import {
+  loadFederationAttachmentStorageConfig,
+  type FederationAttachmentStorageConfig,
+} from './modules/federation/attachment-storage-config.js';
+
 export interface FederationConfig {
   environment: 'development' | 'test' | 'production';
   host: string;
@@ -18,6 +23,8 @@ export interface FederationConfig {
   claimTtlMs: number;
   cleanupIntervalMs: number;
   deliveredRetentionMs: number;
+  maximumAttachmentBytes: number;
+  attachmentStorage: FederationAttachmentStorageConfig | null;
 }
 
 function requiredSecret(
@@ -187,6 +194,17 @@ export function loadFederationConfig(env: NodeJS.ProcessEnv = process.env): Read
       60 * 60_000,
       90 * 24 * 60 * 60_000,
       'FEDERATION_DELIVERED_RETENTION_MS',
+    ),
+    maximumAttachmentBytes: boundedInteger(
+      env.FEDERATION_MAX_ATTACHMENT_BYTES,
+      1024 * 1024 * 1024,
+      1024,
+      5 * 1024 * 1024 * 1024,
+      'FEDERATION_MAX_ATTACHMENT_BYTES',
+    ),
+    attachmentStorage: loadFederationAttachmentStorageConfig(
+      env,
+      environment === 'production',
     ),
   };
   if (environment === 'production') {
