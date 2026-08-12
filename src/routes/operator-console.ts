@@ -21,6 +21,10 @@ import {
   OPERATOR_CONSOLE_AUDIT_CSS,
   OPERATOR_CONSOLE_AUDIT_JS,
 } from '../modules/operator-console/audit-assets.js';
+import {
+  OPERATOR_CONSOLE_IDENTITY_CSS,
+  OPERATOR_CONSOLE_IDENTITY_JS,
+} from '../modules/operator-console/identity-assets.js';
 
 const HTML_CSP = [
   "default-src 'none'",
@@ -51,8 +55,8 @@ export async function registerOperatorConsoleRoutes(app: FastifyInstance): Promi
   app.get('/admin/', page);
   app.get('/admin/assets/app.css', async (_request, reply) => hardened(reply)
     .type('text/css; charset=utf-8')
-    .send(`${OPERATOR_CONSOLE_CSS}\n${OPERATOR_CONSOLE_WRITE_CSS}\n${OPERATOR_CONSOLE_LICENSE_CSS}\n${OPERATOR_CONSOLE_APPROVAL_CSS}\n${OPERATOR_CONSOLE_AUDIT_CSS}`));
+    .send(`${OPERATOR_CONSOLE_CSS}\n${OPERATOR_CONSOLE_WRITE_CSS}\n${OPERATOR_CONSOLE_LICENSE_CSS}\n${OPERATOR_CONSOLE_APPROVAL_CSS}\n${OPERATOR_CONSOLE_AUDIT_CSS}\n${OPERATOR_CONSOLE_IDENTITY_CSS}`));
   app.get('/admin/assets/app.js', async (_request, reply) => hardened(reply)
     .type('text/javascript; charset=utf-8')
-    .send(`${OPERATOR_CONSOLE_JS}\n${OPERATOR_CONSOLE_WRITE_JS}\n${OPERATOR_CONSOLE_LICENSE_JS}\n${OPERATOR_CONSOLE_APPROVAL_JS}\n${OPERATOR_CONSOLE_AUDIT_JS}`));
+    .send(`${OPERATOR_CONSOLE_JS}\n${OPERATOR_CONSOLE_WRITE_JS}\n${OPERATOR_CONSOLE_LICENSE_JS}\n${OPERATOR_CONSOLE_APPROVAL_JS}\n${OPERATOR_CONSOLE_AUDIT_JS}\n${OPERATOR_CONSOLE_IDENTITY_JS}`));
 }
