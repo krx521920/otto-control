@@ -9,6 +9,7 @@ import type {
 import {
   normalizeEdgeBillingReservation,
   normalizeEdgeConcurrencyLease,
+  normalizeEdgeRateLimitResult,
   normalizeEdgeRouteAttempt,
 } from './adapter-contracts.js';
 import {
@@ -567,12 +568,17 @@ async function authorize(
       'content-type must be application/json',
     );
   }
-  const rate = await options.rateLimiter.consume({
+  const rateCandidate = await options.rateLimiter.consume({
     key: `${token.deploymentId}\0${token.organizationId}\0${token.subjectId}`,
     limit: policy.limits.requestsPerMinute,
     windowMs: RATE_LIMIT_WINDOW_MS,
     now,
   });
+  const rate = normalizeEdgeRateLimitResult(
+    rateCandidate,
+    policy.limits.requestsPerMinute,
+  );
+  if (!rate) throw new EdgeRateLimitUnavailableError();
   if (!rate.allowed) {
     throw new EdgeGatewayProtocolError(
       429,

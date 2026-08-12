@@ -1512,6 +1512,36 @@ describe('otto edge gateway', () => {
     });
   });
 
+  it.each([
+    { allowed: 'true', remaining: 9, retryAfterSeconds: 0 },
+    { allowed: true, remaining: 10, retryAfterSeconds: 0 },
+    { allowed: false, remaining: 0, retryAfterSeconds: 0 },
+    { allowed: false, remaining: 0, retryAfterSeconds: 604_801, banned: true },
+  ])('fails closed before provider access for a malformed rate-limit result %#', async (result) => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const secretGet = vi.fn(async () => 'provider-secret-value');
+    const values = await fixture({
+      fetch: fetchMock,
+      rateLimiter: { consume: async () => result as never },
+      secretResolver: { get: secretGet },
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'EDGE_RATE_LIMIT_UNAVAILABLE',
+        message: 'gateway rate limiter is unavailable',
+      },
+    });
+    expect(secretGet).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('handles path, method, media, JSON, model, and byte-limit boundaries fail-closed', async () => {
     const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
     const secretGet = vi.fn(async () => 'provider-secret-value');
