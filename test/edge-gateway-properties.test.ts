@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { EdgeAccessTokenV1, EdgeModelRouteV1 } from '../src/contracts/edge-gateway.js';
 import { LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import { InMemoryEdgeConcurrencyLimiter } from '../src/edge-gateway/concurrency-limit.js';
 import {
   createEdgeSignatureVerifier,
   decodeEdgeAccessTokenEnvelope,
@@ -23,6 +24,28 @@ function signerFixture() {
 }
 
 describe('edge gateway property and fuzz testing', () => {
+  it('never exceeds generated global or per-subject concurrency capacity', () => {
+    fc.assert(fc.property(
+      fc.integer({ min: 1, max: 40 }).chain((globalLimit) => fc.tuple(
+        fc.constant(globalLimit),
+        fc.integer({ min: 1, max: globalLimit }),
+        fc.array(fc.integer({ min: 0, max: 12 }), { minLength: 1, maxLength: 120 }),
+      )),
+      ([globalLimit, perSubjectLimit, subjects]) => {
+        const limiter = new InMemoryEdgeConcurrencyLimiter(globalLimit, perSubjectLimit);
+        const leases = subjects
+          .map((subject) => limiter.acquire(`subject-${subject}`))
+          .filter((lease) => lease !== null);
+        const snapshot = limiter.snapshot();
+        expect(snapshot.activeRequests).toBe(leases.length);
+        expect(snapshot.activeRequests).toBeLessThanOrEqual(globalLimit);
+        expect(snapshot.subjectsAtLimit).toBeLessThanOrEqual(snapshot.trackedSubjects);
+        for (const lease of leases.reverse()) lease.release();
+        expect(limiter.snapshot()).toMatchObject({ activeRequests: 0, trackedSubjects: 0 });
+      },
+    ), { numRuns: 200 });
+  });
+
   it('allows exactly the configured number of requests in every generated limit', async () => {
     await fc.assert(fc.asyncProperty(
       fc.integer({ min: 1, max: 100 }),

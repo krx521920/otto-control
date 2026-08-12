@@ -8,6 +8,7 @@ import type {
   EdgeBillingCoordinator,
   EdgeBillingOperationalState,
 } from '../src/edge-gateway/billing-coordinator.js';
+import { InMemoryEdgeConcurrencyLimiter } from '../src/edge-gateway/concurrency-limit.js';
 import {
   handleEdgeOperationsRequest,
   loadEdgeOperationsToken,
@@ -70,9 +71,11 @@ describe('Edge Gateway protected operations API', () => {
 
   it('returns authenticated aggregate status without identifiers, money, or secrets', async () => {
     const values = billing('degraded');
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(10, 2);
+    const lease = concurrencyLimiter.acquire('private-subject');
     const response = await handleEdgeOperationsRequest(
       request('/v1/operations/status'),
-      { token: TOKEN, billingCoordinator: values.coordinator },
+      { token: TOKEN, billingCoordinator: values.coordinator, concurrencyLimiter },
     );
     expect(response?.status).toBe(200);
     const body = await response!.text();
@@ -88,10 +91,19 @@ describe('Edge Gateway protected operations API', () => {
         journalEntries: 7,
         lastReceiptSequence: 3,
       },
+      concurrency: {
+        activeRequests: 1,
+        globalLimit: 10,
+        trackedSubjects: 1,
+        subjectsAtLimit: 0,
+        perSubjectLimit: 2,
+      },
     });
     expect(body).not.toContain(TOKEN);
     expect(body).not.toContain('organization');
     expect(body).not.toContain('amount');
+    expect(body).not.toContain('private-subject');
+    lease!.release();
   });
 
   it('rejects missing and incorrect credentials before reading billing state', async () => {

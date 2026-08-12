@@ -13,6 +13,11 @@ import {
   type EdgeBillingReservation,
   type EdgeBillingUncertainReason,
 } from './billing-coordinator.js';
+import {
+  type EdgeConcurrencyLease,
+  type EdgeConcurrencyLimiter,
+  InMemoryEdgeConcurrencyLimiter,
+} from './concurrency-limit.js';
 import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
 import { OpenAiUsageMeter } from './usage-meter.js';
 import {
@@ -62,6 +67,7 @@ export interface OttoEdgeGatewayOptions {
   verifier: EdgeSignatureVerifier;
   secretResolver: EdgeGatewaySecretResolver;
   rateLimiter: EdgeRateLimiter;
+  concurrencyLimiter?: EdgeConcurrencyLimiter;
   outcomeSink?: EdgeGatewayOutcomeSink;
   billingCoordinator?: EdgeBillingCoordinator;
   readinessProbe?: EdgeGatewayReadinessProbe;
@@ -497,6 +503,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
   fetch(request: Request, context?: EdgeGatewayBackgroundContext): Promise<Response>;
 } {
   const fetchImplementation = options.fetch ?? fetch;
+  const concurrencyLimiter = options.concurrencyLimiter
+    ?? new InMemoryEdgeConcurrencyLimiter();
   const now = options.now ?? Date.now;
   const requestId = options.requestId ?? (() => crypto.randomUUID());
 
@@ -575,6 +583,32 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         publicModel: authorized.publicModel,
         token: authorized.token,
       };
+      let concurrencyLease: EdgeConcurrencyLease | null;
+      try {
+        concurrencyLease = concurrencyLimiter.acquire(
+          `${authorized.token.deploymentId}\0${authorized.token.organizationId}`
+          + `\0${authorized.token.subjectId}`,
+        );
+      } catch {
+        return jsonResponse(
+          503,
+          'EDGE_CONCURRENCY_UNAVAILABLE',
+          'gateway concurrency admission is unavailable',
+          { 'x-otto-edge-request-id': id },
+        );
+      }
+      if (!concurrencyLease) {
+        return jsonResponse(
+          429,
+          'EDGE_CONCURRENCY_LIMITED',
+          'too many concurrent model requests',
+          {
+            'retry-after': '1',
+            'x-otto-edge-request-id': id,
+          },
+        );
+      }
+      const releaseConcurrency = () => concurrencyLease.release();
       const routes = matchingRoutes(
         authorized.policy,
         endpoint,
@@ -600,6 +634,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         if (!secret) continue;
         if (route.metering && !billingReservation) {
           if (!options.billingCoordinator) {
+            releaseConcurrency();
             return jsonResponse(
               503,
               'EDGE_BILLING_UNAVAILABLE',
@@ -613,6 +648,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
               reserveUnits,
             });
           } catch (error) {
+            releaseConcurrency();
             if (error instanceof EdgeBillingAdmissionError) {
               return jsonResponse(
                 error.status,
@@ -660,74 +696,98 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           }
           continue;
         }
-        const body = managedUpstreamBody(
-          upstream.body,
-          connection.controller,
-          request.signal,
-          authorized.policy.limits.upstreamIdleTimeoutMs,
-          Boolean(route.metering),
-          (completion, usage) => {
-            const completedAt = now();
-            scheduleOutcome(options.outcomeSink, context, {
-              version: 2,
-              requestId: evidence.requestId,
-              tokenId: evidence.token.tokenId,
-              deploymentId: evidence.token.deploymentId,
-              organizationId: evidence.token.organizationId,
-              subjectId: evidence.token.subjectId,
-              endpoint: evidence.endpoint,
-              publicModel: evidence.publicModel,
-              routeId: route.id,
-              upstreamStatus: upstream.status,
-              outcome: completion === 'completed'
-                ? (upstream.ok ? 'succeeded' : 'upstream_failed')
-                : completion === 'client_cancelled'
-                  ? 'client_cancelled'
-                  : completion === 'stream_timed_out'
-                    ? 'stream_timed_out'
-                    : 'upstream_failed',
-              durationMs: Math.max(0, completedAt - evidence.startedAt),
-              occurredAtMs: completedAt,
-              usage,
-            });
-            const reservation = billingReservation;
-            const billingCoordinator = options.billingCoordinator;
-            if (reservation && billingCoordinator) {
-              const identity = billingIdentity(evidence);
-              const operation = () => !route.metering
-                ? billingCoordinator.release({
-                    ...identity,
-                    reservation,
-                    reason: 'unmetered_route',
-                    occurredAtMs: completedAt,
-                  })
-                : usage?.totalTokens === 0
+        let body: ReadableStream<Uint8Array> | null;
+        try {
+          body = managedUpstreamBody(
+            upstream.body,
+            connection.controller,
+            request.signal,
+            authorized.policy.limits.upstreamIdleTimeoutMs,
+            Boolean(route.metering),
+            (completion, usage) => {
+              releaseConcurrency();
+              const completedAt = now();
+              scheduleOutcome(options.outcomeSink, context, {
+                version: 2,
+                requestId: evidence.requestId,
+                tokenId: evidence.token.tokenId,
+                deploymentId: evidence.token.deploymentId,
+                organizationId: evidence.token.organizationId,
+                subjectId: evidence.token.subjectId,
+                endpoint: evidence.endpoint,
+                publicModel: evidence.publicModel,
+                routeId: route.id,
+                upstreamStatus: upstream.status,
+                outcome: completion === 'completed'
+                  ? (upstream.ok ? 'succeeded' : 'upstream_failed')
+                  : completion === 'client_cancelled'
+                    ? 'client_cancelled'
+                    : completion === 'stream_timed_out'
+                      ? 'stream_timed_out'
+                      : 'upstream_failed',
+                durationMs: Math.max(0, completedAt - evidence.startedAt),
+                occurredAtMs: completedAt,
+                usage,
+              });
+              const reservation = billingReservation;
+              const billingCoordinator = options.billingCoordinator;
+              if (reservation && billingCoordinator) {
+                const identity = billingIdentity(evidence);
+                const operation = () => !route.metering
                   ? billingCoordinator.release({
                       ...identity,
                       reservation,
-                      reason: 'zero_usage',
+                      reason: 'unmetered_route',
                       occurredAtMs: completedAt,
                     })
-                : usage
-                  ? billingCoordinator.settle({
-                      ...identity,
-                      reservation,
-                      routeId: route.id,
-                      usage,
-                      occurredAtMs: completedAt,
-                    })
-                  : billingCoordinator.markUncertain({
-                      ...identity,
-                      reservation,
-                      routeId: route.id,
-                      reason: uncertainReason(completion),
-                      occurredAtMs: completedAt,
-                    });
-              scheduleBackground(context, operation);
-            }
-          },
-        );
-        return clientResponse(upstream, body, id, authorized.remaining);
+                  : usage?.totalTokens === 0
+                    ? billingCoordinator.release({
+                        ...identity,
+                        reservation,
+                        reason: 'zero_usage',
+                        occurredAtMs: completedAt,
+                      })
+                    : usage
+                      ? billingCoordinator.settle({
+                          ...identity,
+                          reservation,
+                          routeId: route.id,
+                          usage,
+                          occurredAtMs: completedAt,
+                        })
+                      : billingCoordinator.markUncertain({
+                          ...identity,
+                          reservation,
+                          routeId: route.id,
+                          reason: uncertainReason(completion),
+                          occurredAtMs: completedAt,
+                        });
+                scheduleBackground(context, operation);
+              }
+            },
+          );
+        } catch {
+          releaseConcurrency();
+          connection.controller.abort();
+          try {
+            await upstream.body?.cancel();
+          } catch {
+            // A malformed or locked upstream stream is treated as unavailable.
+          }
+          continue;
+        }
+        try {
+          return clientResponse(upstream, body, id, authorized.remaining);
+        } catch {
+          releaseConcurrency();
+          connection.controller.abort();
+          return jsonResponse(
+            502,
+            'EDGE_UPSTREAM_UNAVAILABLE',
+            'upstream response is invalid',
+            { 'x-otto-edge-request-id': id },
+          );
+        }
       }
 
       scheduleOutcome(options.outcomeSink, context, {
@@ -754,6 +814,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           occurredAtMs: now(),
         }));
       }
+      releaseConcurrency();
       return jsonResponse(
         502,
         'EDGE_UPSTREAM_UNAVAILABLE',

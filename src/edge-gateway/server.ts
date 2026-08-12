@@ -6,6 +6,10 @@ import { pathToFileURL } from 'node:url';
 
 import { LocalEd25519Signer } from '../crypto/signed-envelope.js';
 import type { EdgeBillingCoordinator } from './billing-coordinator.js';
+import {
+  type EdgeConcurrencyLimiter,
+  InMemoryEdgeConcurrencyLimiter,
+} from './concurrency-limit.js';
 import { ControlEdgeBillingCoordinator } from './control-billing-coordinator.js';
 import { ControlEdgeKeyringVerifier } from './control-keyring-verifier.js';
 import { ControlEdgeGatewayPolicySource, type EdgeControlPolicyBinding } from './control-policy-source.js';
@@ -62,6 +66,10 @@ export interface EdgeServerConfiguration {
   publicKeysFile: string;
   policy: EdgePolicyConfiguration;
   rateLimit: EdgeRateLimitConfiguration;
+  concurrency: {
+    globalLimit: number;
+    perSubjectLimit: number;
+  };
   billing: EdgeBillingConfiguration;
   operationsTokenFile?: string;
 }
@@ -234,12 +242,28 @@ export function loadEdgeGatewayServerConfiguration(
         type: 'file',
         policyFile: requiredEnvironment('OTTO_EDGE_POLICY_FILE', environment),
       };
+  const globalConcurrency = optionalInteger(
+    'OTTO_EDGE_MAX_CONCURRENT_REQUESTS', environment, 1, 1_000_000,
+  ) ?? 256;
+  const perSubjectConcurrency = optionalInteger(
+    'OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT', environment, 1, 1_000_000,
+  ) ?? 8;
+  if (perSubjectConcurrency > globalConcurrency) {
+    throw new Error(
+      'OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT cannot exceed '
+      + 'OTTO_EDGE_MAX_CONCURRENT_REQUESTS',
+    );
+  }
   return {
     host: environment.OTTO_EDGE_HOST?.trim() || '127.0.0.1',
     port,
     publicKeysFile: requiredEnvironment('OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE', environment),
     policy,
     rateLimit: rateLimitConfiguration(environment),
+    concurrency: {
+      globalLimit: globalConcurrency,
+      perSubjectLimit: perSubjectConcurrency,
+    },
     billing: billingConfiguration(environment, Boolean(controlBaseUrl)),
     ...(environment.OTTO_EDGE_OPERATIONS_TOKEN_FILE?.trim()
       ? { operationsTokenFile: environment.OTTO_EDGE_OPERATIONS_TOKEN_FILE.trim() }
@@ -366,7 +390,11 @@ export async function loadEdgeOperationsToken(file: string): Promise<string> {
 
 export async function handleEdgeOperationsRequest(
   request: Request,
-  input: { token: string; billingCoordinator?: EdgeBillingCoordinator },
+  input: {
+    token: string;
+    billingCoordinator?: EdgeBillingCoordinator;
+    concurrencyLimiter?: EdgeConcurrencyLimiter;
+  },
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith(OPERATIONS_PREFIX)) return null;
@@ -382,6 +410,7 @@ export async function handleEdgeOperationsRequest(
       return operationsResponse(200, {
         service: 'otto-edge-gateway',
         billing: input.billingCoordinator?.operationalStatus?.() ?? null,
+        concurrency: input.concurrencyLimiter?.snapshot() ?? null,
       });
     } catch {
       return operationsResponse(503, {
@@ -498,6 +527,10 @@ export async function startEdgeGatewayServer(): Promise<void> {
     : undefined;
   const configuredPolicySource = await policySource(config.policy, verifier);
   const rateLimiter = await edgeRateLimiter(config.rateLimit);
+  const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(
+    config.concurrency.globalLimit,
+    config.concurrency.perSubjectLimit,
+  );
   const gateway = createOttoEdgeGateway({
     policySource: configuredPolicySource,
     verifier,
@@ -508,6 +541,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
       },
     },
     rateLimiter,
+    concurrencyLimiter,
     billingCoordinator,
     readinessProbe: createEdgeGatewayReadinessProbe({
       policySource: configuredPolicySource,
@@ -535,7 +569,11 @@ export async function startEdgeGatewayServer(): Promise<void> {
     if (request.aborted) abort();
     const convertedRequest = webRequest(request, controller.signal);
     const result = operationsToken
-      ? handleEdgeOperationsRequest(convertedRequest, { token: operationsToken, billingCoordinator })
+      ? handleEdgeOperationsRequest(convertedRequest, {
+          token: operationsToken,
+          billingCoordinator,
+          concurrencyLimiter,
+        })
         .then((operationsResponseResult) => operationsResponseResult ?? gateway.fetch(convertedRequest))
       : gateway.fetch(convertedRequest);
     void result

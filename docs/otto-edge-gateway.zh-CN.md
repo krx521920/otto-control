@@ -127,6 +127,8 @@ $env:OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE='D:\secure\edge-receipt-private.pem'
 $env:OTTO_EDGE_BILLING_JOURNAL_FILE='D:\state\edge-billing.ndjson'
 $env:OTTO_EDGE_BILLING_RETRY_INTERVAL_MS='10000'
 $env:OTTO_EDGE_OPERATIONS_TOKEN_FILE='D:\secure\edge-operations.token'
+$env:OTTO_EDGE_MAX_CONCURRENT_REQUESTS='256'
+$env:OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT='8'
 npm run dev:edge
 ```
 
@@ -175,6 +177,23 @@ PING 失败会拒绝启动；运行期间 Redis 超时、断开或返回畸形�
 `EDGE_RATE_LIMIT_UNAVAILABLE`，不得回退进程内计数。内存后端仍保留给开发和明确的
 单隔离实例。
 
+## 单机并发背压
+
+Node 网关在每分钟限流之外，还使用进程内并发槽保护单服务器。默认最多同时处理 256 个
+模型请求，同一账号最多占用 8 个槽，可分别通过
+`OTTO_EDGE_MAX_CONCURRENT_REQUESTS` 和
+`OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT` 调整；单账号上限不得超过全局上限。
+并发槽从访问令牌和请求体完成校验后开始占用，一直保留到上游响应流正常结束、超时、
+失败或被下游取消。只有拿到响应头并不代表释放，慢速流仍持续占用容量。
+
+超过任一上限返回 429 `EDGE_CONCURRENCY_LIMITED` 和短期 `Retry-After`，不会访问模型
+供应商，也不会创建计费 Hold。并发限制器自身异常时返回 503
+`EDGE_CONCURRENCY_UNAVAILABLE`，不得绕过保护继续转发。槽位释放是幂等的；计费拒绝、
+缺少计费协调器、全部路由失败、无效上游响应和客户端中断均有回归测试。该实现适合当前
+单 Node 进程部署；同一服务器启动多个 Node 进程时，每个进程仍会拥有独立上限，应使用
+进程管理器只启动一个网关实例，或在未来切换为共享并发租约服务，不能把各实例的配置值
+误认为集群总上限。
+
 ## 单机持久化计费与可信用量
 
 签名策略可为每条 OpenAI-compatible 路由配置 `metering.type=openai_tokens` 和
@@ -217,7 +236,8 @@ Node 单进程协调器使用独立 Ed25519 私钥生成 `ExecutionReceiptV2`，
 如配置 `OTTO_EDGE_OPERATIONS_TOKEN_FILE`，Node 网关额外启用：
 
 - `GET /v1/operations/status`：返回计费状态和聚合计数，不返回请求 ID、企业标识、金额
-  或密钥；
+  或密钥；同时返回当前并发数、全局上限、活跃账号数量和达到单账号上限的账号数量，
+  不返回账号标识；
 - `POST /v1/operations/billing/retry`：只重试已经写入防篡改日志的待处理操作，不能创建、
   修改或跳过凭证，也不能人工改序号或金额。
 
@@ -251,10 +271,10 @@ Control 租约、License、Redis、模型或签名密钥。两个接口都要求
 Edge Gateway 使用三层测试工具：
 
 - Vitest：正向、反向、边界和异常场景；
-- fast-check：属性测试与可复现 Fuzz，每轮生成 1,100 组限流、窗口、畸形令牌、
+- fast-check：属性测试与可复现 Fuzz，每轮生成 1,300 组限流、并发租约、窗口、畸形令牌、
   签名变异、协议和认证头输入；
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
-  `control-policy-source.ts`、`control-billing-coordinator.ts`、`usage-meter.ts`、
+  `control-policy-source.ts`、`control-billing-coordinator.ts`、`concurrency-limit.ts`、`usage-meter.ts`、
   `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`
   和 Control 签发服务
   执行代码变异测试。
@@ -271,7 +291,7 @@ npm run test:mutation
 已覆盖代码为 81.51%。其中 Redis 分布式限流为 86.62%、限流与输入校验层为 84.38%、
 公钥轮换模块为 81.11%、策略自动同步器为 81.70%、Control 签发服务为 82.77%、
 本次修改后独立复验的网关核心为 80.42%、用量解析器为 80.41%、单机计费协调器为
-81.68%、协议层为
+81.68%、单机并发限制器为 100%、协议层为
 77.88%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速

@@ -485,6 +485,7 @@ describe('edge gateway server configuration', () => {
       port: 7790,
       policy: { type: 'file', policyFile: 'D:\\secure\\policy.json' },
       rateLimit: { type: 'memory' },
+      concurrency: { globalLimit: 256, perSubjectLimit: 8 },
     });
   });
 
@@ -501,6 +502,8 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_RATE_LIMIT_STRIKE_WINDOW_MS: '180000',
       OTTO_EDGE_RATE_LIMIT_BAN_MS: '900000',
       OTTO_EDGE_REDIS_ALLOW_INSECURE: 'false',
+      OTTO_EDGE_MAX_CONCURRENT_REQUESTS: '512',
+      OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT: '12',
     })).toMatchObject({
       rateLimit: {
         type: 'redis',
@@ -513,6 +516,7 @@ describe('edge gateway server configuration', () => {
         banMs: 900000,
         allowInsecure: false,
       },
+      concurrency: { globalLimit: 512, perSubjectLimit: 12 },
     });
   });
 
@@ -623,5 +627,16 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_BILLING_BACKEND: 'control',
       OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE: 'D:\\secure\\receipt-private.pem',
     })).toThrow('OTTO_EDGE_BILLING_JOURNAL_FILE');
+    expect(() => loadEdgeGatewayServerConfiguration({
+      ...common,
+      OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
+      OTTO_EDGE_MAX_CONCURRENT_REQUESTS: '0',
+    })).toThrow('OTTO_EDGE_MAX_CONCURRENT_REQUESTS');
+    expect(() => loadEdgeGatewayServerConfiguration({
+      ...common,
+      OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
+      OTTO_EDGE_MAX_CONCURRENT_REQUESTS: '4',
+      OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT: '5',
+    })).toThrow('cannot exceed');
   });
 });

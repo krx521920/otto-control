@@ -142,7 +142,10 @@ npm run dev:edge
 It validates short-lived Control-signed tokens and policies locally, pins model
 provider routes, enforces request/rate bounds, performs bounded failover, and
 streams provider responses without sending prompts or conversation context to
-Control. Signed policy also bounds upstream stream-idle time, and downstream
+Control. The Node adapter also holds a global and per-subject concurrency slot
+for the complete lifetime of every upstream response stream, preventing slow
+clients from exhausting sockets, memory, or provider credit while remaining
+inside a per-minute request limit. Signed policy also bounds upstream stream-idle time, and downstream
 disconnects cancel provider work instead of continuing to consume tokens. A
 standard Web Service Worker adapter is provided for Alibaba Cloud
 ESA. The Node adapter can also authenticate to Control, coalesce policy refreshes,

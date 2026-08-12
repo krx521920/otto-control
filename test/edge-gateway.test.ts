@@ -13,6 +13,10 @@ import {
   type EdgeBillingCoordinator,
 } from '../src/edge-gateway/billing-coordinator.js';
 import {
+  type EdgeConcurrencyLimiter,
+  InMemoryEdgeConcurrencyLimiter,
+} from '../src/edge-gateway/concurrency-limit.js';
+import {
   createOttoEdgeGateway,
   type EdgeGatewayReadinessProbe,
 } from '../src/edge-gateway/gateway.js';
@@ -61,6 +65,7 @@ async function fixture(overrides: {
   fetch?: typeof fetch;
   secrets?: Readonly<Record<string, string>>;
   billingCoordinator?: EdgeBillingCoordinator;
+  concurrencyLimiter?: EdgeConcurrencyLimiter;
   readinessProbe?: EdgeGatewayReadinessProbe;
   now?: () => number;
 } = {}) {
@@ -96,6 +101,7 @@ async function fixture(overrides: {
     verifier: createEdgeSignatureVerifier({ [signer.keyId]: signer.publicKeyPem }),
     secretResolver: { get: async (binding) => secrets[binding] ?? null },
     rateLimiter: overrides.rateLimiter ?? new InMemoryEdgeRateLimiter(),
+    concurrencyLimiter: overrides.concurrencyLimiter,
     outcomeSink: { record: async (outcome) => { outcomes.push(outcome); } },
     billingCoordinator: overrides.billingCoordinator,
     readinessProbe: overrides.readinessProbe,
@@ -683,6 +689,106 @@ describe('otto edge gateway', () => {
     }));
     expect(second.status).toBe(429);
     expect(second.headers.get('retry-after')).toBe('60');
+  });
+
+  it('holds concurrency for the full response stream and releases it on completion', async () => {
+    const encoder = new TextEncoder();
+    let closeUpstream: (() => void) | undefined;
+    const fetchMock = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"delta":"running"}\n\n'));
+        closeUpstream = () => controller.close();
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } }));
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(1, 1);
+    const values = await fixture({
+      concurrencyLimiter,
+      fetch: fetchMock as typeof fetch,
+      limits: { ...limits, requestsPerMinute: 10 },
+    });
+    const first = await values.gateway.fetch(values.request({
+      model: 'otto-fast', stream: true, messages: [],
+    }));
+    expect(first.status).toBe(200);
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(1);
+
+    const blocked = await values.gateway.fetch(values.request({
+      model: 'otto-fast', stream: true, messages: [],
+    }));
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get('retry-after')).toBe('1');
+    await expect(blocked.json()).resolves.toEqual({
+      error: {
+        code: 'EDGE_CONCURRENCY_LIMITED',
+        message: 'too many concurrent model requests',
+      },
+    });
+
+    closeUpstream!();
+    await expect(first.text()).resolves.toContain('running');
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+    const admitted = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(admitted.status).toBe(200);
+    closeUpstream!();
+    await admitted.text();
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+  });
+
+  it('releases concurrency on cancellation, billing rejection, and admission failure', async () => {
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(1, 1);
+    const streaming = await fixture({
+      concurrencyLimiter,
+      fetch: vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+        pull() {
+          // Keep the stream open until the downstream cancels it.
+        },
+      }))) as typeof fetch,
+    });
+    const response = await streaming.gateway.fetch(streaming.request({
+      model: 'otto-fast', stream: true, messages: [],
+    }));
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(1);
+    await response.body!.cancel('test complete');
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+
+    const meteredRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 100 },
+    };
+    const rejected = await fixture({
+      routes: [meteredRoute],
+      concurrencyLimiter,
+      billingCoordinator: {
+        ...billingCoordinatorFixture().coordinator,
+        reserve: async () => {
+          throw new EdgeBillingAdmissionError(402, 'EDGE_CREDIT_REQUIRED', 'insufficient');
+        },
+      },
+    });
+    expect((await rejected.gateway.fetch(rejected.request({
+      model: 'otto-fast', messages: [],
+    }))).status).toBe(402);
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+
+    const unavailable = await fixture({
+      concurrencyLimiter: {
+        acquire() { throw new Error('private limiter failure'); },
+        snapshot: () => ({
+          activeRequests: 0,
+          globalLimit: 1,
+          trackedSubjects: 0,
+          subjectsAtLimit: 0,
+          perSubjectLimit: 1,
+        }),
+      },
+    });
+    const failed = await unavailable.gateway.fetch(unavailable.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(failed.status).toBe(503);
+    expect(await failed.text()).not.toContain('private limiter failure');
   });
 
   it('distinguishes temporary traffic bans and fails closed when distributed limiting is unavailable', async () => {
