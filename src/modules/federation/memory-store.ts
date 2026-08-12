@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import type {
   FederationA2aGrantRecord,
   FederationAuditEventInput,
+  FederationAttachmentRecord,
   FederationBlockRecord,
   FederationClaimedMessage,
   FederationDeploymentKeyRecord,
@@ -16,6 +17,7 @@ import { claimTokenHash } from './crypto.js';
 import {
   messageFromEnvelope,
   type CreateFederationGrantInput,
+  type CreateFederationAttachmentInput,
   type EnqueueFederationMessageInput,
   type EnqueueFederationMessageResult,
   type FederationStore,
@@ -33,6 +35,7 @@ export class MemoryFederationStore implements FederationStore {
   readonly nonces = new Map<string, Date>();
   readonly blocks = new Map<string, FederationBlockRecord>();
   readonly grants = new Map<string, FederationA2aGrantRecord>();
+  readonly attachments = new Map<string, FederationAttachmentRecord>();
   readonly messages = new Map<string, MemoryMessage>();
   readonly rateWindows = new Map<string, number>();
   readonly auditEvents: FederationAuditEventInput[] = [];
@@ -229,6 +232,62 @@ export class MemoryFederationStore implements FederationStore {
     if (!record || record.ownerDeploymentId !== ownerDeploymentId || record.revokedAt) return false;
     record.revokedAt = now;
     return true;
+  }
+
+  async createAttachment(input: CreateFederationAttachmentInput): Promise<{
+    attachment: FederationAttachmentRecord;
+    duplicate: boolean;
+  }> {
+    const current = this.attachments.get(input.id);
+    if (current) {
+      if (
+        current.senderDeploymentId !== input.senderDeploymentId ||
+        current.recipientDeploymentId !== input.recipientDeploymentId ||
+        current.ciphertextBytes !== input.ciphertextBytes ||
+        current.ciphertextSha256 !== input.ciphertextSha256
+      ) {
+        throw conflict('attachment id already belongs to another ciphertext object');
+      }
+      return { attachment: structuredClone(current), duplicate: true };
+    }
+    const attachment: FederationAttachmentRecord = {
+      id: input.id,
+      senderDeploymentId: input.senderDeploymentId,
+      recipientDeploymentId: input.recipientDeploymentId,
+      objectKey: input.objectKey,
+      ciphertextBytes: input.ciphertextBytes,
+      ciphertextSha256: input.ciphertextSha256,
+      status: 'pending',
+      expiresAt: input.expiresAt,
+      readyAt: null,
+      createdAt: input.now,
+    };
+    this.attachments.set(attachment.id, attachment);
+    return { attachment: structuredClone(attachment), duplicate: false };
+  }
+
+  async getAttachment(attachmentId: string): Promise<FederationAttachmentRecord | null> {
+    const attachment = this.attachments.get(attachmentId);
+    return attachment ? structuredClone(attachment) : null;
+  }
+
+  async markAttachmentReady(attachmentId: string, now: Date): Promise<FederationAttachmentRecord | null> {
+    const attachment = this.attachments.get(attachmentId);
+    if (!attachment || attachment.status === 'expired' || attachment.expiresAt <= now) return null;
+    attachment.status = 'ready';
+    attachment.readyAt ??= now;
+    return structuredClone(attachment);
+  }
+
+  async expireAttachments(now: Date): Promise<FederationAttachmentRecord[]> {
+    const expired: FederationAttachmentRecord[] = [];
+    for (const attachment of this.attachments.values()) {
+      if (attachment.status !== 'expired' && attachment.expiresAt <= now) {
+        attachment.status = 'expired';
+        expired.push(structuredClone(attachment));
+      }
+    }
+    return expired;
   }
 
   async enqueueMessage(input: EnqueueFederationMessageInput): Promise<EnqueueFederationMessageResult> {

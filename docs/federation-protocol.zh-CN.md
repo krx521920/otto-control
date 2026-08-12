@@ -104,6 +104,12 @@ messageId、未过期租约和 claim token。消费者必须在本地成功持�
 每次领取还受 `FEDERATION_MAX_CLAIM_BYTES` 总字节预算约束，默认 4 MiB，避免积压的大消息
 生成超大 HTTP 响应。该值不得小于单条密文上限 `FEDERATION_MAX_CIPHERTEXT_BYTES`。
 
+大型附件不进入消息队列。客户端先以独立随机密钥流式执行 AES-256-GCM 加密，再由发送部署签名申请
+短时 S3/MinIO 上传地址。网关校验密文大小和 SHA-256 后才将对象标记为 ready；消息只能引用
+双方部署、状态和有效期均匹配的附件 ID。接收部署签名申请短时下载地址，客户端核对密文大小与
+SHA-256 后在本机解密。网关、对象存储和双方企业服务器均不保存附件密钥、文件名或原文。
+附件到期后数据库记录和对象一并清理；默认单个对象上限 1 GiB。
+
 ## 6. A2A 一次性授权
 
 A2A grant 只能由资料拥有方 deployment 签名创建，至少绑定：
@@ -135,6 +141,9 @@ POST /v1/federation/inbox/claim
 POST /v1/federation/inbox/ack
 POST /v1/federation/a2a/grants
 POST /v1/federation/a2a/grants/revoke
+POST /v1/federation/attachments/uploads
+POST /v1/federation/attachments/complete
+POST /v1/federation/attachments/download
 ```
 
 运维接口使用文件挂载的 `FEDERATION_ADMIN_TOKEN`，只允许 Control 后端或隔离运维网络调用：
@@ -163,6 +172,7 @@ Patroni PostgreSQL。消息领取、nonce 和 grant 消费依赖数据库事务�
 - 监控队列长度、HTTP 错误率、领取重试和数据库连接
 - 定期轮换部署公钥；私钥使用客户 KMS/HSM 或权限严格的本地密钥文件
 - 对 PostgreSQL 启用现有加密备份、PITR 和驻留策略
+- 为加密附件配置独立 S3/MinIO 前缀、服务端加密、最小权限凭据和生命周期清理
 
 ## 9. 当前边界与后续阶段
 
@@ -171,7 +181,6 @@ v1 完成中央密文中继，能在 NAT、动态公网地址和接收方离线�
 
 后续可以在不改变信封格式的情况下增加：
 
-- 大型加密附件对象存储与短时授权下载
 - 多区域 Federation 节点和区域内路由
 - 已互信部署间的直连投递，中央节点只做目录和离线后备
 - Control 管理员 RBAC 前端代替直接使用 federation admin token

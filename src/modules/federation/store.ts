@@ -1,6 +1,7 @@
 import type {
   FederationA2aGrantRecord,
   FederationAuditEventInput,
+  FederationAttachmentRecord,
   FederationBlockRecord,
   FederationClaimedMessage,
   FederationDeploymentKeyRecord,
@@ -56,6 +57,17 @@ export interface EnqueueFederationMessageResult {
   duplicate: boolean;
 }
 
+export interface CreateFederationAttachmentInput {
+  id: string;
+  senderDeploymentId: string;
+  recipientDeploymentId: string;
+  objectKey: string;
+  ciphertextBytes: number;
+  ciphertextSha256: string;
+  expiresAt: Date;
+  now: Date;
+}
+
 export interface FederationStore {
   close(): Promise<void>;
   ready(): Promise<boolean>;
@@ -85,6 +97,13 @@ export interface FederationStore {
   consumeRateLimit(deploymentId: string, now: Date): Promise<boolean>;
   createGrant(input: CreateFederationGrantInput): Promise<FederationA2aGrantRecord>;
   revokeGrant(ownerDeploymentId: string, grantId: string, now: Date): Promise<boolean>;
+  createAttachment(input: CreateFederationAttachmentInput): Promise<{
+    attachment: FederationAttachmentRecord;
+    duplicate: boolean;
+  }>;
+  getAttachment(attachmentId: string): Promise<FederationAttachmentRecord | null>;
+  markAttachmentReady(attachmentId: string, now: Date): Promise<FederationAttachmentRecord | null>;
+  expireAttachments(now: Date): Promise<FederationAttachmentRecord[]>;
   enqueueMessage(input: EnqueueFederationMessageInput): Promise<EnqueueFederationMessageResult>;
   claimMessages(input: {
     recipientDeploymentId: string;

@@ -43,6 +43,22 @@ export interface FederationRoutingMetadata {
   inReplyTo?: string;
   a2aGrantId?: string;
   a2aScope?: string;
+  attachmentIds?: string[];
+}
+
+export type FederationAttachmentStatus = 'pending' | 'ready' | 'expired';
+
+export interface FederationAttachmentRecord {
+  id: string;
+  senderDeploymentId: string;
+  recipientDeploymentId: string;
+  objectKey: string;
+  ciphertextBytes: number;
+  ciphertextSha256: string;
+  status: FederationAttachmentStatus;
+  expiresAt: Date;
+  readyAt: Date | null;
+  createdAt: Date;
 }
 
 export interface FederationEnvelope {

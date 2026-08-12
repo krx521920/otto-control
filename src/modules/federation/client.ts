@@ -14,6 +14,7 @@ export const OTTO_FEDERATION_CAPABILITIES = [
   'federation.v1',
   'chat.e2ee',
   'a2a.e2ee',
+  'attachment.e2ee',
 ] as const;
 
 export interface FederationClientOptions {
@@ -193,6 +194,42 @@ export class FederationClient {
     await this.#request('/v1/federation/inbox/ack', await this.#signedRequest({
       messageId: identifier(messageId, 'messageId'),
       claimToken,
+    }));
+  }
+
+  async createAttachmentUpload(input: {
+    recipientDeploymentId: string;
+    attachmentId: string;
+    ciphertextBytes: number;
+    ciphertextSha256: string;
+    expiresInMs?: number;
+  }): Promise<{
+    attachment: Record<string, unknown>;
+    duplicate: boolean;
+    upload: { method: 'PUT'; url: string; headers: Record<string, string>; expiresAt: string } | null;
+  }> {
+    const expiresInMs = input.expiresInMs ?? 24 * 60 * 60_000;
+    return this.#request('/v1/federation/attachments/uploads', await this.#signedRequest({
+      recipientDeploymentId: identifier(input.recipientDeploymentId, 'recipientDeploymentId'),
+      attachmentId: identifier(input.attachmentId, 'attachmentId'),
+      ciphertextBytes: input.ciphertextBytes,
+      ciphertextSha256: input.ciphertextSha256,
+      attachmentExpiresAt: new Date(this.#now() + expiresInMs).toISOString(),
+    }));
+  }
+
+  async completeAttachmentUpload(attachmentId: string): Promise<Record<string, unknown>> {
+    return this.#request('/v1/federation/attachments/complete', await this.#signedRequest({
+      attachmentId: identifier(attachmentId, 'attachmentId'),
+    }));
+  }
+
+  async createAttachmentDownload(attachmentId: string): Promise<{
+    attachment: Record<string, unknown>;
+    download: { method: 'GET'; url: string; headers: Record<string, string>; expiresAt: string };
+  }> {
+    return this.#request('/v1/federation/attachments/download', await this.#signedRequest({
+      attachmentId: identifier(attachmentId, 'attachmentId'),
     }));
   }
 

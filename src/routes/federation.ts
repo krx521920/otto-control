@@ -59,6 +59,23 @@ export async function registerFederationRoutes(
     { config: { rateLimit: { max: 120, timeWindow: '1 minute', ban: 20 } } },
     async (request) => options.service.revokeA2aGrant(request.body),
   );
+  app.post<{ Body: FederationSignedRequest<Record<string, unknown>> }>(
+    '/v1/federation/attachments/uploads',
+    { config: { rateLimit: { max: 120, timeWindow: '1 minute', ban: 20 } } },
+    async (request, reply) => reply.code(201).send(
+      await options.service.createAttachmentUpload(request.body),
+    ),
+  );
+  app.post<{ Body: FederationSignedRequest<Record<string, unknown>> }>(
+    '/v1/federation/attachments/complete',
+    { config: { rateLimit: { max: 240, timeWindow: '1 minute', ban: 20 } } },
+    async (request) => options.service.completeAttachmentUpload(request.body),
+  );
+  app.post<{ Body: FederationSignedRequest<Record<string, unknown>> }>(
+    '/v1/federation/attachments/download',
+    { config: { rateLimit: { max: 600, timeWindow: '1 minute', ban: 20 } } },
+    async (request) => options.service.createAttachmentDownload(request.body),
+  );
 
   app.register(async (admin) => {
     admin.addHook('onRequest', async (request) => requireAdmin(request, options.adminToken));
