@@ -26,6 +26,7 @@ import {
 import type { EdgeGatewayLifecycle } from './lifecycle.js';
 import { normalizeEdgeProviderSecret } from './provider-secret.js';
 import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
+import { normalizeEdgeRequestId } from './request-id.js';
 import {
   type EdgeRequestLimits,
   normalizeEdgeRequestLimits,
@@ -610,8 +611,6 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
 
   return {
     async fetch(request, context) {
-      const startedAt = now();
-      const id = requestId();
       const url = new URL(request.url);
       if (request.method === 'GET' && url.pathname === '/healthz') {
         return new Response(JSON.stringify({ status: 'ok', service: 'otto-edge-gateway' }), {
@@ -648,6 +647,23 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         return jsonResponse(405, 'EDGE_METHOD_NOT_ALLOWED', 'method not allowed', {
           allow: 'POST',
         });
+      }
+      let requestContext: { startedAt: number; id: string | null };
+      try {
+        requestContext = {
+          startedAt: now(),
+          id: normalizeEdgeRequestId(requestId()),
+        };
+      } catch {
+        requestContext = { startedAt: Number.NaN, id: null };
+      }
+      const { startedAt, id } = requestContext;
+      if (!Number.isSafeInteger(startedAt) || startedAt < 0 || !id) {
+        return jsonResponse(
+          503,
+          'EDGE_REQUEST_CONTEXT_UNAVAILABLE',
+          'gateway request context is unavailable',
+        );
       }
       try {
         if (options.lifecycle && !options.lifecycle.isAccepting()) {

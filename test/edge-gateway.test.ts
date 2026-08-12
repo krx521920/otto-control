@@ -90,6 +90,7 @@ async function fixture(overrides: {
   allowedUpstreamOrigins?: readonly string[];
   upstreamOriginPolicy?: EdgeUpstreamOriginPolicy;
   now?: () => number;
+  requestId?: () => string;
 } = {}) {
   const { privateKey } = generateKeyPairSync('ed25519');
   const signer = new LocalEd25519Signer(
@@ -141,7 +142,7 @@ async function fixture(overrides: {
     upstreamOriginPolicy,
     fetch: overrides.fetch ?? (vi.fn(async () => new Response('{}')) as typeof fetch),
     now: overrides.now ?? (() => NOW),
-    requestId: () => 'edge_request_fixture',
+    requestId: overrides.requestId ?? (() => 'edge_request_fixture'),
   });
   const authorization = `Bearer ${encodeEdgeAccessTokenEnvelope(access)}`;
   const request = (body: unknown, init: RequestInit = {}) => new Request(
@@ -190,11 +191,85 @@ function billingCoordinatorFixture() {
 
 describe('otto edge gateway', () => {
   it('exposes a minimal health endpoint without loading policy or secrets', async () => {
-    const values = await fixture();
+    const requestId = vi.fn(() => { throw new Error('request id unavailable'); });
+    const now = vi.fn(() => { throw new Error('clock unavailable'); });
+    const values = await fixture({ requestId, now });
     const response = await values.gateway.fetch(new Request('https://edge.otto.test/healthz'));
     await expect(response.json()).resolves.toEqual({ status: 'ok', service: 'otto-edge-gateway' });
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(requestId).not.toHaveBeenCalled();
+    expect(now).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    () => 'request id with spaces',
+    () => '请求编号',
+    () => `a${'x'.repeat(128)}`,
+    () => { throw new Error('private request id backend'); },
+  ])('fails business admission closed for an invalid request id %#', async (requestId) => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const secretGet = vi.fn(async () => 'provider-secret-value');
+    const values = await fixture({
+      fetch: fetchMock,
+      requestId,
+      secretResolver: { get: secretGet },
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'EDGE_REQUEST_CONTEXT_UNAVAILABLE',
+        message: 'gateway request context is unavailable',
+      },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(secretGet).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    () => -1,
+    () => 1.5,
+    () => Number.NaN,
+    () => { throw new Error('private clock backend'); },
+  ])('fails business admission closed for an invalid clock %#', async (now) => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const secretGet = vi.fn(async () => 'provider-secret-value');
+    const values = await fixture({
+      fetch: fetchMock,
+      now,
+      secretResolver: { get: secretGet },
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_REQUEST_CONTEXT_UNAVAILABLE' },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(secretGet).not.toHaveBeenCalled();
+  });
+
+  it('accepts zero as a valid request clock boundary before lifecycle admission', async () => {
+    const lifecycle = new InMemoryEdgeGatewayLifecycle({ now: () => NOW });
+    lifecycle.beginDrain();
+    const values = await fixture({ lifecycle, now: () => 0 });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_GATEWAY_DRAINING' },
+    });
   });
 
   it('reports readiness without exposing component details or failure messages', async () => {

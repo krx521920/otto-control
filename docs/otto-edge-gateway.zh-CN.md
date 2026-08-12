@@ -159,6 +159,12 @@ Origin、不隔离 Secret Binding；正式部署应升级到 v2。
 对象会在读取供应商 Secret 及访问上游前以 `EDGE_INVALID_REQUEST` 拒绝，避免供应商
 按流式执行而网关按非流式进行 Header、用量和计费处理。
 
+`/healthz` 与 `/readyz` 不调用业务时钟或请求 ID 生成器，因此这两个辅助组件异常不会
+拖垮存活和就绪探针。模型请求 ID 去除首尾空白后必须为 1–128 个字符，以字母或数字
+开头，后续只允许字母、数字、点、下划线、冒号和连字符；生成器抛错、时钟不是非负安全
+整数或 ID 不合法时返回 `EDGE_REQUEST_CONTEXT_UNAVAILABLE`，且不会加载策略、读取
+Secret、建立计费 Hold 或访问供应商。
+
 策略中的每个 `secretBinding` 对应同名进程环境变量。例如
 `PROVIDER_A_API_KEY`。然后运行：
 
@@ -460,7 +466,7 @@ Edge Gateway 使用三层测试工具：
   `node-http-limits.ts`、`provider-secret.ts`、`request-limits.ts`、
   `upstream-response-headers.ts`、`upstream-response-limits.ts`、
   `upstream-origin-policy.ts`、`usage-meter.ts`、
-  `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`
+  `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`、`request-id.ts`
   和 Control 签发服务
   执行代码变异测试。
 
@@ -486,6 +492,7 @@ Node HTTP 资源边界为 100%、上游响应限制配置为 100%、上游熔断
 `stream` 布尔协议判断的本次行范围变异复验为 100%。
 熔断前置与半开探测租约释放的本次行范围变异复验为 100%。
 备用线路计费档案一致性门禁的本次行范围变异复验为 100%。
+请求 ID 归一化模块为 100%，请求上下文构造与有效性门禁的本次行范围变异复验为 100%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。

@@ -158,6 +158,9 @@ from the validated `stream` flag. Provider response metadata is normalized too:
 unknown media types become `application/octet-stream` with `nosniff`, and only
 bounded visible request IDs are exposed. The `stream` field is accepted only as
 a boolean so provider behavior, response parsing, and billing cannot disagree.
+Liveness and readiness do not depend on the business clock or request-ID generator;
+business IDs are normalized to a bounded safe alphabet and invalid generators fail
+closed before policy, secret, billing, or provider access.
 It also holds a global and per-subject concurrency slot
 for the complete lifetime of every upstream response stream, preventing slow
 clients from exhausting sockets, memory, or provider credit while remaining
