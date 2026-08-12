@@ -1493,6 +1493,44 @@ describe('otto edge gateway', () => {
     expect(unavailable.status).toBe(502);
   });
 
+  it('normalizes a provider secret before constructing its authorization header', async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer normalized-secret');
+      return new Response('{}', { status: 200 });
+    });
+    const values = await fixture({
+      fetch: fetchMock as typeof fetch,
+      secretResolver: { get: async () => '  normalized-secret  ' },
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    'unsafe\r\nheader',
+    'unicode-密钥',
+    'x'.repeat(8_193),
+  ])('rejects an unsafe provider secret before network access %#', async (secret) => {
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    const values = await fixture({
+      fetch: fetchMock as typeof fetch,
+      secretResolver: { get: async () => secret },
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(502);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await response.text()).not.toContain(secret.slice(0, 12));
+  });
+
   it('rejects unsafe signed routes before they can become SSRF or secret-header policies', async () => {
     const values = await fixture();
     await expect(values.control.issuePolicy({

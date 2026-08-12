@@ -133,6 +133,11 @@ Origin 必须是无凭据、路径、查询或片段的 HTTPS Origin。协议、
 错误的私网解析。旧 `version: 1`、`allowedOrigins` 文件仍可在迁移期读取，但它只绑定
 Origin、不隔离 Secret Binding；正式部署应升级到 v2。
 
+供应商 Secret 在去除首尾空白后必须为 1–8192 个 HTTP 可见 ASCII 字符。空值、内部
+控制字符、非 ASCII 字符和超长值会在构造认证 Header 或建立上游连接前被拒绝。该规则
+位于可移植网关核心中，Node 和 ESA 执行相同边界；密钥文件或 KMS 返回值末尾的换行可
+安全去除，但密钥本身不得包含空白控制字符，也不得写入日志或错误响应。
+
 策略中的每个 `secretBinding` 对应同名进程环境变量。例如
 `PROVIDER_A_API_KEY`。然后运行：
 
@@ -422,7 +427,7 @@ Edge Gateway 使用三层测试工具：
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
   `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、
   `concurrency-limit.ts`、`lifecycle.ts`、`node-http-adapter.ts`、
-  `node-http-limits.ts`、`request-limits.ts`、`upstream-response-limits.ts`、
+  `node-http-limits.ts`、`provider-secret.ts`、`request-limits.ts`、`upstream-response-limits.ts`、
   `upstream-origin-policy.ts`、`usage-meter.ts`、
   `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`
   和 Control 签发服务
@@ -443,6 +448,7 @@ npm run test:mutation
 81.68%、单机并发限制器为 100%、优雅排空状态机为 100%、Node HTTP 适配器为 100%、
 Node HTTP 资源边界为 100%、上游响应限制配置为 100%、上游熔断器为 96.06%、协议层为
 77.88%、本地请求限制配置为 100%、本地上游 Origin 与凭据绑定策略为 99.01%。
+供应商 Secret Header 安全校验模块为 100%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。

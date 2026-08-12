@@ -142,7 +142,9 @@ npm run dev:edge
 It validates short-lived Control-signed tokens and policies locally, pins model
 provider routes, requires every signed route to also match an independently
 managed exact HTTPS-origin and credential-binding allowlist before reading
-provider secrets, enforces
+provider secrets, and rejects empty, non-ASCII, control-character, or oversized
+provider credentials before constructing an HTTP header or opening an upstream
+connection. It enforces
 request/rate bounds, performs bounded failover, and
 streams provider responses without sending prompts or conversation context to
 Control. The Node adapter uses a fixed internal origin and rejects ambiguous,

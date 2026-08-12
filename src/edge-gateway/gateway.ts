@@ -24,6 +24,7 @@ import {
   InMemoryEdgeRouteCircuitBreaker,
 } from './circuit-breaker.js';
 import type { EdgeGatewayLifecycle } from './lifecycle.js';
+import { normalizeEdgeProviderSecret } from './provider-secret.js';
 import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
 import {
   type EdgeRequestLimits,
@@ -727,7 +728,9 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         const route = routes[index]!;
         let secret: string | null;
         try {
-          secret = await options.secretResolver.get(route.authentication.secretBinding);
+          secret = normalizeEdgeProviderSecret(
+            await options.secretResolver.get(route.authentication.secretBinding),
+          );
         } catch {
           secret = null;
         }
