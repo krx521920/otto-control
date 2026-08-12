@@ -502,7 +502,7 @@ describe('otto edge gateway', () => {
     expect(await failed.text()).not.toContain('private billing endpoint');
   });
 
-  it('releases a reservation when no provider was reached or fallback is unmetered', async () => {
+  it('releases a reservation when no provider was reached', async () => {
     const meteredRoute: EdgeModelRouteV1 = {
       ...primaryRoute,
       metering: { type: 'openai_tokens', reserveUnits: 2_000 },
@@ -521,32 +521,6 @@ describe('otto edge gateway', () => {
     expect(failedBilling.release).toHaveBeenCalledWith(expect.objectContaining({
       reason: 'no_usable_route',
     }));
-
-    const fallbackRoute: EdgeModelRouteV1 = {
-      ...primaryRoute,
-      id: 'route_unmetered_fallback',
-      upstreamUrl: 'https://provider-b.test/v1/chat/completions',
-      priority: 20,
-      metering: undefined,
-    };
-    const fallbackFetch = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response('unavailable', { status: 503 }))
-      .mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }));
-    const fallbackBilling = billingCoordinatorFixture();
-    const fallback = await fixture({
-      routes: [meteredRoute, fallbackRoute],
-      fetch: fallbackFetch,
-      billingCoordinator: fallbackBilling.coordinator,
-    });
-    const response = await fallback.gateway.fetch(fallback.request({
-      model: 'otto-fast', messages: [],
-    }));
-    await response.arrayBuffer();
-    expect(fallbackBilling.reserve).toHaveBeenCalledTimes(1);
-    expect(fallbackBilling.release).toHaveBeenCalledWith(expect.objectContaining({
-      reason: 'unmetered_route',
-    }));
-    expect(fallbackBilling.settle).not.toHaveBeenCalled();
   });
 
   it('aborts an idle upstream stream and records a content-free timeout outcome', async () => {

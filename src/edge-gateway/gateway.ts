@@ -733,10 +733,6 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
       let lastStatus: number | null = null;
       let lastRouteId: string | null = null;
       let billingReservation: EdgeBillingReservation | null = null;
-      const reserveUnits = routes.reduce(
-        (maximum, route) => Math.max(maximum, route.metering?.reserveUnits ?? 0),
-        0,
-      );
 
       for (let index = 0; index < routes.length; index += 1) {
         const route = routes[index]!;
@@ -780,7 +776,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           try {
             billingReservation = await options.billingCoordinator.reserve({
               ...billingIdentity(evidence),
-              reserveUnits,
+              reserveUnits: route.metering.reserveUnits,
             });
           } catch (error) {
             routeAttempt.cancelled();

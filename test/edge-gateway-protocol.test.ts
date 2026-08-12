@@ -228,6 +228,52 @@ describe('edge gateway signed protocol boundaries', () => {
     }
   });
 
+  it('requires every fallback route to use the same metering profile', () => {
+    const fallback = {
+      ...route,
+      id: 'route_fallback',
+      priority: 20,
+      upstreamUrl: 'https://provider-fallback.test/v1/chat/completions',
+    };
+    const metering = { type: 'openai_tokens' as const, reserveUnits: 2_000 };
+    const normalized = normalizeSignedEdgeGatewayPolicy({
+      ...policy,
+      policy: {
+        ...policy.policy,
+        routes: [
+          { ...route, metering },
+          { ...fallback, metering },
+        ],
+      },
+    }, NOW);
+    expect(normalized.policy.routes).toHaveLength(2);
+
+    for (const routes of [
+      [{ ...route, metering }, fallback],
+      [
+        { ...route, metering },
+        { ...fallback, metering: { ...metering, reserveUnits: 2_001 } },
+      ],
+    ]) {
+      invalidPolicy({
+        ...policy,
+        policy: { ...policy.policy, routes },
+      });
+    }
+
+    const differentEndpoint = normalizeSignedEdgeGatewayPolicy({
+      ...policy,
+      policy: {
+        ...policy.policy,
+        routes: [
+          { ...route, metering },
+          { ...fallback, endpoint: 'responses' },
+        ],
+      },
+    }, NOW);
+    expect(differentEndpoint.policy.routes).toHaveLength(2);
+  });
+
   it('accepts exact limit boundaries and rejects every adjacent out-of-range value', () => {
     const cases = [
       ['maxRequestBytes', 1_024, 20 * 1_024 * 1_024, 1_023, 20 * 1_024 * 1_024 + 1],

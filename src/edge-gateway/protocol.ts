@@ -223,6 +223,25 @@ function route(value: unknown): EdgeModelRouteV1 {
   };
 }
 
+function validateRouteMeteringConsistency(routes: readonly EdgeModelRouteV1[]): void {
+  const profiles = new Map<string, string>();
+  for (const item of routes) {
+    const key = `${item.endpoint}\0${item.publicModel}`;
+    const profile = item.metering
+      ? `${item.metering.type}:${item.metering.reserveUnits}`
+      : 'unmetered';
+    const existing = profiles.get(key);
+    if (existing !== undefined && existing !== profile) {
+      protocolError(
+        400,
+        'EDGE_INVALID_ENVELOPE',
+        'fallback routes must use a consistent metering profile',
+      );
+    }
+    profiles.set(key, profile);
+  }
+}
+
 function limits(value: unknown): EdgeGatewayLimitsV1 {
   const body = objectValue(value, 'gateway limits');
   exactFields(body, LIMIT_FIELDS, 'gateway limits');
@@ -263,6 +282,7 @@ export function normalizeSignedEdgeGatewayPolicy(
   if (new Set(routes.map((item) => item.id)).size !== routes.length) {
     protocolError(400, 'EDGE_INVALID_ENVELOPE', 'gateway route ids must be unique');
   }
+  validateRouteMeteringConsistency(routes);
   const issuedAtMs = safeInteger(body, 'issuedAtMs', 1, Number.MAX_SAFE_INTEGER);
   const expiresAtMs = safeInteger(body, 'expiresAtMs', 1, Number.MAX_SAFE_INTEGER);
   validateWindow(issuedAtMs, expiresAtMs, now, MAX_POLICY_DURATION_MS, 'gateway policy');

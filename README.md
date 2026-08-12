@@ -176,7 +176,10 @@ disconnects cancel provider work instead of continuing to consume tokens. A
 separate local hard cap aborts responses that exceed 64 MiB or 15 minutes even
 when a provider continuously sends data and never triggers the idle timeout;
 metered requests remain explicitly uncertain instead of being undercharged. A
-standard Web Service Worker adapter is provided for Alibaba Cloud
+signed policy may use fallback routes only when every route for the same endpoint
+and public model has an identical metering profile and reservation size; mixed
+metered/unmetered or differently priced fallbacks are rejected before activation.
+A standard Web Service Worker adapter is provided for Alibaba Cloud
 ESA. The Node adapter can also authenticate to Control, coalesce policy refreshes,
 verify tenant-bound signatures before caching, and fail closed when the last
 signed policy expires. It consumes Control's signed public keyring with two-phase
