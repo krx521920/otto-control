@@ -135,6 +135,12 @@ $env:OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT='8'
 $env:OTTO_EDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD='5'
 $env:OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS='30000'
 $env:OTTO_EDGE_CIRCUIT_BREAKER_MAXIMUM_ENTRIES='10000'
+$env:OTTO_EDGE_HTTP_HEADERS_TIMEOUT_MS='15000'
+$env:OTTO_EDGE_HTTP_REQUEST_TIMEOUT_MS='120000'
+$env:OTTO_EDGE_HTTP_KEEP_ALIVE_TIMEOUT_MS='5000'
+$env:OTTO_EDGE_HTTP_MAX_HEADER_BYTES='16384'
+$env:OTTO_EDGE_HTTP_MAX_HEADERS_COUNT='100'
+$env:OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET='1000'
 $env:OTTO_EDGE_SHUTDOWN_GRACE_MS='30000'
 npm run dev:edge
 ```
@@ -220,6 +226,18 @@ Node 网关为签名策略中的每个路由维护有界的进程内故障状态
 熔断以单 Node 进程为边界，适合当前单服务器单进程方案。多个进程各自判断线路健康，
 不能把它宣传为全局线路摘除；多实例正式方案需要共享健康协调器或由云负载均衡/WAF
 承担全局故障检测。
+
+## 入站 HTTP 资源边界
+
+Node 网关不使用运行时的无限连接默认值。请求头必须在 15 秒内完成，整个请求体必须在
+120 秒内上传完成，空闲 keep-alive 连接保留 5 秒；总头部最多 16 KiB，应用最多接收
+100 个头部，同一 socket 最多处理 1000 个请求。超时连接由 Node 直接以 408 终止，超过
+总头部字节容量的请求以 431 拒绝，不会进入策略、计费或模型转发。上述六项分别通过
+`OTTO_EDGE_HTTP_HEADERS_TIMEOUT_MS`、`OTTO_EDGE_HTTP_REQUEST_TIMEOUT_MS`、
+`OTTO_EDGE_HTTP_KEEP_ALIVE_TIMEOUT_MS`、`OTTO_EDGE_HTTP_MAX_HEADER_BYTES`、
+`OTTO_EDGE_HTTP_MAX_HEADERS_COUNT` 和 `OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET` 调整；
+头部期限不得大于整请求期限，所有配置均有硬边界且在监听端口前应用。反向代理仍应
+配置自己的连接、头部和请求体限制，不能只依赖应用层边界。
 
 ## 优雅下线与有界排空
 
@@ -315,7 +333,8 @@ Edge Gateway 使用三层测试工具：
   签名变异、协议和认证头输入；
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
   `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、
-  `concurrency-limit.ts`、`lifecycle.ts`、`usage-meter.ts`、
+  `concurrency-limit.ts`、`lifecycle.ts`、`node-http-adapter.ts`、
+  `node-http-limits.ts`、`usage-meter.ts`、
   `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`
   和 Control 签发服务
   执行代码变异测试。
@@ -333,8 +352,7 @@ npm run test:mutation
 公钥轮换模块为 81.11%、策略自动同步器为 81.70%、Control 签发服务为 82.77%、
 本次修改后独立复验的网关核心为 80.96%、用量解析器为 80.41%、单机计费协调器为
 81.68%、单机并发限制器为 100%、优雅排空状态机为 100%、Node HTTP 适配器为 100%、
-上游熔断器为 96.06%、协议层为
-77.88%。
+Node HTTP 资源边界为 100%、上游熔断器为 96.06%、协议层为 77.88%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。

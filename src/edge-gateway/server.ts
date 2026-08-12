@@ -32,6 +32,12 @@ import {
   InMemoryEdgeGatewayLifecycle,
 } from './lifecycle.js';
 import { convertEdgeNodeWebRequest } from './node-http-adapter.js';
+import {
+  applyEdgeNodeHttpLimits,
+  edgeNodeHttpServerOptions,
+  type EdgeNodeHttpLimits,
+  loadEdgeNodeHttpLimits,
+} from './node-http-limits.js';
 import { createEdgeSignatureVerifier } from './protocol.js';
 import { type EdgeRateLimiter, InMemoryEdgeRateLimiter } from './rate-limit.js';
 import { createNodeRedisEdgeRateLimiter } from './redis-rate-limit.js';
@@ -89,6 +95,7 @@ export interface EdgeServerConfiguration {
     cooldownMs: number;
     maximumEntries: number;
   };
+  http: EdgeNodeHttpLimits;
   shutdownGraceMs: number;
   billing: EdgeBillingConfiguration;
   operationsTokenFile?: string;
@@ -296,6 +303,7 @@ export function loadEdgeGatewayServerConfiguration(
       perSubjectLimit: perSubjectConcurrency,
     },
     circuitBreaker,
+    http: loadEdgeNodeHttpLimits(environment),
     shutdownGraceMs: optionalInteger(
       'OTTO_EDGE_SHUTDOWN_GRACE_MS', environment, 1_000, 300_000,
     ) ?? 30_000,
@@ -606,7 +614,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
       lifecycle,
     }),
   });
-  const server = createServer((request, response) => {
+  const server = createServer(edgeNodeHttpServerOptions(config.http), (request, response) => {
     let lifecycleLease: EdgeGatewayLifecycleLease | null = null;
     if (!isEdgeDrainExemptRequest(request.method, request.url)) {
       try {
@@ -676,6 +684,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
         }));
       });
   });
+  applyEdgeNodeHttpLimits(server, config.http);
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(config.port, config.host, resolve);

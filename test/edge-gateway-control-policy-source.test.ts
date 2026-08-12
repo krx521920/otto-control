@@ -491,6 +491,14 @@ describe('edge gateway server configuration', () => {
         cooldownMs: 30_000,
         maximumEntries: 10_000,
       },
+      http: {
+        headersTimeoutMs: 15_000,
+        requestTimeoutMs: 120_000,
+        keepAliveTimeoutMs: 5_000,
+        maximumHeaderBytes: 16_384,
+        maximumHeaders: 100,
+        maximumRequestsPerSocket: 1_000,
+      },
       shutdownGraceMs: 30_000,
     });
   });
@@ -513,6 +521,12 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD: '4',
       OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS: '45000',
       OTTO_EDGE_CIRCUIT_BREAKER_MAXIMUM_ENTRIES: '2000',
+      OTTO_EDGE_HTTP_HEADERS_TIMEOUT_MS: '12000',
+      OTTO_EDGE_HTTP_REQUEST_TIMEOUT_MS: '240000',
+      OTTO_EDGE_HTTP_KEEP_ALIVE_TIMEOUT_MS: '4000',
+      OTTO_EDGE_HTTP_MAX_HEADER_BYTES: '8192',
+      OTTO_EDGE_HTTP_MAX_HEADERS_COUNT: '80',
+      OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET: '500',
       OTTO_EDGE_SHUTDOWN_GRACE_MS: '45000',
     })).toMatchObject({
       rateLimit: {
@@ -531,6 +545,14 @@ describe('edge gateway server configuration', () => {
         failureThreshold: 4,
         cooldownMs: 45_000,
         maximumEntries: 2_000,
+      },
+      http: {
+        headersTimeoutMs: 12_000,
+        requestTimeoutMs: 240_000,
+        keepAliveTimeoutMs: 4_000,
+        maximumHeaderBytes: 8_192,
+        maximumHeaders: 80,
+        maximumRequestsPerSocket: 500,
       },
       shutdownGraceMs: 45_000,
     });
