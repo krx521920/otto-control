@@ -140,6 +140,7 @@ $env:OTTO_EDGE_HTTP_REQUEST_TIMEOUT_MS='120000'
 $env:OTTO_EDGE_HTTP_KEEP_ALIVE_TIMEOUT_MS='5000'
 $env:OTTO_EDGE_HTTP_MAX_HEADER_BYTES='16384'
 $env:OTTO_EDGE_HTTP_MAX_HEADERS_COUNT='100'
+$env:OTTO_EDGE_HTTP_MAX_CONNECTIONS='1024'
 $env:OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET='1000'
 $env:OTTO_EDGE_UPSTREAM_MAX_RESPONSE_BYTES='67108864'
 $env:OTTO_EDGE_UPSTREAM_MAX_RESPONSE_DURATION_MS='900000'
@@ -233,11 +234,14 @@ Node 网关为签名策略中的每个路由维护有界的进程内故障状态
 
 Node 网关不使用运行时的无限连接默认值。请求头必须在 15 秒内完成，整个请求体必须在
 120 秒内上传完成，空闲 keep-alive 连接保留 5 秒；总头部最多 16 KiB，应用最多接收
-100 个头部，同一 socket 最多处理 1000 个请求。超时连接由 Node 直接以 408 终止，超过
-总头部字节容量的请求以 431 拒绝，不会进入策略、计费或模型转发。上述六项分别通过
+100 个头部，进程最多同时接收 1024 个 socket，同一 socket 最多处理 1000 个请求。达到
+连接总数上限的新 socket 会在进入 HTTP、鉴权和业务并发层之前被拒绝。超时连接由 Node
+直接以 408 终止，超过
+总头部字节容量的请求以 431 拒绝，不会进入策略、计费或模型转发。上述七项分别通过
 `OTTO_EDGE_HTTP_HEADERS_TIMEOUT_MS`、`OTTO_EDGE_HTTP_REQUEST_TIMEOUT_MS`、
 `OTTO_EDGE_HTTP_KEEP_ALIVE_TIMEOUT_MS`、`OTTO_EDGE_HTTP_MAX_HEADER_BYTES`、
-`OTTO_EDGE_HTTP_MAX_HEADERS_COUNT` 和 `OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET` 调整；
+`OTTO_EDGE_HTTP_MAX_HEADERS_COUNT`、`OTTO_EDGE_HTTP_MAX_CONNECTIONS` 和
+`OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET` 调整；
 头部期限不得大于整请求期限，所有配置均有硬边界且在监听端口前应用。反向代理仍应
 配置自己的连接、头部和请求体限制，不能只依赖应用层边界。
 

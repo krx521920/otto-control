@@ -14,6 +14,7 @@ describe('edge gateway Node HTTP limits', () => {
       keepAliveTimeoutMs: 5_000,
       maximumHeaderBytes: 16_384,
       maximumHeaders: 100,
+      maximumConnections: 1_024,
       maximumRequestsPerSocket: 1_000,
     });
   });
@@ -25,6 +26,7 @@ describe('edge gateway Node HTTP limits', () => {
       OTTO_EDGE_HTTP_KEEP_ALIVE_TIMEOUT_MS: '3000',
       OTTO_EDGE_HTTP_MAX_HEADER_BYTES: '8192',
       OTTO_EDGE_HTTP_MAX_HEADERS_COUNT: '64',
+      OTTO_EDGE_HTTP_MAX_CONNECTIONS: '512',
       OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET: '250',
     })).toEqual({
       headersTimeoutMs: 10_000,
@@ -32,6 +34,7 @@ describe('edge gateway Node HTTP limits', () => {
       keepAliveTimeoutMs: 3_000,
       maximumHeaderBytes: 8_192,
       maximumHeaders: 64,
+      maximumConnections: 512,
       maximumRequestsPerSocket: 250,
     });
   });
@@ -49,6 +52,7 @@ describe('edge gateway Node HTTP limits', () => {
       OTTO_EDGE_HTTP_KEEP_ALIVE_TIMEOUT_MS: '500',
       OTTO_EDGE_HTTP_MAX_HEADER_BYTES: '4096',
       OTTO_EDGE_HTTP_MAX_HEADERS_COUNT: '1',
+      OTTO_EDGE_HTTP_MAX_CONNECTIONS: '1000000',
       OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET: '1',
     })).toEqual({
       headersTimeoutMs: 1_000,
@@ -56,6 +60,7 @@ describe('edge gateway Node HTTP limits', () => {
       keepAliveTimeoutMs: 500,
       maximumHeaderBytes: 4_096,
       maximumHeaders: 1,
+      maximumConnections: 1_000_000,
       maximumRequestsPerSocket: 1,
     });
   });
@@ -78,6 +83,8 @@ describe('edge gateway Node HTTP limits', () => {
     ['OTTO_EDGE_HTTP_MAX_HEADER_BYTES', '65537'],
     ['OTTO_EDGE_HTTP_MAX_HEADERS_COUNT', '0'],
     ['OTTO_EDGE_HTTP_MAX_HEADERS_COUNT', '2001'],
+    ['OTTO_EDGE_HTTP_MAX_CONNECTIONS', '0'],
+    ['OTTO_EDGE_HTTP_MAX_CONNECTIONS', '1000001'],
     ['OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET', '0'],
     ['OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET', '1000001'],
     ['OTTO_EDGE_HTTP_REQUEST_TIMEOUT_MS', '1.5'],
@@ -100,6 +107,7 @@ describe('edge gateway Node HTTP limits', () => {
       headersTimeout: 0,
       requestTimeout: 0,
       keepAliveTimeout: 0,
+      maxConnections: 0,
       maxHeadersCount: null,
       maxRequestsPerSocket: 0,
     };
@@ -109,12 +117,14 @@ describe('edge gateway Node HTTP limits', () => {
       keepAliveTimeoutMs: 3_000,
       maximumHeaderBytes: 8_192,
       maximumHeaders: 50,
+      maximumConnections: 60,
       maximumRequestsPerSocket: 75,
     });
     expect(server).toEqual({
       headersTimeout: 11_000,
       requestTimeout: 22_000,
       keepAliveTimeout: 3_000,
+      maxConnections: 60,
       maxHeadersCount: 50,
       maxRequestsPerSocket: 75,
     });
@@ -127,6 +137,7 @@ describe('edge gateway Node HTTP limits', () => {
       keepAliveTimeoutMs: 3_000,
       maximumHeaderBytes: 12_345,
       maximumHeaders: 50,
+      maximumConnections: 60,
       maximumRequestsPerSocket: 75,
     })).toEqual({ maxHeaderSize: 12_345 });
   });

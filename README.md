@@ -149,10 +149,10 @@ routing origin. It also holds a global and per-subject concurrency slot
 for the complete lifetime of every upstream response stream, preventing slow
 clients from exhausting sockets, memory, or provider credit while remaining
 inside a per-minute request limit. Explicit inbound header, request, keep-alive,
-header-count, and requests-per-socket bounds also reject slow or oversized HTTP
-connections before they become unbounded process resources. Repeated transport,
-retryable HTTP, and stream failures open a bounded per-route circuit; requests
-use a signed fallback route
+total-connection, header-count, and requests-per-socket bounds also reject slow
+or oversized HTTP connections before they become unbounded process resources.
+Repeated transport, retryable HTTP, and stream failures open a bounded per-route
+circuit; requests use a signed fallback route
 during cooldown, then exactly one half-open probe decides whether to restore the
 primary. Signed policy also bounds upstream stream-idle time, and downstream
 disconnects cancel provider work instead of continuing to consume tokens. A

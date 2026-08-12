@@ -6,6 +6,7 @@ export interface EdgeNodeHttpLimits {
   keepAliveTimeoutMs: number;
   maximumHeaderBytes: number;
   maximumHeaders: number;
+  maximumConnections: number;
   maximumRequestsPerSocket: number;
 }
 
@@ -14,6 +15,7 @@ type EdgeNodeHttpLimitServer = Pick<
   | 'headersTimeout'
   | 'requestTimeout'
   | 'keepAliveTimeout'
+  | 'maxConnections'
   | 'maxHeadersCount'
   | 'maxRequestsPerSocket'
 >;
@@ -60,6 +62,9 @@ export function loadEdgeNodeHttpLimits(
     maximumHeaders: integerEnvironment(
       'OTTO_EDGE_HTTP_MAX_HEADERS_COUNT', environment, 100, 1, 2_000,
     ),
+    maximumConnections: integerEnvironment(
+      'OTTO_EDGE_HTTP_MAX_CONNECTIONS', environment, 1_024, 1, 1_000_000,
+    ),
     maximumRequestsPerSocket: integerEnvironment(
       'OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET', environment, 1_000, 1, 1_000_000,
     ),
@@ -79,6 +84,7 @@ export function applyEdgeNodeHttpLimits(
   server.headersTimeout = limits.headersTimeoutMs;
   server.requestTimeout = limits.requestTimeoutMs;
   server.keepAliveTimeout = limits.keepAliveTimeoutMs;
+  server.maxConnections = limits.maximumConnections;
   server.maxHeadersCount = limits.maximumHeaders;
   server.maxRequestsPerSocket = limits.maximumRequestsPerSocket;
 }

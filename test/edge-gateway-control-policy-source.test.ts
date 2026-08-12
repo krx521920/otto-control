@@ -497,6 +497,7 @@ describe('edge gateway server configuration', () => {
         keepAliveTimeoutMs: 5_000,
         maximumHeaderBytes: 16_384,
         maximumHeaders: 100,
+        maximumConnections: 1_024,
         maximumRequestsPerSocket: 1_000,
       },
       upstreamResponse: {
@@ -530,6 +531,7 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_HTTP_KEEP_ALIVE_TIMEOUT_MS: '4000',
       OTTO_EDGE_HTTP_MAX_HEADER_BYTES: '8192',
       OTTO_EDGE_HTTP_MAX_HEADERS_COUNT: '80',
+      OTTO_EDGE_HTTP_MAX_CONNECTIONS: '768',
       OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET: '500',
       OTTO_EDGE_UPSTREAM_MAX_RESPONSE_BYTES: '16777216',
       OTTO_EDGE_UPSTREAM_MAX_RESPONSE_DURATION_MS: '300000',
@@ -558,6 +560,7 @@ describe('edge gateway server configuration', () => {
         keepAliveTimeoutMs: 4_000,
         maximumHeaderBytes: 8_192,
         maximumHeaders: 80,
+        maximumConnections: 768,
         maximumRequestsPerSocket: 500,
       },
       upstreamResponse: {
