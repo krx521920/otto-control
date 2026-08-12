@@ -132,6 +132,7 @@ $env:OTTO_EDGE_MAX_CONCURRENT_REQUESTS_PER_SUBJECT='8'
 $env:OTTO_EDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD='5'
 $env:OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS='30000'
 $env:OTTO_EDGE_CIRCUIT_BREAKER_MAXIMUM_ENTRIES='10000'
+$env:OTTO_EDGE_SHUTDOWN_GRACE_MS='30000'
 npm run dev:edge
 ```
 
@@ -217,6 +218,19 @@ Node 网关为签名策略中的每个路由维护有界的进程内故障状态
 不能把它宣传为全局线路摘除；多实例正式方案需要共享健康协调器或由云负载均衡/WAF
 承担全局故障检测。
 
+## 优雅下线与有界排空
+
+Node 网关收到 `SIGTERM` 或 `SIGINT` 后会先进入 `draining`：`GET /healthz` 继续表示
+进程存活，`GET /readyz` 立即返回 503，新的模型和写操作返回 503
+`EDGE_GATEWAY_DRAINING`，已经进入 HTTP 适配器的请求则继续完成。排空统计覆盖鉴权、
+错误响应、上游流和向下游写回的完整生命周期，不会在仅取得供应商响应头时提前退出。
+
+默认宽限期为 30 秒，可通过 `OTTO_EDGE_SHUTDOWN_GRACE_MS` 配置为 1 秒至 5 分钟。
+存量请求全部结束后关闭监听器并标记 `stopped`；超过宽限期则强制关闭剩余连接并设置
+非零退出码，让进程管理器能够识别非正常排空。第二次终止信号会立即强制断开连接。
+排空期间仍允许存活、就绪和只读运维状态检查；运维状态只披露状态、活跃请求数和排空
+开始时间，不包含租户、账号、提示词、回复、上游地址或密钥。
+
 ## 单机持久化计费与可信用量
 
 签名策略可为每条 OpenAI-compatible 路由配置 `metering.type=openai_tokens` 和
@@ -298,7 +312,7 @@ Edge Gateway 使用三层测试工具：
   签名变异、协议和认证头输入；
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
   `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、
-  `concurrency-limit.ts`、`usage-meter.ts`、
+  `concurrency-limit.ts`、`lifecycle.ts`、`usage-meter.ts`、
   `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`
   和 Control 签发服务
   执行代码变异测试。
@@ -314,8 +328,8 @@ npm run test:mutation
 提示文案的 `StringLiteral` 变异。最低门槛为 80%；最近一次全量正式基线总分为 81.29%，
 已覆盖代码为 81.51%。其中 Redis 分布式限流为 86.62%、限流与输入校验层为 84.38%、
 公钥轮换模块为 81.11%、策略自动同步器为 81.70%、Control 签发服务为 82.77%、
-本次修改后独立复验的网关核心为 80.65%、用量解析器为 80.41%、单机计费协调器为
-81.68%、单机并发限制器为 100%、上游熔断器为 96.06%、协议层为
+本次修改后独立复验的网关核心为 80.96%、用量解析器为 80.41%、单机计费协调器为
+81.68%、单机并发限制器为 100%、优雅排空状态机为 100%、上游熔断器为 96.06%、协议层为
 77.88%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速

@@ -9,6 +9,7 @@
     "src/edge-gateway/control-policy-source.ts",
     "src/edge-gateway/circuit-breaker.ts",
     "src/edge-gateway/concurrency-limit.ts",
+    "src/edge-gateway/lifecycle.ts",
     "src/edge-gateway/protocol.ts",
     "src/edge-gateway/rate-limit.ts",
     "src/edge-gateway/redis-rate-limit.ts",
@@ -24,6 +25,7 @@
     "test/edge-gateway-control-policy-source.test.ts",
     "test/edge-gateway-circuit-breaker.test.ts",
     "test/edge-gateway-concurrency-limit.test.ts",
+    "test/edge-gateway-lifecycle.test.ts",
     "test/edge-gateway-redis-rate-limit.test.ts",
     "test/edge-gateway-usage-meter.test.ts",
     "test/edge-gateway-protocol.test.ts"

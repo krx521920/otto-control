@@ -10,6 +10,7 @@ import type {
 } from '../src/edge-gateway/billing-coordinator.js';
 import { InMemoryEdgeConcurrencyLimiter } from '../src/edge-gateway/concurrency-limit.js';
 import { InMemoryEdgeRouteCircuitBreaker } from '../src/edge-gateway/circuit-breaker.js';
+import { InMemoryEdgeGatewayLifecycle } from '../src/edge-gateway/lifecycle.js';
 import {
   handleEdgeOperationsRequest,
   loadEdgeOperationsToken,
@@ -80,6 +81,9 @@ describe('Edge Gateway protected operations API', () => {
       now: () => 100,
     });
     circuitBreaker.acquire('private-route', 100)!.failed(100);
+    const lifecycle = new InMemoryEdgeGatewayLifecycle({ now: () => 200 });
+    const lifecycleLease = lifecycle.acquire();
+    lifecycle.beginDrain();
     const response = await handleEdgeOperationsRequest(
       request('/v1/operations/status'),
       {
@@ -87,6 +91,7 @@ describe('Edge Gateway protected operations API', () => {
         billingCoordinator: values.coordinator,
         concurrencyLimiter,
         circuitBreaker,
+        lifecycle,
       },
     );
     expect(response?.status).toBe(200);
@@ -119,6 +124,11 @@ describe('Edge Gateway protected operations API', () => {
         failureThreshold: 2,
         cooldownMs: 1_000,
       },
+      lifecycle: {
+        state: 'draining',
+        activeRequests: 1,
+        drainStartedAtMs: 200,
+      },
     });
     expect(body).not.toContain(TOKEN);
     expect(body).not.toContain('organization');
@@ -126,6 +136,7 @@ describe('Edge Gateway protected operations API', () => {
     expect(body).not.toContain('private-subject');
     expect(body).not.toContain('private-route');
     lease!.release();
+    lifecycleLease!.release();
   });
 
   it('rejects missing and incorrect credentials before reading billing state', async () => {

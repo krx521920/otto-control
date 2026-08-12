@@ -491,6 +491,7 @@ describe('edge gateway server configuration', () => {
         cooldownMs: 30_000,
         maximumEntries: 10_000,
       },
+      shutdownGraceMs: 30_000,
     });
   });
 
@@ -512,6 +513,7 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD: '4',
       OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS: '45000',
       OTTO_EDGE_CIRCUIT_BREAKER_MAXIMUM_ENTRIES: '2000',
+      OTTO_EDGE_SHUTDOWN_GRACE_MS: '45000',
     })).toMatchObject({
       rateLimit: {
         type: 'redis',
@@ -530,6 +532,7 @@ describe('edge gateway server configuration', () => {
         cooldownMs: 45_000,
         maximumEntries: 2_000,
       },
+      shutdownGraceMs: 45_000,
     });
   });
 
@@ -661,5 +664,10 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
       OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS: '999',
     })).toThrow('OTTO_EDGE_CIRCUIT_BREAKER_COOLDOWN_MS');
+    expect(() => loadEdgeGatewayServerConfiguration({
+      ...common,
+      OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
+      OTTO_EDGE_SHUTDOWN_GRACE_MS: '999',
+    })).toThrow('OTTO_EDGE_SHUTDOWN_GRACE_MS');
   });
 });

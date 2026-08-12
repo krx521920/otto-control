@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { EdgeBillingCoordinator } from '../src/edge-gateway/billing-coordinator.js';
+import { InMemoryEdgeGatewayLifecycle } from '../src/edge-gateway/lifecycle.js';
 import { createEdgeGatewayReadinessProbe } from '../src/edge-gateway/server.js';
 
 function billing(state: 'ready' | 'degraded' | 'unavailable'): EdgeBillingCoordinator {
@@ -66,5 +67,24 @@ describe('Edge Gateway readiness composition', () => {
       rateLimiter: { consume: vi.fn() },
     });
     await expect(probe.check()).resolves.toBe('ready');
+  });
+
+  it('fails readiness immediately during drain without contacting dependencies', async () => {
+    const lifecycle = new InMemoryEdgeGatewayLifecycle({ now: () => 100 });
+    lifecycle.beginDrain();
+    const policySource = { load: vi.fn(async () => ({})) };
+    const healthCheck = vi.fn(async () => undefined);
+    const billingCoordinator = billing('ready');
+    const probe = createEdgeGatewayReadinessProbe({
+      policySource,
+      rateLimiter: { consume: vi.fn(), healthCheck },
+      billingCoordinator,
+      lifecycle,
+    });
+
+    await expect(probe.check()).resolves.toBe('unavailable');
+    expect(policySource.load).not.toHaveBeenCalled();
+    expect(healthCheck).not.toHaveBeenCalled();
+    expect(billingCoordinator.operationalStatus).not.toHaveBeenCalled();
   });
 });

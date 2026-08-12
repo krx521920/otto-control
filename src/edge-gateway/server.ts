@@ -1,5 +1,10 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
@@ -22,6 +27,11 @@ import {
   type EdgeGatewayPolicySource,
   type EdgeGatewayReadinessProbe,
 } from './gateway.js';
+import {
+  type EdgeGatewayLifecycle,
+  type EdgeGatewayLifecycleLease,
+  InMemoryEdgeGatewayLifecycle,
+} from './lifecycle.js';
 import { createEdgeSignatureVerifier } from './protocol.js';
 import { type EdgeRateLimiter, InMemoryEdgeRateLimiter } from './rate-limit.js';
 import { createNodeRedisEdgeRateLimiter } from './redis-rate-limit.js';
@@ -79,6 +89,7 @@ export interface EdgeServerConfiguration {
     cooldownMs: number;
     maximumEntries: number;
   };
+  shutdownGraceMs: number;
   billing: EdgeBillingConfiguration;
   operationsTokenFile?: string;
 }
@@ -285,6 +296,9 @@ export function loadEdgeGatewayServerConfiguration(
       perSubjectLimit: perSubjectConcurrency,
     },
     circuitBreaker,
+    shutdownGraceMs: optionalInteger(
+      'OTTO_EDGE_SHUTDOWN_GRACE_MS', environment, 1_000, 300_000,
+    ) ?? 30_000,
     billing: billingConfiguration(environment, Boolean(controlBaseUrl)),
     ...(environment.OTTO_EDGE_OPERATIONS_TOKEN_FILE?.trim()
       ? { operationsTokenFile: environment.OTTO_EDGE_OPERATIONS_TOKEN_FILE.trim() }
@@ -361,10 +375,12 @@ export function createEdgeGatewayReadinessProbe(input: {
   policySource: EdgeGatewayPolicySource;
   rateLimiter: EdgeRateLimiter;
   billingCoordinator?: EdgeBillingCoordinator;
+  lifecycle?: EdgeGatewayLifecycle;
 }): EdgeGatewayReadinessProbe {
   return {
     async check() {
       try {
+        if (input.lifecycle && !input.lifecycle.isAccepting()) return 'unavailable';
         await input.policySource.load();
         await input.rateLimiter.healthCheck?.();
       } catch {
@@ -416,6 +432,7 @@ export async function handleEdgeOperationsRequest(
     billingCoordinator?: EdgeBillingCoordinator;
     concurrencyLimiter?: EdgeConcurrencyLimiter;
     circuitBreaker?: EdgeRouteCircuitBreaker;
+    lifecycle?: EdgeGatewayLifecycle;
   },
 ): Promise<Response | null> {
   const url = new URL(request.url);
@@ -434,6 +451,7 @@ export async function handleEdgeOperationsRequest(
         billing: input.billingCoordinator?.operationalStatus?.() ?? null,
         concurrency: input.concurrencyLimiter?.snapshot() ?? null,
         circuits: input.circuitBreaker?.snapshot() ?? null,
+        lifecycle: input.lifecycle?.snapshot() ?? null,
       });
     } catch {
       return operationsResponse(503, {
@@ -505,6 +523,40 @@ async function writeResponse(response: Response, target: ServerResponse): Promis
   });
 }
 
+export function isEdgeDrainExemptRequest(
+  method: string | undefined,
+  requestUrl: string | undefined,
+): boolean {
+  if (method !== 'GET') return false;
+  const path = (requestUrl ?? '').split('?', 1)[0];
+  return path === '/healthz'
+    || path === '/readyz'
+    || path === '/v1/operations/status';
+}
+
+export async function drainEdgeGatewayServer(input: {
+  server: Pick<Server, 'close' | 'closeAllConnections'>;
+  lifecycle: EdgeGatewayLifecycle;
+  timeoutMs: number;
+}): Promise<boolean> {
+  input.lifecycle.beginDrain();
+  const serverClosed = new Promise<void>((resolve, reject) => {
+    try {
+      input.server.close((error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+  const drained = await input.lifecycle.waitForIdle(input.timeoutMs);
+  if (!drained) input.server.closeAllConnections();
+  await serverClosed;
+  input.lifecycle.markStopped();
+  return drained;
+}
+
 export async function startEdgeGatewayServer(): Promise<void> {
   const config = loadEdgeGatewayServerConfiguration();
   const publicKeys = JSON.parse(await readFile(config.publicKeysFile, 'utf8')) as unknown;
@@ -555,6 +607,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
     config.concurrency.perSubjectLimit,
   );
   const circuitBreaker = new InMemoryEdgeRouteCircuitBreaker(config.circuitBreaker);
+  const lifecycle = new InMemoryEdgeGatewayLifecycle();
   const gateway = createOttoEdgeGateway({
     policySource: configuredPolicySource,
     verifier,
@@ -567,14 +620,35 @@ export async function startEdgeGatewayServer(): Promise<void> {
     rateLimiter,
     concurrencyLimiter,
     circuitBreaker,
+    lifecycle,
     billingCoordinator,
     readinessProbe: createEdgeGatewayReadinessProbe({
       policySource: configuredPolicySource,
       rateLimiter,
       billingCoordinator,
+      lifecycle,
     }),
   });
   const server = createServer((request, response) => {
+    let lifecycleLease: EdgeGatewayLifecycleLease | null = null;
+    if (!isEdgeDrainExemptRequest(request.method, request.url)) {
+      try {
+        lifecycleLease = lifecycle.acquire();
+      } catch {
+        lifecycleLease = null;
+      }
+      if (!lifecycleLease) {
+        response.writeHead(503, {
+          'cache-control': 'no-store',
+          'content-type': 'application/json; charset=utf-8',
+          'retry-after': '1',
+        });
+        response.end(JSON.stringify({
+          error: { code: 'EDGE_GATEWAY_DRAINING', message: 'gateway is draining' },
+        }));
+        return;
+      }
+    }
     const controller = new AbortController();
     const abort = () => controller.abort(
       new DOMException('downstream connection closed', 'AbortError'),
@@ -583,6 +657,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
       request.removeListener('aborted', abort);
       response.removeListener('close', handleClose);
       response.removeListener('finish', cleanup);
+      lifecycleLease?.release();
     };
     const handleClose = () => {
       if (!response.writableFinished) abort();
@@ -599,6 +674,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
           billingCoordinator,
           concurrencyLimiter,
           circuitBreaker,
+          lifecycle,
         })
         .then((operationsResponseResult) => operationsResponseResult ?? gateway.fetch(convertedRequest))
       : gateway.fetch(convertedRequest);
@@ -623,6 +699,37 @@ export async function startEdgeGatewayServer(): Promise<void> {
     server.listen(config.port, config.host, resolve);
   });
   process.stdout.write(`otto-edge-gateway listening on ${config.host}:${config.port}\n`);
+  let shutdown: Promise<boolean> | null = null;
+  let forcedBySignal = false;
+  const handleShutdown = () => {
+    if (shutdown) {
+      forcedBySignal = true;
+      server.closeAllConnections();
+      return;
+    }
+    shutdown = drainEdgeGatewayServer({
+      server,
+      lifecycle,
+      timeoutMs: config.shutdownGraceMs,
+    });
+    void shutdown
+      .then((drained) => {
+        const graceful = drained && !forcedBySignal;
+        process.stdout.write(`otto-edge-gateway ${graceful ? 'drained' : 'forced'} shutdown\n`);
+        if (!graceful) process.exitCode = 1;
+      })
+      .catch(() => {
+        lifecycle.markStopped();
+        server.closeAllConnections();
+        process.exitCode = 1;
+      });
+  };
+  process.once('SIGTERM', handleShutdown);
+  process.once('SIGINT', handleShutdown);
+  server.once('close', () => {
+    process.removeListener('SIGTERM', handleShutdown);
+    process.removeListener('SIGINT', handleShutdown);
+  });
 }
 
 const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';

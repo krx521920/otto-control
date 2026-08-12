@@ -164,6 +164,9 @@ hold. Pending settlement state is kept in a hash-chained, fsynced local journal
 and replayed after restart. Liveness and readiness are separate, and an optional
 file-backed operations token protects aggregate billing status and idempotent
 queue retry endpoints without allowing receipt, sequence, or amount mutation.
+SIGTERM and SIGINT initiate bounded graceful draining: readiness fails first,
+new model work is rejected, and active response streams receive a configurable
+completion window before remaining connections are forcibly closed.
 Multi-instance deployments require a shared ordered
 aggregator instead of sharing this file over NFS/SMB. See
 [`docs/otto-edge-gateway.zh-CN.md`](docs/otto-edge-gateway.zh-CN.md) for

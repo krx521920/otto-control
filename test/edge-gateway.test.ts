@@ -25,6 +25,10 @@ import {
   type EdgeGatewayReadinessProbe,
 } from '../src/edge-gateway/gateway.js';
 import {
+  type EdgeGatewayLifecycle,
+  InMemoryEdgeGatewayLifecycle,
+} from '../src/edge-gateway/lifecycle.js';
+import {
   createEdgeSignatureVerifier,
   encodeEdgeAccessTokenEnvelope,
 } from '../src/edge-gateway/protocol.js';
@@ -71,6 +75,7 @@ async function fixture(overrides: {
   billingCoordinator?: EdgeBillingCoordinator;
   concurrencyLimiter?: EdgeConcurrencyLimiter;
   circuitBreaker?: EdgeRouteCircuitBreaker;
+  lifecycle?: EdgeGatewayLifecycle;
   readinessProbe?: EdgeGatewayReadinessProbe;
   now?: () => number;
 } = {}) {
@@ -108,6 +113,7 @@ async function fixture(overrides: {
     rateLimiter: overrides.rateLimiter ?? new InMemoryEdgeRateLimiter(),
     concurrencyLimiter: overrides.concurrencyLimiter,
     circuitBreaker: overrides.circuitBreaker,
+    lifecycle: overrides.lifecycle,
     outcomeSink: { record: async (outcome) => { outcomes.push(outcome); } },
     billingCoordinator: overrides.billingCoordinator,
     readinessProbe: overrides.readinessProbe,
@@ -192,6 +198,63 @@ describe('otto edge gateway', () => {
     await expect(defaultResponse.json()).resolves.toEqual({
       status: 'ready', service: 'otto-edge-gateway',
     });
+  });
+
+  it('keeps liveness available while rejecting readiness and new work during drain', async () => {
+    const lifecycle = new InMemoryEdgeGatewayLifecycle({ now: () => NOW });
+    const readinessCheck = vi.fn(async () => 'ready' as const);
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const values = await fixture({
+      fetch: fetchMock,
+      lifecycle,
+      readinessProbe: { check: readinessCheck },
+    });
+    lifecycle.beginDrain();
+
+    const health = await values.gateway.fetch(new Request('https://edge.otto.test/healthz'));
+    expect(health.status).toBe(200);
+    const readiness = await values.gateway.fetch(new Request('https://edge.otto.test/readyz'));
+    expect(readiness.status).toBe(503);
+    await expect(readiness.json()).resolves.toEqual({
+      status: 'unavailable', service: 'otto-edge-gateway',
+    });
+    expect(readinessCheck).not.toHaveBeenCalled();
+
+    const rejected = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(rejected.status).toBe(503);
+    expect(rejected.headers.get('retry-after')).toBe('1');
+    expect(rejected.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_GATEWAY_DRAINING' },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('fails readiness and business admission closed when lifecycle state is unavailable', async () => {
+    const lifecycle: EdgeGatewayLifecycle = {
+      isAccepting: () => { throw new Error('private lifecycle failure'); },
+      acquire: () => { throw new Error('private lifecycle failure'); },
+      beginDrain: () => { throw new Error('private lifecycle failure'); },
+      waitForIdle: async () => { throw new Error('private lifecycle failure'); },
+      markStopped: () => { throw new Error('private lifecycle failure'); },
+      snapshot: () => { throw new Error('private lifecycle failure'); },
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const values = await fixture({ lifecycle, fetch: fetchMock });
+
+    const readiness = await values.gateway.fetch(new Request('https://edge.otto.test/readyz'));
+    expect(readiness.status).toBe(503);
+    expect(await readiness.text()).not.toContain('private lifecycle failure');
+    const rejected = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(rejected.status).toBe(503);
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_LIFECYCLE_UNAVAILABLE' },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('verifies Control signatures, pins the upstream route, and streams without content logging', async () => {

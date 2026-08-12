@@ -23,6 +23,7 @@ import {
   type EdgeRouteCircuitBreaker,
   InMemoryEdgeRouteCircuitBreaker,
 } from './circuit-breaker.js';
+import type { EdgeGatewayLifecycle } from './lifecycle.js';
 import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
 import { OpenAiUsageMeter } from './usage-meter.js';
 import {
@@ -74,6 +75,7 @@ export interface OttoEdgeGatewayOptions {
   rateLimiter: EdgeRateLimiter;
   concurrencyLimiter?: EdgeConcurrencyLimiter;
   circuitBreaker?: EdgeRouteCircuitBreaker;
+  lifecycle?: EdgeGatewayLifecycle;
   outcomeSink?: EdgeGatewayOutcomeSink;
   billingCoordinator?: EdgeBillingCoordinator;
   readinessProbe?: EdgeGatewayReadinessProbe;
@@ -533,7 +535,9 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
       if (request.method === 'GET' && url.pathname === '/readyz') {
         let state: EdgeGatewayReadinessState = 'ready';
         try {
-          state = await options.readinessProbe?.check() ?? 'ready';
+          state = options.lifecycle && !options.lifecycle.isAccepting()
+            ? 'unavailable'
+            : await options.readinessProbe?.check() ?? 'ready';
         } catch {
           state = 'unavailable';
         }
@@ -551,6 +555,21 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         return jsonResponse(405, 'EDGE_METHOD_NOT_ALLOWED', 'method not allowed', {
           allow: 'POST',
         });
+      }
+      try {
+        if (options.lifecycle && !options.lifecycle.isAccepting()) {
+          return jsonResponse(503, 'EDGE_GATEWAY_DRAINING', 'gateway is draining', {
+            'retry-after': '1',
+            'x-otto-edge-request-id': id,
+          });
+        }
+      } catch {
+        return jsonResponse(
+          503,
+          'EDGE_LIFECYCLE_UNAVAILABLE',
+          'gateway lifecycle admission is unavailable',
+          { 'x-otto-edge-request-id': id },
+        );
       }
 
       let authorized: Awaited<ReturnType<typeof authorize>>;
