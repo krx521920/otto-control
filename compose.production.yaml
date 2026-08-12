@@ -114,6 +114,9 @@ x-federation-common: &federation-common
   secrets:
     - federation_admin_token
     - federation_metrics_token
+    - artifact_s3_access_key_id
+    - artifact_s3_secret_access_key
+    - artifact_s3_session_token
     - postgres_password
     - postgres_tls_ca
   read_only: true

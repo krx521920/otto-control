@@ -14,6 +14,7 @@ import type { FederationConfig } from '../src/federation-config.js';
 import { MemoryFederationStore } from '../src/modules/federation/memory-store.js';
 import { FederationClient } from '../src/modules/federation/client.js';
 import { FederationService } from '../src/modules/federation/service.js';
+import type { FederationAttachmentObjectStore } from '../src/modules/federation/attachment-object-store.js';
 
 const ADMIN_TOKEN = 'test-federation-admin-token-at-least-32-bytes';
 const METRICS_TOKEN = 'test-federation-metrics-token-at-least-32-bytes';
@@ -35,6 +36,8 @@ const config: Readonly<FederationConfig> = {
   claimTtlMs: 60_000,
   cleanupIntervalMs: 60_000,
   deliveredRetentionMs: 7 * 24 * 60 * 60_000,
+  maximumAttachmentBytes: 1024 * 1024 * 1024,
+  attachmentStorage: null,
 };
 
 function signer(): LocalEd25519Signer {
@@ -42,6 +45,44 @@ function signer(): LocalEd25519Signer {
   return new LocalEd25519Signer(
     keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
   );
+}
+
+class MemoryAttachmentObjectStore implements FederationAttachmentObjectStore {
+  readonly objects = new Map<string, { sizeBytes: number; checksumSha256: string }>();
+  readonly removed: string[] = [];
+
+  objectKey(attachmentId: string): string {
+    return `federation/${attachmentId}`;
+  }
+
+  async createUpload(input: { objectKey: string; expiresAt: Date }) {
+    return {
+      method: 'PUT' as const,
+      url: `https://objects.otto.test/upload/${encodeURIComponent(input.objectKey)}`,
+      headers: { 'content-type': 'application/otto-e2ee-attachment' },
+      expiresAt: input.expiresAt.toISOString(),
+    };
+  }
+
+  async inspect(objectKey: string) {
+    const object = this.objects.get(objectKey);
+    if (!object) throw new Error('object is missing');
+    return { objectKey, ...object };
+  }
+
+  async createDownload(input: { objectKey: string; expiresAt: Date }) {
+    return {
+      method: 'GET' as const,
+      url: `https://objects.otto.test/download/${encodeURIComponent(input.objectKey)}`,
+      headers: {},
+      expiresAt: input.expiresAt.toISOString(),
+    };
+  }
+
+  async remove(objectKey: string): Promise<void> {
+    this.objects.delete(objectKey);
+    this.removed.push(objectKey);
+  }
 }
 
 async function signedRequest(
@@ -109,6 +150,7 @@ describe('Otto federation gateway', () => {
   let store: MemoryFederationStore;
   let deploymentA: LocalEd25519Signer;
   let deploymentB: LocalEd25519Signer;
+  let attachmentStore: MemoryAttachmentObjectStore;
   let now: number;
 
   beforeEach(async () => {
@@ -116,7 +158,13 @@ describe('Otto federation gateway', () => {
     store = new MemoryFederationStore();
     deploymentA = signer();
     deploymentB = signer();
-    service = new FederationService({ store, now: () => now, maximumClaimBytes: 30 });
+    attachmentStore = new MemoryAttachmentObjectStore();
+    service = new FederationService({
+      store,
+      attachmentStore,
+      now: () => now,
+      maximumClaimBytes: 30,
+    });
     app = await buildFederationApp({ config, service, logger: false });
     for (const [id, displayName, origin, key] of [
       ['deployment_a', 'Tenant A', 'https://a.private.test', deploymentA],
@@ -126,7 +174,12 @@ describe('Otto federation gateway', () => {
         method: 'POST',
         url: '/v1/admin/federation/deployments',
         headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
-        payload: { id, displayName, origin, capabilities: ['federation.v1', 'chat.e2ee', 'a2a.e2ee'] },
+        payload: {
+          id,
+          displayName,
+          origin,
+          capabilities: ['federation.v1', 'chat.e2ee', 'a2a.e2ee', 'attachment.e2ee'],
+        },
       });
       expect(registered.statusCode).toBe(201);
       const registeredKey = await app.inject({
@@ -188,6 +241,79 @@ describe('Otto federation gateway', () => {
       payload: await signedRequest(deploymentB, 'deployment_b', now, { limit: 20 }),
     });
     expect(emptyInbox.json()).toEqual({ messages: [] });
+  });
+
+  it('relays only verified ciphertext attachments to the signed recipient deployment', async () => {
+    const attachmentId = 'fattachment_2026_secure_001';
+    const ciphertextSha256 = 'a'.repeat(64);
+    const uploadRequest = await signedRequest(deploymentA, 'deployment_a', now, {
+      recipientDeploymentId: 'deployment_b',
+      attachmentId,
+      ciphertextBytes: 4096,
+      ciphertextSha256,
+      attachmentExpiresAt: new Date(now + 24 * 60 * 60_000).toISOString(),
+    });
+    const initialized = await app.inject({
+      method: 'POST',
+      url: '/v1/federation/attachments/uploads',
+      payload: uploadRequest,
+    });
+    expect(initialized.statusCode).toBe(201);
+    expect(initialized.json()).toMatchObject({
+      duplicate: false,
+      attachment: {
+        id: attachmentId,
+        senderDeploymentId: 'deployment_a',
+        recipientDeploymentId: 'deployment_b',
+        status: 'pending',
+      },
+      upload: { method: 'PUT' },
+    });
+    attachmentStore.objects.set(`federation/${attachmentId}`, {
+      sizeBytes: 4096,
+      checksumSha256: ciphertextSha256,
+    });
+    const completed = await app.inject({
+      method: 'POST',
+      url: '/v1/federation/attachments/complete',
+      payload: await signedRequest(deploymentA, 'deployment_a', now, { attachmentId }),
+    });
+    expect(completed.statusCode).toBe(200);
+    expect(completed.json()).toMatchObject({ attachment: { status: 'ready' } });
+
+    const message = await signedEnvelope({
+      deploymentSigner: deploymentA,
+      senderDeploymentId: 'deployment_a',
+      recipientDeploymentId: 'deployment_b',
+      now,
+      routing: { attachmentIds: [attachmentId] },
+    });
+    expect((await app.inject({
+      method: 'POST',
+      url: '/v1/federation/envelopes',
+      payload: message,
+    })).statusCode).toBe(202);
+
+    const denied = await app.inject({
+      method: 'POST',
+      url: '/v1/federation/attachments/download',
+      payload: await signedRequest(deploymentA, 'deployment_a', now, { attachmentId }),
+    });
+    expect(denied.statusCode).toBe(404);
+    const allowed = await app.inject({
+      method: 'POST',
+      url: '/v1/federation/attachments/download',
+      payload: await signedRequest(deploymentB, 'deployment_b', now, { attachmentId }),
+    });
+    expect(allowed.statusCode).toBe(200);
+    expect(allowed.json()).toMatchObject({
+      attachment: { id: attachmentId, ciphertextSha256 },
+      download: { method: 'GET' },
+    });
+
+    now += 24 * 60 * 60_000 + 1;
+    await service.expire();
+    expect(attachmentStore.removed).toContain(`federation/${attachmentId}`);
   });
 
   it('fails closed for tampering, replay, wrong audience, and deployment blocks', async () => {
@@ -581,7 +707,12 @@ describe('Otto federation gateway', () => {
       now: () => now,
       allowInsecureLoopback: true,
     });
-    expect(sender.capabilities).toEqual(['federation.v1', 'chat.e2ee', 'a2a.e2ee']);
+    expect(sender.capabilities).toEqual([
+      'federation.v1',
+      'chat.e2ee',
+      'a2a.e2ee',
+      'attachment.e2ee',
+    ]);
     const prepared = await sender.createSignedEnvelope({
       recipientDeploymentId: 'deployment_b',
       type: 'chat.message',

@@ -15,3 +15,19 @@
     lb_try_interval 100ms
   }
 }
+
+:8081 {
+  @federation_admin path /v1/admin/federation/*
+  respond @federation_admin 404
+
+  reverse_proxy federation-a:7790 federation-b:7790 federation-c:7790 {
+    lb_policy least_conn
+    health_uri /health/ready
+    health_interval 1s
+    health_timeout 1s
+    fail_duration 2s
+    max_fails 1
+    lb_try_duration 5s
+    lb_try_interval 100ms
+  }
+}

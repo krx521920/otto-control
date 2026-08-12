@@ -466,4 +466,20 @@ describe('production deployment assets', () => {
     expect(ciCaddy).toContain(':8080');
     expect(repositoryFile('compose.ci.yaml')).toContain('127.0.0.1:18080:8080');
   });
+
+  it('drills every Federation replica and retains sanitized CI evidence', () => {
+    const drill = repositoryFile('deploy/drill-federation-failover.sh');
+    const workflow = repositoryFile('.github/workflows/ci.yml');
+    const smoke = repositoryFile('scripts/smoke-federation.mjs');
+    expect(drill).toContain('--confirm=FAILOVER_OTTO_FEDERATION_REPLICAS');
+    expect(drill).toContain('federation-a federation-b federation-c');
+    expect(drill).toContain('public Federation edge became unavailable');
+    expect(drill).toContain('replicas_tested=federation-a,federation-b,federation-c');
+    expect(repositoryFile('deploy/Caddyfile.ci')).toContain(':8081');
+    expect(repositoryFile('compose.ci.yaml')).toContain('127.0.0.1:18081:8081');
+    expect(smoke).toContain("sharedStore: 'postgresql'");
+    expect(smoke).toContain('crossReplicaAcknowledgement: true');
+    expect(workflow).toContain('federation-three-replica.json');
+    expect(workflow).toContain('actions/upload-artifact@');
+  });
 });

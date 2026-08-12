@@ -67,12 +67,38 @@ describe('operator console assets', () => {
     expect(response.body).toContain('/v1/admin/audit/anchors?');
     expect(response.body).toContain('/v1/admin/audit/anchors/poll');
     expect(response.body).toContain('/v1/admin/audit-witness/receipts?');
+    expect(response.body).toContain('/v1/admin/roles');
+    expect(response.body).toContain('/v1/admin/accounts');
+    expect(response.body).toContain('/v1/admin-auth/enroll/confirm');
+    expect(response.body).toContain('/v1/admin-auth/bootstrap');
+    expect(response.body).toContain('/v1/admin-auth/bootstrap/status');
+    expect(response.body).toContain("sessionStorage.setItem(sessionKey, result.token)");
+    expect(response.body).toContain('currentRecoveryCodes');
+    expect(response.body).toContain('navigator.clipboard.writeText');
     expect(response.body).toContain("'x-otto-approval-id': approval.id");
     expect(response.body).toContain("operation: 'license.revoke'");
     expect(response.body).toContain("hasPermission('approval.decide')");
     expect(response.body).toContain('approval.request || {}');
     expect(response.body).toContain('URL.createObjectURL(blob)');
     expect(response.body).toContain('otto-license-');
+  });
+
+  it('renders RBAC account management and one-time MFA enrollment without exposing tokens', async () => {
+    const [page, script] = await Promise.all([
+      app.inject({ method: 'GET', url: '/admin' }),
+      app.inject({ method: 'GET', url: '/admin/assets/app.js' }),
+    ]);
+    expect(page.body).toContain('id="admin-identity-center"');
+    expect(page.body).toContain('id="admin-accounts-body"');
+    expect(page.body).toContain('id="create-admin-dialog"');
+    expect(page.body).toContain('id="activation-dialog"');
+    expect(page.body).toContain('id="recovery-codes-dialog"');
+    expect(page.body).not.toContain('CONTROL_ADMIN_TOKEN');
+    expect(script.body).toContain("hasPermission('identity.manage')");
+    expect(script.body).toContain("method: 'PUT', body: JSON.stringify({ roleIds })");
+    expect(script.body).toContain("account.id === state.principal.accountId");
+    expect(script.body).toContain("downloadText('otto-control-admin-enrollment-");
+    expect(script.body).not.toContain('innerHTML');
   });
 
   it('maps every approved high-risk operation to RBAC metadata and a real executor', async () => {

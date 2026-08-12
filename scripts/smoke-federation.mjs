@@ -14,6 +14,8 @@ const acknowledgeUrl = process.env.FEDERATION_SMOKE_ACK_URL || 'http://federatio
 const tokenFile = process.env.FEDERATION_ADMIN_TOKEN_FILE || '/run/secrets/federation_admin_token';
 const adminToken = readFileSync(tokenFile, 'utf8').trim();
 if (adminToken.length < 32) throw new Error('federation smoke test requires an administrator token');
+const startedAt = new Date().toISOString();
+const sourceCommit = process.env.FEDERATION_SMOKE_SOURCE_COMMIT?.trim() || null;
 
 function localSigner() {
   const { privateKey } = generateKeyPairSync('ed25519');
@@ -105,6 +107,11 @@ if (sent.some((result) => !result.accepted || result.duplicate) || !duplicate.du
 }
 
 const claimUrls = [relayUrl, claimUrl, acknowledgeUrl];
+await Promise.all(claimUrls.map((url) => jsonRequest(
+  `${url}/health/ready`,
+  { method: 'GET' },
+  200,
+)));
 const claims = await Promise.all(claimUrls.map(async (url) => jsonRequest(
   `${url}/v1/federation/inbox/claim`,
   {
@@ -148,4 +155,22 @@ if ((status.queue?.delivered || 0) < expectedIds.size) {
   throw new Error('federation acknowledgements were not committed across replicas');
 }
 
-process.stdout.write(`Federation three-replica smoke test passed for ${senderId} -> ${recipientId}.\n`);
+process.stdout.write(`${JSON.stringify({
+  version: 1,
+  result: 'passed',
+  startedAt,
+  completedAt: new Date().toISOString(),
+  sourceCommit,
+  topology: {
+    replicas: ['federation-a', 'federation-b', 'federation-c'],
+    sharedStore: 'postgresql',
+  },
+  evidence: {
+    allReplicasReady: true,
+    signedCiphertextRelay: true,
+    concurrentInboxLease: true,
+    crossReplicaAcknowledgement: true,
+    idempotentDuplicate: true,
+    messagesRelayed: expectedIds.size,
+  },
+}, null, 2)}\n`);

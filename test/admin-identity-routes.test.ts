@@ -118,6 +118,13 @@ describe('administrator identity HTTP routes', () => {
     });
     apps.push(app);
 
+    const bootstrapRequired = await app.inject({
+      method: 'GET',
+      url: '/v1/admin-auth/bootstrap/status',
+    });
+    expect(bootstrapRequired.statusCode).toBe(200);
+    expect(bootstrapRequired.json()).toEqual({ required: true });
+
     const bootstrap = await app.inject({
       method: 'POST',
       url: '/v1/admin-auth/bootstrap',
@@ -125,6 +132,12 @@ describe('administrator identity HTTP routes', () => {
       payload: { username: 'root.admin', displayName: 'Root Admin', password: PASSWORD },
     });
     expect(bootstrap.statusCode).toBe(201);
+    const bootstrapComplete = await app.inject({
+      method: 'GET',
+      url: '/v1/admin-auth/bootstrap/status',
+    });
+    expect(bootstrapComplete.statusCode).toBe(200);
+    expect(bootstrapComplete.json()).toEqual({ required: false });
     const enrollment = bootstrap.json().enrollment as {
       account: { id: string };
       enrollmentToken: string;

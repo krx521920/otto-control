@@ -128,6 +128,11 @@ acceptance are documented in
 Production CI starts all three Federation instances and runs
 `scripts/smoke-federation.mjs` across them to prove signed ciphertext relay,
 cross-instance inbox leasing, signature verification, idempotency, and acknowledgement.
+Large attachments use a separate S3/MinIO relay: Otto encrypts files locally,
+the gateway verifies only ciphertext length and SHA-256, and the recipient gets
+a deployment-signed short-lived download URL. Production bootstrap reuses the
+configured artifact-store credentials with an isolated attachment prefix; a
+dedicated least-privilege IAM identity is recommended for larger deployments.
 
 ## Managed release artifact distribution
 
