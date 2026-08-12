@@ -25,6 +25,10 @@ import {
 } from './circuit-breaker.js';
 import type { EdgeGatewayLifecycle } from './lifecycle.js';
 import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
+import {
+  type EdgeRequestLimits,
+  normalizeEdgeRequestLimits,
+} from './request-limits.js';
 import { OpenAiUsageMeter } from './usage-meter.js';
 import {
   type EdgeUpstreamResponseLimits,
@@ -87,6 +91,7 @@ export interface OttoEdgeGatewayOptions {
   fetch?: typeof fetch;
   now?: () => number;
   requestId?: () => string;
+  requestLimits?: EdgeRequestLimits;
   responseLimits?: EdgeUpstreamResponseLimits;
   upstreamOriginPolicy: EdgeUpstreamOriginPolicy;
 }
@@ -497,6 +502,7 @@ async function authorize(
   request: Request,
   endpoint: EdgeGatewayEndpoint,
   options: OttoEdgeGatewayOptions,
+  requestLimits: EdgeRequestLimits,
   now: number,
 ): Promise<AuthorizedRequest & { remaining: number }> {
   const rawPolicy = await options.policySource.load();
@@ -537,7 +543,10 @@ async function authorize(
       String(rate.retryAfterSeconds),
     );
   }
-  const body = requestObject(await readRequestBody(request, policy.limits.maxRequestBytes));
+  const body = requestObject(await readRequestBody(
+    request,
+    Math.min(policy.limits.maxRequestBytes, requestLimits.maximumBytes),
+  ));
   const publicModel = requestedModel(body);
   if (!token.allowedModels.includes(publicModel)) {
     throw new EdgeGatewayProtocolError(403, 'EDGE_MODEL_FORBIDDEN', 'model is not allowed');
@@ -584,6 +593,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
   const circuitBreaker = options.circuitBreaker
     ?? new InMemoryEdgeRouteCircuitBreaker({ now });
   const requestId = options.requestId ?? (() => crypto.randomUUID());
+  const requestLimits = normalizeEdgeRequestLimits(options.requestLimits);
   const responseLimits = normalizeEdgeUpstreamResponseLimits(options.responseLimits);
 
   return {
@@ -642,7 +652,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
 
       let authorized: Awaited<ReturnType<typeof authorize>>;
       try {
-        authorized = await authorize(request, endpoint, options, startedAt);
+        authorized = await authorize(request, endpoint, options, requestLimits, startedAt);
       } catch (error) {
         if (error instanceof EdgeRateLimitUnavailableError) {
           return jsonResponse(

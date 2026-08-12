@@ -43,6 +43,7 @@ import {
   type EdgeRateLimiter,
   InMemoryEdgeRateLimiter,
 } from '../src/edge-gateway/rate-limit.js';
+import type { EdgeRequestLimits } from '../src/edge-gateway/request-limits.js';
 import { EdgeGatewayControlService } from '../src/modules/edge-gateway/service.js';
 
 const NOW = Date.parse('2026-08-11T08:00:00.000Z');
@@ -84,6 +85,7 @@ async function fixture(overrides: {
   circuitBreaker?: EdgeRouteCircuitBreaker;
   lifecycle?: EdgeGatewayLifecycle;
   readinessProbe?: EdgeGatewayReadinessProbe;
+  requestLimits?: EdgeRequestLimits;
   responseLimits?: { maximumBytes: number; maximumDurationMs: number };
   allowedUpstreamOrigins?: readonly string[];
   upstreamOriginPolicy?: EdgeUpstreamOriginPolicy;
@@ -134,6 +136,7 @@ async function fixture(overrides: {
     outcomeSink: { record: async (outcome) => { outcomes.push(outcome); } },
     billingCoordinator: overrides.billingCoordinator,
     readinessProbe: overrides.readinessProbe,
+    requestLimits: overrides.requestLimits,
     responseLimits: overrides.responseLimits,
     upstreamOriginPolicy,
     fetch: overrides.fetch ?? (vi.fn(async () => new Response('{}')) as typeof fetch),
@@ -1201,6 +1204,29 @@ describe('otto edge gateway', () => {
     })));
     expect(unavailable.status).toBe(503);
     await expect(errorCode(unavailable)).resolves.toBe('EDGE_MODEL_UNAVAILABLE');
+  });
+
+  it('enforces the local request hard cap when signed policy is more permissive', async () => {
+    const secretGet = vi.fn(async () => 'provider-secret-value');
+    const fetchMock = vi.fn(async () => new Response('{}'));
+    const values = await fixture({
+      limits: { ...limits, maxRequestBytes: 4_096 },
+      requestLimits: { maximumBytes: 1_024 },
+      secretResolver: { get: secretGet },
+      fetch: fetchMock as typeof fetch,
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast',
+      messages: [{ role: 'user', content: 'x'.repeat(1_024) }],
+    }));
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_REQUEST_TOO_LARGE' },
+    });
+    expect(secretGet).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('fails over only retryable upstream failures and never accepts a client upstream URL', async () => {

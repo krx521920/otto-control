@@ -4,6 +4,7 @@ import type { EdgeRouteCircuitBreaker } from './circuit-breaker.js';
 import { createOttoEdgeGateway, type EdgeGatewayOutcomeSink } from './gateway.js';
 import { createEdgeSignatureVerifier } from './protocol.js';
 import type { EdgeRateLimiter } from './rate-limit.js';
+import type { EdgeRequestLimits } from './request-limits.js';
 import type { EdgeUpstreamResponseLimits } from './upstream-response-limits.js';
 import type { EdgeUpstreamOriginPolicy } from './upstream-origin-policy.js';
 
@@ -23,6 +24,7 @@ export interface AliyunEsaGatewayOptions {
   fetch?: typeof fetch;
   now?: () => number;
   requestId?: () => string;
+  requestLimits?: EdgeRequestLimits;
   responseLimits?: EdgeUpstreamResponseLimits;
   upstreamOriginPolicy: EdgeUpstreamOriginPolicy;
 }
@@ -60,6 +62,7 @@ export function createAliyunEsaGateway(options: AliyunEsaGatewayOptions): {
     fetch: options.fetch,
     now: options.now,
     requestId: options.requestId,
+    requestLimits: options.requestLimits,
     responseLimits: options.responseLimits,
     upstreamOriginPolicy: options.upstreamOriginPolicy,
   });

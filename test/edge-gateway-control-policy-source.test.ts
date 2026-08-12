@@ -504,6 +504,7 @@ describe('edge gateway server configuration', () => {
         maximumConnections: 1_024,
         maximumRequestsPerSocket: 1_000,
       },
+      request: { maximumBytes: 4 * 1_024 * 1_024 },
       upstreamResponse: {
         maximumBytes: 64 * 1_024 * 1_024,
         maximumDurationMs: 15 * 60 * 1_000,
@@ -544,6 +545,7 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_HTTP_MAX_HEADERS_COUNT: '80',
       OTTO_EDGE_HTTP_MAX_CONNECTIONS: '768',
       OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET: '500',
+      OTTO_EDGE_MAX_REQUEST_BYTES: '2097152',
       OTTO_EDGE_UPSTREAM_MAX_RESPONSE_BYTES: '16777216',
       OTTO_EDGE_UPSTREAM_MAX_RESPONSE_DURATION_MS: '300000',
       OTTO_EDGE_SHUTDOWN_GRACE_MS: '45000',
@@ -574,6 +576,7 @@ describe('edge gateway server configuration', () => {
         maximumConnections: 768,
         maximumRequestsPerSocket: 500,
       },
+      request: { maximumBytes: 2 * 1_024 * 1_024 },
       upstreamResponse: {
         maximumBytes: 16 * 1_024 * 1_024,
         maximumDurationMs: 300_000,
@@ -715,5 +718,10 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
       OTTO_EDGE_SHUTDOWN_GRACE_MS: '999',
     })).toThrow('OTTO_EDGE_SHUTDOWN_GRACE_MS');
+    expect(() => loadEdgeGatewayServerConfiguration({
+      ...common,
+      OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
+      OTTO_EDGE_MAX_REQUEST_BYTES: '20971521',
+    })).toThrow('edge maximum request bytes');
   });
 });

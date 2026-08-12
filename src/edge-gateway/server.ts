@@ -42,6 +42,10 @@ import { createEdgeSignatureVerifier } from './protocol.js';
 import { type EdgeRateLimiter, InMemoryEdgeRateLimiter } from './rate-limit.js';
 import { createNodeRedisEdgeRateLimiter } from './redis-rate-limit.js';
 import {
+  type EdgeRequestLimits,
+  loadEdgeRequestLimits,
+} from './request-limits.js';
+import {
   type EdgeUpstreamResponseLimits,
   loadEdgeUpstreamResponseLimits,
 } from './upstream-response-limits.js';
@@ -105,6 +109,7 @@ export interface EdgeServerConfiguration {
     maximumEntries: number;
   };
   http: EdgeNodeHttpLimits;
+  request: EdgeRequestLimits;
   upstreamResponse: EdgeUpstreamResponseLimits;
   shutdownGraceMs: number;
   billing: EdgeBillingConfiguration;
@@ -315,6 +320,7 @@ export function loadEdgeGatewayServerConfiguration(
     },
     circuitBreaker,
     http: loadEdgeNodeHttpLimits(environment),
+    request: loadEdgeRequestLimits(environment),
     upstreamResponse: loadEdgeUpstreamResponseLimits(environment),
     shutdownGraceMs: optionalInteger(
       'OTTO_EDGE_SHUTDOWN_GRACE_MS', environment, 1_000, 300_000,
@@ -640,6 +646,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
       billingCoordinator,
       lifecycle,
     }),
+    requestLimits: config.request,
     responseLimits: config.upstreamResponse,
     upstreamOriginPolicy: configuredUpstreamOriginPolicy,
   });

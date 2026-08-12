@@ -189,6 +189,7 @@ $env:OTTO_EDGE_HTTP_MAX_HEADER_BYTES='16384'
 $env:OTTO_EDGE_HTTP_MAX_HEADERS_COUNT='100'
 $env:OTTO_EDGE_HTTP_MAX_CONNECTIONS='1024'
 $env:OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET='1000'
+$env:OTTO_EDGE_MAX_REQUEST_BYTES='4194304'
 $env:OTTO_EDGE_UPSTREAM_MAX_RESPONSE_BYTES='67108864'
 $env:OTTO_EDGE_UPSTREAM_MAX_RESPONSE_DURATION_MS='900000'
 $env:OTTO_EDGE_SHUTDOWN_GRACE_MS='30000'
@@ -297,6 +298,17 @@ Node 网关不使用运行时的无限连接默认值。请求头必须在 15 �
 `OTTO_EDGE_HTTP_MAX_REQUESTS_PER_SOCKET` 调整；
 头部期限不得大于整请求期限，所有配置均有硬边界且在监听端口前应用。反向代理仍应
 配置自己的连接、头部和请求体限制，不能只依赖应用层边界。
+
+## 请求体本地硬上限
+
+签名策略的 `maxRequestBytes` 不能单独决定网关进程愿意接收的请求大小。Node 和 ESA
+核心还执行独立的本地硬上限，实际限制始终为“签名策略值与本地值的较小者”。默认
+本地值为 4 MiB；Node 可通过 `OTTO_EDGE_MAX_REQUEST_BYTES` 调整，允许范围为 1 KiB
+至 20 MiB，非法或越界配置会在监听端口前拒绝启动；ESA 通过 `requestLimits` 注入。
+请求声明的 `Content-Length` 或实际读取字节数超过有效上限时返回 413
+`EDGE_REQUEST_TOO_LARGE`，不会读取供应商 Secret、创建计费 Hold 或连接模型供应商。
+该限制约束原始 JSON 字节，并不等同于 Token 数量或模型上下文窗口；模型级 Token
+预算仍应由签名路由策略和供应商配置另行限制。
 
 ## 上游响应总量与总时长硬上限
 
@@ -410,7 +422,8 @@ Edge Gateway 使用三层测试工具：
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
   `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、
   `concurrency-limit.ts`、`lifecycle.ts`、`node-http-adapter.ts`、
-  `node-http-limits.ts`、`upstream-response-limits.ts`、`upstream-origin-policy.ts`、`usage-meter.ts`、
+  `node-http-limits.ts`、`request-limits.ts`、`upstream-response-limits.ts`、
+  `upstream-origin-policy.ts`、`usage-meter.ts`、
   `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`
   和 Control 签发服务
   执行代码变异测试。
@@ -429,7 +442,7 @@ npm run test:mutation
 本次修改后独立复验的网关核心为 81.36%、用量解析器为 80.41%、单机计费协调器为
 81.68%、单机并发限制器为 100%、优雅排空状态机为 100%、Node HTTP 适配器为 100%、
 Node HTTP 资源边界为 100%、上游响应限制配置为 100%、上游熔断器为 96.06%、协议层为
-77.88%、本地上游 Origin 与凭据绑定策略为 99.01%。
+77.88%、本地请求限制配置为 100%、本地上游 Origin 与凭据绑定策略为 99.01%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。
