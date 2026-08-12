@@ -24,6 +24,10 @@ import {
   InMemoryEdgeRouteCircuitBreaker,
 } from './circuit-breaker.js';
 import { normalizeEdgeClock, readEdgeClockAtOrAfter } from './clock.js';
+import {
+  createOnceEdgeCompletionHook,
+  runEdgeCompletionHook,
+} from './completion-hook.js';
 import type { EdgeGatewayLifecycle } from './lifecycle.js';
 import { normalizeEdgeProviderSecret } from './provider-secret.js';
 import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
@@ -474,9 +478,24 @@ function scheduleOutcome(
   outcome: EdgeGatewayOutcomeV2,
 ): void {
   if (!sink) return;
-  const task = sink.record(outcome).catch(() => undefined);
-  if (context?.waitUntil) context.waitUntil(task);
-  else void task;
+  let task: Promise<unknown>;
+  try {
+    task = sink.record(outcome).catch(() => undefined);
+  } catch {
+    return;
+  }
+  registerBackgroundTask(context, task);
+}
+
+function registerBackgroundTask(
+  context: EdgeGatewayBackgroundContext | undefined,
+  task: Promise<unknown>,
+): void {
+  try {
+    context?.waitUntil?.(task);
+  } catch {
+    // A runtime registration failure must not take ownership of the response stream.
+  }
 }
 
 function scheduleBackground(
@@ -484,8 +503,7 @@ function scheduleBackground(
   operation: () => Promise<unknown>,
 ): void {
   const guarded = Promise.resolve().then(operation).catch(() => undefined);
-  if (context?.waitUntil) context.waitUntil(guarded);
-  else void guarded;
+  registerBackgroundTask(context, guarded);
 }
 
 function uncertainReason(completion: EdgeStreamCompletion): EdgeBillingUncertainReason {
@@ -745,7 +763,9 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           },
         );
       }
-      const releaseConcurrency = () => concurrencyLease.release();
+      const releaseConcurrency = createOnceEdgeCompletionHook(
+        () => concurrencyLease.release(),
+      );
       const routes = authorized.routes.slice(0, authorized.policy.limits.maxRouteAttempts);
       let lastStatus: number | null = null;
       let lastRouteId: string | null = null;
@@ -775,13 +795,13 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           secret = null;
         }
         if (!secret) {
-          routeAttempt.cancelled();
+          runEdgeCompletionHook(() => routeAttempt.cancelled());
           continue;
         }
         lastRouteId = route.id;
         if (route.metering && !billingReservation) {
           if (!options.billingCoordinator) {
-            routeAttempt.cancelled();
+            runEdgeCompletionHook(() => routeAttempt.cancelled());
             releaseConcurrency();
             return jsonResponse(
               503,
@@ -796,7 +816,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
               reserveUnits: route.metering.reserveUnits,
             });
           } catch (error) {
-            routeAttempt.cancelled();
+            runEdgeCompletionHook(() => routeAttempt.cancelled());
             releaseConcurrency();
             if (error instanceof EdgeBillingAdmissionError) {
               return jsonResponse(
@@ -836,7 +856,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             request.signal,
           );
         } catch {
-          routeAttempt.failed(readEdgeClockAtOrAfter(now, startedAt));
+          const failedAt = readEdgeClockAtOrAfter(now, startedAt);
+          runEdgeCompletionHook(() => routeAttempt.failed(failedAt));
           continue;
         }
         const upstream = connection.response;
@@ -844,7 +865,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         const hasFallback = index + 1 < routes.length;
         const retryableUpstream = RETRYABLE_UPSTREAM_STATUSES.has(upstream.status);
         if (retryableUpstream) {
-          routeAttempt.failed(readEdgeClockAtOrAfter(now, startedAt));
+          const failedAt = readEdgeClockAtOrAfter(now, startedAt);
+          runEdgeCompletionHook(() => routeAttempt.failed(failedAt));
         }
         if (hasFallback && retryableUpstream) {
           connection.controller.abort();
@@ -867,10 +889,11 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             (completion, usage) => {
               releaseConcurrency();
               const completedAt = readEdgeClockAtOrAfter(now, evidence.startedAt);
-              if (completion === 'client_cancelled') routeAttempt.cancelled();
-              else if (completion !== 'completed' || retryableUpstream) {
-                routeAttempt.failed(completedAt);
-              } else routeAttempt.succeeded();
+              if (completion === 'client_cancelled') {
+                runEdgeCompletionHook(() => routeAttempt.cancelled());
+              } else if (completion !== 'completed' || retryableUpstream) {
+                runEdgeCompletionHook(() => routeAttempt.failed(completedAt));
+              } else runEdgeCompletionHook(() => routeAttempt.succeeded());
               scheduleOutcome(options.outcomeSink, context, {
                 version: 2,
                 requestId: evidence.requestId,
@@ -933,7 +956,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             },
           );
         } catch {
-          routeAttempt.failed(readEdgeClockAtOrAfter(now, startedAt));
+          const failedAt = readEdgeClockAtOrAfter(now, startedAt);
+          runEdgeCompletionHook(() => routeAttempt.failed(failedAt));
           releaseConcurrency();
           connection.controller.abort();
           try {
@@ -946,7 +970,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         try {
           return clientResponse(upstream, body, id, authorized.remaining);
         } catch {
-          routeAttempt.failed(readEdgeClockAtOrAfter(now, startedAt));
+          const failedAt = readEdgeClockAtOrAfter(now, startedAt);
+          runEdgeCompletionHook(() => routeAttempt.failed(failedAt));
           releaseConcurrency();
           connection.controller.abort();
           return jsonResponse(

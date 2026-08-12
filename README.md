@@ -163,6 +163,8 @@ business IDs are normalized to a bounded safe alphabet and invalid generators fa
 closed before policy, secret, billing, or provider access. After admission, a failed,
 invalid, or backward-moving clock is clamped to the verified request start so cleanup,
 circuit state, outcome evidence, and billing finalization still complete consistently.
+Completion hooks are isolated and concurrency release is idempotent, so a faulty limiter,
+circuit adapter, outcome sink, or edge-runtime task registrar cannot strand a response stream.
 It also holds a global and per-subject concurrency slot
 for the complete lifetime of every upstream response stream, preventing slow
 clients from exhausting sockets, memory, or provider credit while remaining

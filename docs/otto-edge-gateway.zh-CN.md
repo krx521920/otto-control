@@ -167,6 +167,10 @@ Secret、建立计费 Hold 或访问供应商。请求通过准入后，若时�
 则以已验证的请求起点作为时间下限，确保熔断状态、并发释放、结果证据及计费收尾不会被
 辅助时钟故障打断，也不会产生负耗时。
 
+响应完成回调与客户端数据流相互隔离：并发租约只释放一次；熔断成功、失败和取消回调，
+结果记录器以及边缘运行时 `waitUntil` 注册即使抛错，也不能让已建立的客户端响应挂起。
+这只负责故障隔离；对应适配器仍须通过监控和对账修复未落库的控制面状态。
+
 策略中的每个 `secretBinding` 对应同名进程环境变量。例如
 `PROVIDER_A_API_KEY`。然后运行：
 
@@ -464,6 +468,7 @@ Edge Gateway 使用三层测试工具：
   签名变异、协议和认证头输入；
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
   `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、`clock.ts`、
+  `completion-hook.ts`、
   `concurrency-limit.ts`、`lifecycle.ts`、`node-http-adapter.ts`、
   `node-http-limits.ts`、`provider-secret.ts`、`request-limits.ts`、
   `upstream-response-headers.ts`、`upstream-response-limits.ts`、
@@ -496,6 +501,7 @@ Node HTTP 资源边界为 100%、上游响应限制配置为 100%、上游熔断
 备用线路计费档案一致性门禁的本次行范围变异复验为 100%。
 请求 ID 归一化模块为 100%，请求上下文构造与有效性门禁的本次行范围变异复验为 100%。
 运行期安全时钟模块为 100%。
+一次性完成回调模块为 100%，同步结果记录与流结束回调的本次行范围变异复验为 100%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。

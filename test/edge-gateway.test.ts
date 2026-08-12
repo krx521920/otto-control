@@ -22,6 +22,7 @@ import {
 } from '../src/edge-gateway/circuit-breaker.js';
 import {
   createOttoEdgeGateway,
+  type EdgeGatewayOutcomeSink,
   type EdgeGatewayReadinessProbe,
   type EdgeGatewaySecretResolver,
 } from '../src/edge-gateway/gateway.js';
@@ -81,6 +82,7 @@ async function fixture(overrides: {
   secrets?: Readonly<Record<string, string>>;
   secretResolver?: EdgeGatewaySecretResolver;
   billingCoordinator?: EdgeBillingCoordinator;
+  outcomeSink?: EdgeGatewayOutcomeSink;
   concurrencyLimiter?: EdgeConcurrencyLimiter;
   circuitBreaker?: EdgeRouteCircuitBreaker;
   lifecycle?: EdgeGatewayLifecycle;
@@ -134,7 +136,8 @@ async function fixture(overrides: {
     concurrencyLimiter: overrides.concurrencyLimiter,
     circuitBreaker: overrides.circuitBreaker,
     lifecycle: overrides.lifecycle,
-    outcomeSink: { record: async (outcome) => { outcomes.push(outcome); } },
+    outcomeSink: overrides.outcomeSink
+      ?? { record: async (outcome) => { outcomes.push(outcome); } },
     billingCoordinator: overrides.billingCoordinator,
     readinessProbe: overrides.readinessProbe,
     requestLimits: overrides.requestLimits,
@@ -340,6 +343,160 @@ describe('otto edge gateway', () => {
         outcome: 'upstream_failed',
       }),
     ]);
+  });
+
+  it('isolates release, route-success, and waitUntil hook failures from a response stream', async () => {
+    const release = vi.fn(() => { throw new Error('release backend unavailable'); });
+    const succeeded = vi.fn(() => { throw new Error('route backend unavailable'); });
+    const waitUntil = vi.fn(() => { throw new Error('runtime registration unavailable'); });
+    const values = await fixture({
+      concurrencyLimiter: {
+        acquire: () => ({ release }),
+        snapshot: () => ({
+          activeRequests: 1,
+          globalLimit: 1,
+          trackedSubjects: 1,
+          subjectsAtLimit: 1,
+          perSubjectLimit: 1,
+        }),
+      },
+      circuitBreaker: {
+        acquire: () => ({
+          succeeded,
+          failed: () => undefined,
+          cancelled: () => undefined,
+        }),
+        snapshot: () => ({
+          trackedRoutes: 1,
+          failingRoutes: 0,
+          openRoutes: 0,
+          probeReadyRoutes: 0,
+          halfOpenRoutes: 1,
+          failureThreshold: 1,
+          cooldownMs: 1_000,
+        }),
+      },
+    });
+
+    const response = await values.gateway.fetch(
+      values.request({ model: 'otto-fast', messages: [] }),
+      { waitUntil },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe('{}');
+    expect(release).toHaveBeenCalledOnce();
+    expect(succeeded).toHaveBeenCalledOnce();
+    expect(waitUntil).toHaveBeenCalledOnce();
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({ outcome: 'succeeded' }),
+    ]);
+  });
+
+  it('runs an isolated route-cancel hook when the downstream discards its stream', async () => {
+    const cancelled = vi.fn(() => { throw new Error('route backend unavailable'); });
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(1, 1);
+    const values = await fixture({
+      concurrencyLimiter,
+      circuitBreaker: {
+        acquire: () => ({
+          succeeded: () => undefined,
+          failed: () => undefined,
+          cancelled,
+        }),
+        snapshot: () => ({
+          trackedRoutes: 1,
+          failingRoutes: 0,
+          openRoutes: 0,
+          probeReadyRoutes: 0,
+          halfOpenRoutes: 1,
+          failureThreshold: 1,
+          cooldownMs: 1_000,
+        }),
+      },
+      fetch: vi.fn<typeof fetch>(async () => new Response(new ReadableStream<Uint8Array>({
+        pull() {
+          // Hold the provider stream until the downstream explicitly discards it.
+        },
+      }))),
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    await response.body!.cancel('discard response');
+
+    expect(cancelled).toHaveBeenCalledOnce();
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+    expect(values.outcomes).toEqual([
+      expect.objectContaining({ outcome: 'client_cancelled' }),
+    ]);
+  });
+
+  it.each(['failed', 'cancelled'] as const)(
+    'isolates a route-%s hook failure while exhausting routes',
+    async (completion) => {
+      const failed = vi.fn(() => {
+        if (completion === 'failed') throw new Error('route failure backend unavailable');
+      });
+      const cancelled = vi.fn(() => {
+        if (completion === 'cancelled') throw new Error('route cancel backend unavailable');
+      });
+      const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(1, 1);
+      const values = await fixture({
+        concurrencyLimiter,
+        circuitBreaker: {
+          acquire: () => ({ succeeded: () => undefined, failed, cancelled }),
+          snapshot: () => ({
+            trackedRoutes: 1,
+            failingRoutes: 0,
+            openRoutes: 0,
+            probeReadyRoutes: 0,
+            halfOpenRoutes: 1,
+            failureThreshold: 1,
+            cooldownMs: 1_000,
+          }),
+        },
+        fetch: completion === 'failed'
+          ? vi.fn<typeof fetch>(async () => { throw new Error('provider unavailable'); })
+          : undefined,
+        secretResolver: completion === 'cancelled'
+          ? { get: async () => null }
+          : undefined,
+      });
+
+      const response = await values.gateway.fetch(values.request({
+        model: 'otto-fast', messages: [],
+      }));
+
+      expect(response.status).toBe(502);
+      expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+      expect(completion === 'failed' ? failed : cancelled).toHaveBeenCalledOnce();
+      expect(values.outcomes).toEqual([
+        expect.objectContaining({ outcome: 'upstream_failed' }),
+      ]);
+    },
+  );
+
+  it('isolates a synchronous outcome recorder failure from response completion', async () => {
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(1, 1);
+    const record = vi.fn(() => { throw new Error('outcome backend unavailable'); });
+    const waitUntil = vi.fn();
+    const values = await fixture({
+      concurrencyLimiter,
+      outcomeSink: { record },
+    });
+
+    const response = await values.gateway.fetch(
+      values.request({ model: 'otto-fast', messages: [] }),
+      { waitUntil },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe('{}');
+    expect(record).toHaveBeenCalledOnce();
+    expect(waitUntil).not.toHaveBeenCalled();
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
   });
 
   it('reports readiness without exposing component details or failure messages', async () => {
