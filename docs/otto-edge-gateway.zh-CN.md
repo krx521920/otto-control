@@ -149,6 +149,12 @@ Origin、不隔离 Secret Binding；正式部署应升级到 v2。
 `application/json`。Cookie、客户端访问令牌、代理头以及伪造的供应商认证头不会越过
 网关信任边界。
 
+供应商响应 Header 同样不直接透传。仅允许 JSON、Problem JSON、NDJSON 和 SSE 媒体
+类型；缺失或其他类型统一降级为 `application/octet-stream`，并始终返回
+`X-Content-Type-Options: nosniff`，避免供应商 HTML 或脚本被浏览器按活动内容解释。
+`x-request-id` 只有在去除首尾空白后为 1–256 个可见 ASCII 字符时，才会作为
+`x-upstream-request-id` 暴露；异常值直接丢弃，不进入响应或日志。
+
 策略中的每个 `secretBinding` 对应同名进程环境变量。例如
 `PROVIDER_A_API_KEY`。然后运行：
 
@@ -438,7 +444,8 @@ Edge Gateway 使用三层测试工具：
 - Stryker + Vitest Runner：对 `gateway.ts`、`control-keyring-verifier.ts`、
   `control-policy-source.ts`、`control-billing-coordinator.ts`、`circuit-breaker.ts`、
   `concurrency-limit.ts`、`lifecycle.ts`、`node-http-adapter.ts`、
-  `node-http-limits.ts`、`provider-secret.ts`、`request-limits.ts`、`upstream-response-limits.ts`、
+  `node-http-limits.ts`、`provider-secret.ts`、`request-limits.ts`、
+  `upstream-response-headers.ts`、`upstream-response-limits.ts`、
   `upstream-origin-policy.ts`、`usage-meter.ts`、
   `protocol.ts`、`rate-limit.ts`、`redis-rate-limit.ts`
   和 Control 签发服务
@@ -462,6 +469,7 @@ Node HTTP 资源边界为 100%、上游响应限制配置为 100%、上游熔断
 供应商 Secret Header 安全校验模块为 100%。
 模型 API 精确路径判断的本次行范围变异复验为 100%。
 上游 `Accept` 派生和最小 Header 重建的本次行范围变异复验为 100%。
+供应商响应 Header 归一化模块为 100%。
 单个协议文件低于总体门槛时仍应继续补强，不能用总体分数掩盖薄弱模块。
 HTML 和 JSON 报告生成到忽略提交的 `reports/mutation/`。变异测试不放入每次快速
 `npm run check`，应在 Edge 关键代码变化或定时安全测试环境中执行。

@@ -35,6 +35,10 @@ import {
   type EdgeUpstreamResponseLimits,
   normalizeEdgeUpstreamResponseLimits,
 } from './upstream-response-limits.js';
+import {
+  normalizeEdgeUpstreamContentType,
+  normalizeEdgeUpstreamRequestId,
+} from './upstream-response-headers.js';
 import type { EdgeUpstreamOriginPolicy } from './upstream-origin-policy.js';
 import {
   decodeEdgeAccessTokenEnvelope,
@@ -266,12 +270,12 @@ function clientResponse(
 ): Response {
   const headers = new Headers({
     'cache-control': 'no-store',
+    'content-type': normalizeEdgeUpstreamContentType(upstream.headers.get('content-type')),
     'x-otto-edge-request-id': requestId,
+    'x-content-type-options': 'nosniff',
     'x-ratelimit-remaining': String(remaining),
   });
-  const contentType = upstream.headers.get('content-type');
-  if (contentType) headers.set('content-type', contentType);
-  const providerRequestId = upstream.headers.get('x-request-id');
+  const providerRequestId = normalizeEdgeUpstreamRequestId(upstream.headers.get('x-request-id'));
   if (providerRequestId) headers.set('x-upstream-request-id', providerRequestId);
   return new Response(body, {
     status: upstream.status,

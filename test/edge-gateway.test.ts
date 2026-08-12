@@ -320,6 +320,7 @@ describe('otto edge gateway', () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toBe('text/event-stream');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     expect(response.headers.get('x-upstream-request-id')).toBe('provider-request');
     await expect(response.text()).resolves.toBe('data: {"delta":"first"}\n\ndata: [DONE]\n\n');
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -343,6 +344,27 @@ describe('otto edge gateway', () => {
     const evidence = JSON.stringify(values.outcomes);
     expect(evidence).not.toContain('private prompt');
     expect(evidence).not.toContain('provider-secret-value');
+  });
+
+  it('downgrades unsafe upstream response metadata before returning it to the client', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('<script>unsafe()</script>', {
+      status: 502,
+      headers: {
+        'content-type': 'text/html; charset=utf-8',
+        'x-request-id': 'x'.repeat(257),
+      },
+    }));
+    const values = await fixture({ fetch: fetchMock });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get('content-type')).toBe('application/octet-stream');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(response.headers.get('x-upstream-request-id')).toBeNull();
+    await expect(response.text()).resolves.toBe('<script>unsafe()</script>');
   });
 
   it('requests provider stream usage, preserves response bytes, and records only token counts', async () => {
