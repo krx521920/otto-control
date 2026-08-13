@@ -124,6 +124,169 @@ async function fixture(options: { registerReceiptKey?: boolean } = {}) {
 }
 
 describe('signed execution receipt v2', () => {
+  it('aggregates independent monotonic edge-node sequences and closes gaps in order', async () => {
+    const {
+      service, store, signer, token, signReceipt, binding,
+    } = await fixture();
+    const nodeA = 'edge_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    await service.registerEdgeBillingNode(DEPLOYMENT_ID, {
+      nodeId: nodeA,
+      signingKeyId: signer.keyId,
+    }, 'billing-admin');
+
+    const sequenceTwo = await signReceipt({
+      receiptId: 'exec_22222222222222222222222222222222',
+      taskId: 'edge_task_2',
+      sequence: 2,
+      units: 1,
+    });
+    await service.submitEdgeBillingEvent({
+      ...binding,
+      eventId: 'edgeevt_22222222222222222222222222222222',
+      nodeId: nodeA,
+      nodeSequence: 2,
+      envelope: sequenceTwo,
+    }, token);
+    expect(await service.edgeBillingAggregationStatus(DEPLOYMENT_ID)).toMatchObject({
+      pending: 1,
+      reconciled: 0,
+      sequenceGaps: 1,
+    });
+
+    const sequenceOne = await signReceipt({
+      receiptId: 'exec_11111111111111111111111111111112',
+      taskId: 'edge_task_1',
+      sequence: 1,
+      units: 1,
+    });
+    const request = {
+      ...binding,
+      eventId: 'edgeevt_11111111111111111111111111111111',
+      nodeId: nodeA,
+      nodeSequence: 1,
+      envelope: sequenceOne,
+    };
+    await service.submitEdgeBillingEvent(request, token);
+    await service.submitEdgeBillingEvent(request, token);
+
+    const { privateKey } = generateKeyPairSync('ed25519');
+    const secondSigner = new LocalEd25519Signer(
+      privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+    );
+    await service.registerExecutionReceiptKey(DEPLOYMENT_ID, {
+      publicKeyPem: secondSigner.publicKeyPem,
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    }, 'security-admin');
+    const nodeB = 'edge_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    await service.registerEdgeBillingNode(DEPLOYMENT_ID, {
+      nodeId: nodeB,
+      signingKeyId: secondSigner.keyId,
+    }, 'billing-admin');
+    const receiptB: ExecutionReceiptV2Payload = {
+      ...sequenceOne.receipt,
+      receiptId: 'exec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      taskId: 'edge_task_b1',
+      sequence: 1,
+    };
+    await service.submitEdgeBillingEvent({
+      ...binding,
+      eventId: 'edgeevt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      nodeId: nodeB,
+      nodeSequence: 1,
+      envelope: {
+        receipt: receiptB,
+        signingKeyId: secondSigner.keyId,
+        signature: await secondSigner.sign(receiptB),
+      },
+    }, token);
+
+    expect(await service.edgeBillingAggregationStatus(DEPLOYMENT_ID)).toMatchObject({
+      nodes: 2,
+      activeNodes: 2,
+      pending: 0,
+      reconciled: 3,
+      sequenceGaps: 0,
+    });
+    expect((await service.account(CUSTOMER_ID, ORGANIZATION_ID)).availableBalance).toBe(91);
+    expect(store.executionReceipts.get(sequenceOne.receipt.receiptId)?.edgeNodeId).toBe(nodeA);
+    expect(store.executionReceipts.get(receiptB.receiptId)?.edgeNodeId).toBe(nodeB);
+  });
+
+  it('moves persistently failing edge aggregation events to the dead letter state', async () => {
+    const {
+      service, signer, token, signReceipt, binding, setClock, now,
+    } = await fixture();
+    const nodeId = 'edge_cccccccccccccccccccccccccccccccc';
+    await service.registerEdgeBillingNode(DEPLOYMENT_ID, {
+      nodeId,
+      signingKeyId: signer.keyId,
+    }, 'billing-admin');
+    const envelope = await signReceipt({
+      receiptId: 'exec_cccccccccccccccccccccccccccccccc',
+      taskId: 'edge_task_missing_rate',
+      moduleId: 'meeting_agent',
+      units: 1,
+    });
+    await service.submitEdgeBillingEvent({
+      ...binding,
+      eventId: 'edgeevt_cccccccccccccccccccccccccccccccc',
+      nodeId,
+      nodeSequence: 1,
+      envelope,
+    }, token);
+    for (let attempt = 1; attempt < 8; attempt += 1) {
+      setClock(now + attempt * 10 * 60 * 1000);
+      await service.reconcileEdgeBillingEvents(1, nodeId);
+    }
+    expect(await service.edgeBillingAggregationStatus(DEPLOYMENT_ID)).toMatchObject({
+      retrying: 0,
+      deadLetter: 1,
+      reconciled: 0,
+    });
+    await service.setRate(CUSTOMER_ID, {
+      module: 'meeting_agent', unitSize: 1_000, creditsPerUnit: 2,
+    }, 'billing-admin');
+    await expect(service.retryEdgeBillingDeadLetters(10)).resolves.toEqual({
+      requeued: 1,
+      reconciled: 1,
+    });
+    expect(await service.edgeBillingAggregationStatus(DEPLOYMENT_ID)).toMatchObject({
+      deadLetter: 0,
+      reconciled: 1,
+    });
+  });
+
+  it('repairs queue state after settlement succeeded before the queue checkpoint', async () => {
+    const { service, store, signer, token, signReceipt, binding } = await fixture();
+    const nodeId = 'edge_dddddddddddddddddddddddddddddddd';
+    await service.registerEdgeBillingNode(DEPLOYMENT_ID, {
+      nodeId, signingKeyId: signer.keyId,
+    }, 'billing-admin');
+    const envelope = await signReceipt({
+      receiptId: 'exec_dddddddddddddddddddddddddddddddd',
+      taskId: 'edge_crash_window', sequence: 1, units: 1,
+    });
+    const request = {
+      ...binding,
+      eventId: 'edgeevt_dddddddddddddddddddddddddddddddd',
+      nodeId,
+      nodeSequence: 1,
+      envelope,
+    };
+    await service.submitEdgeBillingEvent(request, token);
+    const settled = store.edgeBillingEvents.get(request.eventId)!;
+    store.edgeBillingEvents.set(request.eventId, {
+      ...settled,
+      state: 'retrying',
+      reconciledAt: null,
+      nextAttemptAt: new Date(0),
+    });
+    const balance = (await service.account(CUSTOMER_ID, ORGANIZATION_ID)).availableBalance;
+    await expect(service.reconcileEdgeBillingEvents(1, nodeId)).resolves.toBe(1);
+    expect((await service.account(CUSTOMER_ID, ORGANIZATION_ID)).availableBalance).toBe(balance);
+    expect(store.edgeBillingEvents.get(request.eventId)?.state).toBe('reconciled');
+  });
+
   it('bootstraps only the first deployment key with proof of possession', async () => {
     const { service, signer, token, now } = await fixture({ registerReceiptKey: false });
     const claim = {

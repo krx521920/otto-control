@@ -93,6 +93,7 @@ type EdgeBillingConfiguration =
       type: 'control';
       receiptPrivateKeyFile: string;
       journalFile: string;
+      nodeId?: string;
       retryIntervalMs?: number;
     };
 
@@ -221,7 +222,8 @@ function billingConfiguration(
   const backend = environment.OTTO_EDGE_BILLING_BACKEND?.trim() || 'none';
   if (backend === 'none') {
     if (environment.OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE?.trim()
-      || environment.OTTO_EDGE_BILLING_JOURNAL_FILE?.trim()) {
+      || environment.OTTO_EDGE_BILLING_JOURNAL_FILE?.trim()
+      || environment.OTTO_EDGE_BILLING_NODE_ID?.trim()) {
       throw new Error('Edge billing files require OTTO_EDGE_BILLING_BACKEND=control');
     }
     return { type: 'none' };
@@ -232,12 +234,17 @@ function billingConfiguration(
   if (!managedControl) {
     throw new Error('Control billing requires OTTO_EDGE_CONTROL_URL managed policy mode');
   }
+  const nodeId = environment.OTTO_EDGE_BILLING_NODE_ID?.trim() || undefined;
+  if (nodeId && !/^edge_[a-f0-9]{32}$/u.test(nodeId)) {
+    throw new Error('OTTO_EDGE_BILLING_NODE_ID must be edge_ followed by 32 lowercase hex characters');
+  }
   return {
     type: 'control',
     receiptPrivateKeyFile: requiredEnvironment(
       'OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE', environment,
     ),
     journalFile: requiredEnvironment('OTTO_EDGE_BILLING_JOURNAL_FILE', environment),
+    nodeId,
     retryIntervalMs: optionalInteger(
       'OTTO_EDGE_BILLING_RETRY_INTERVAL_MS', environment, 1_000, 60 * 60 * 1000,
     ),
@@ -673,6 +680,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
       journalFile: config.billing.journalFile,
       requestTimeoutMs: config.policy.requestTimeoutMs,
       retryIntervalMs: config.billing.retryIntervalMs,
+      nodeId: config.billing.nodeId,
     });
   }
   const operationsToken = config.operationsTokenFile

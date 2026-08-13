@@ -170,6 +170,7 @@ x-edge-gateway-common: &edge-gateway-common
     OTTO_EDGE_REDIS_ALLOW_INSECURE: "false"
     OTTO_EDGE_RATE_LIMIT_KEY_FILE: /run/secrets/edge_rate_limit_key
     OTTO_EDGE_BILLING_BACKEND: control
+    OTTO_EDGE_BILLING_NODE_ID: ${OTTO_EDGE_BILLING_NODE_ID:-}
     OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE: /run/secrets/edge_execution_receipt_key
     OTTO_EDGE_BILLING_JOURNAL_FILE: /var/lib/otto-edge/billing-journal.ndjson
     OTTO_EDGE_OPERATIONS_TOKEN_FILE: /run/secrets/edge_operations_token

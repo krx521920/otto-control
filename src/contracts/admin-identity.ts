@@ -61,6 +61,8 @@ export const ADMIN_APPROVAL_OPERATIONS = [
   'billing.refund',
   'billing.execution_receipt_key.register',
   'billing.execution_receipt_key.revoke',
+  'billing.edge_node.register',
+  'billing.edge_node.revoke',
   'customer_erasure.execute',
   'legal_hold.create',
   'legal_hold.release',

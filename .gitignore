@@ -16,6 +16,11 @@ edge-provider-secrets/
 edge-provider-secrets-staging/
 .edge-rollout/
 compose.*.resolved.yaml
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+deploy/aliyun-esa/release/
 *.log
 .DS_Store
 Thumbs.db

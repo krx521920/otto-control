@@ -1,0 +1,18 @@
+region               = "cn-hangzhou"
+esa_plan_instance_id = "replace-with-existing-plan-instance-id"
+site_name             = "example.com"
+edge_hostname         = "edge.example.com"
+coverage              = "domestic"
+routine_name          = "otto-edge-production"
+
+worker_bundle_path   = "../release/otto-edge-esa-worker.js"
+worker_bundle_sha256 = "replace-with-64-lower-case-hex-characters"
+signed_policy_path   = "../release/signed-policy.json"
+signed_policy_sha256 = "replace-with-64-lower-case-hex-characters"
+control_keyring_path   = "../release/control-public-keyring.json"
+control_keyring_sha256 = "replace-with-64-lower-case-hex-characters"
+
+# First apply MUST keep this false. Set it to true only after the external
+# Secret binding and canary gate emits an immutable release evidence ID.
+activate_public_route = false
+release_evidence_id   = ""

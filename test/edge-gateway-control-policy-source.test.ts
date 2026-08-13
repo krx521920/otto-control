@@ -629,6 +629,7 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE: 'D:\\secure\\receipt-private.pem',
       OTTO_EDGE_BILLING_JOURNAL_FILE: 'D:\\state\\edge-billing.ndjson',
       OTTO_EDGE_BILLING_RETRY_INTERVAL_MS: '5000',
+      OTTO_EDGE_BILLING_NODE_ID: `edge_${'a'.repeat(32)}`,
       OTTO_EDGE_OPERATIONS_TOKEN_FILE: 'D:\\secure\\edge-operations.token',
     })).toMatchObject({
       billing: {
@@ -636,6 +637,7 @@ describe('edge gateway server configuration', () => {
         receiptPrivateKeyFile: 'D:\\secure\\receipt-private.pem',
         journalFile: 'D:\\state\\edge-billing.ndjson',
         retryIntervalMs: 5000,
+        nodeId: `edge_${'a'.repeat(32)}`,
       },
       operationsTokenFile: 'D:\\secure\\edge-operations.token',
     });
@@ -703,6 +705,16 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_BILLING_BACKEND: 'control',
       OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE: 'D:\\secure\\receipt-private.pem',
     })).toThrow('OTTO_EDGE_BILLING_JOURNAL_FILE');
+    expect(() => loadEdgeGatewayServerConfiguration({
+      ...common,
+      OTTO_EDGE_CONTROL_URL: 'https://control.otto.test',
+      OTTO_EDGE_DEPLOYMENT_IDENTITY_FILE: 'D:\\secure\\identity.json',
+      OTTO_EDGE_LEASE_TOKEN_FILE: 'D:\\secure\\lease-token',
+      OTTO_EDGE_BILLING_BACKEND: 'control',
+      OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE: 'D:\\secure\\receipt-private.pem',
+      OTTO_EDGE_BILLING_JOURNAL_FILE: 'D:\\state\\edge-billing.ndjson',
+      OTTO_EDGE_BILLING_NODE_ID: 'edge_invalid',
+    })).toThrow('OTTO_EDGE_BILLING_NODE_ID');
     expect(() => loadEdgeGatewayServerConfiguration({
       ...common,
       OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',

@@ -216,6 +216,7 @@ export async function buildControlApp(
         'credit_billing',
         'billing_statement_export',
         'signed_execution_receipts_v2',
+        'multi_edge_billing_aggregation',
       );
       await registerBillingRoutes(app, {
         service: commercialControl.billing,
@@ -241,6 +242,9 @@ export async function buildControlApp(
       });
     }
     app.addHook('onReady', async () => {
+      commercialControl.billing?.start((error) => {
+        app.log.error({ err: error }, 'edge billing aggregation retry failed');
+      });
       commercialControl.alerts.start((error) => {
         app.log.error({ err: error }, 'alert delivery poll failed');
       });
@@ -255,6 +259,7 @@ export async function buildControlApp(
       });
     });
     app.addHook('onClose', async () => {
+      commercialControl.billing?.close();
       commercialControl.dataGovernance?.close();
       try {
         await Promise.all([

@@ -237,7 +237,7 @@ function createRedisTlsIdentity(secretDirectory) {
   }
 }
 
-function enableEdgeGateway(environmentFile, providerBindings) {
+function enableEdgeGateway(environmentFile, providerBindings, nodeId) {
   const source = readFileSync(environmentFile, 'utf8');
   if (!/^OTTO_EDGE_ENABLED=false$/mu.test(source)) {
     throw new Error('environment file must contain OTTO_EDGE_ENABLED=false before provisioning');
@@ -250,10 +250,14 @@ function enableEdgeGateway(environmentFile, providerBindings) {
   const providerFiles = providerBindings
     .map((binding) => `${binding}_FILE=/run/otto-edge-provider-secrets/${binding}`)
     .join('\n');
-  const next = `${source.replace(
+  let configured = source.replace(
     /^OTTO_EDGE_ENABLED=false$/mu,
     'OTTO_EDGE_ENABLED=true',
-  ).trimEnd()}\n${providerFiles}\n`;
+  );
+  configured = /^OTTO_EDGE_BILLING_NODE_ID=.*$/mu.test(configured)
+    ? configured.replace(/^OTTO_EDGE_BILLING_NODE_ID=.*$/mu, `OTTO_EDGE_BILLING_NODE_ID=${nodeId}`)
+    : `${configured.trimEnd()}\nOTTO_EDGE_BILLING_NODE_ID=${nodeId}\n`;
+  const next = `${configured.trimEnd()}\n${providerFiles}\n`;
   const temporary = `${environmentFile}.edge-bootstrap.tmp`;
   writeFileSync(temporary, next, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   renameSync(temporary, environmentFile);
@@ -321,7 +325,7 @@ function main() {
     writeExclusive(resolve(providerSecretDirectory, binding), value);
   }
   createRedisTlsIdentity(secretDirectory);
-  enableEdgeGateway(environmentFile, providerBindings);
+  enableEdgeGateway(environmentFile, providerBindings, `edge_${randomBytes(16).toString('hex')}`);
   process.stdout.write(
     `Edge Gateway production files created under ${configDirectory} and ${secretDirectory}.\n`,
   );

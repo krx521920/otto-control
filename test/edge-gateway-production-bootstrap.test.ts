@@ -69,6 +69,7 @@ describe('Edge Gateway production bootstrap', () => {
     expect(bootstrap.status, bootstrap.stderr).toBe(0);
     const environment = readFileSync(join(output, '.env.staging'), 'utf8');
     expect(environment).toContain('OTTO_EDGE_ENABLED=true');
+    expect(environment).toMatch(/^OTTO_EDGE_BILLING_NODE_ID=edge_[a-f0-9]{32}$/mu);
     expect(environment).not.toContain('lease-token-that-is-longer');
     expect(environment).not.toContain('provider-secret-from-secure-input');
     expect(environment).toContain(

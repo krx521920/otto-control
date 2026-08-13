@@ -76,6 +76,8 @@ const APPROVAL_REQUEST_FIELDS: Readonly<Record<string, readonly string[]>> = {
     'publicKeyPem', 'keyId', 'notBefore', 'expiresAt',
   ],
   'billing.execution_receipt_key.revoke': [],
+  'billing.edge_node.register': ['nodeId', 'signingKeyId'],
+  'billing.edge_node.revoke': [],
   'customer_erasure.execute': [],
   'legal_hold.create': ['customerId', 'scope', 'reason', 'expiresAt'],
   'legal_hold.release': ['reason'],

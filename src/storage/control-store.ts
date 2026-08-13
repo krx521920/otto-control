@@ -34,6 +34,9 @@ import type {
   ExecutionReceiptHoldMutationResult,
   ExecutionReceiptMutationResult,
   ExecutionReceiptRecord,
+  EdgeBillingAggregationEventRecord,
+  EdgeBillingAggregationStatus,
+  EdgeBillingNodeRecord,
   SignedExecutionReceiptV2,
   OttoBillingModule,
 } from '../contracts/billing.js';
@@ -623,6 +626,7 @@ export interface ControlStore {
     envelope: SignedExecutionReceiptV2;
     metadata: Record<string, unknown>;
     receivedAt: Date;
+    edgeNodeId?: string;
   }): Promise<ExecutionReceiptMutationResult>;
   settleCreditHoldWithExecutionReceipt(input: {
     transactionId: string;
@@ -632,6 +636,7 @@ export interface ControlStore {
     envelope: SignedExecutionReceiptV2;
     metadata: Record<string, unknown>;
     receivedAt: Date;
+    edgeNodeId?: string;
   }): Promise<ExecutionReceiptHoldMutationResult | null>;
   getExecutionReceipt(receiptId: string): Promise<ExecutionReceiptRecord | null>;
   listExecutionReceipts(input: {
@@ -643,6 +648,50 @@ export interface ControlStore {
     module?: OttoBillingModule;
     limit: number;
   }): Promise<ExecutionReceiptRecord[]>;
+  registerEdgeBillingNode(input: {
+    nodeId: string;
+    deploymentId: string;
+    organizationId: string;
+    signingKeyId: string;
+    createdAt: Date;
+  }): Promise<EdgeBillingNodeRecord>;
+  revokeEdgeBillingNode(input: {
+    nodeId: string;
+    deploymentId: string;
+    revokedAt: Date;
+  }): Promise<EdgeBillingNodeRecord | null>;
+  getEdgeBillingNode(nodeId: string): Promise<EdgeBillingNodeRecord | null>;
+  listEdgeBillingNodes(deploymentId: string): Promise<EdgeBillingNodeRecord[]>;
+  enqueueEdgeBillingEvent(input: {
+    eventId: string;
+    nodeId: string;
+    nodeSequence: number;
+    customerId: string;
+    deploymentId: string;
+    organizationId: string;
+    holdId: string | null;
+    envelope: SignedExecutionReceiptV2;
+    payloadSha256: string;
+    receivedAt: Date;
+  }): Promise<{ event: EdgeBillingAggregationEventRecord; replayed: boolean }>;
+  listReadyEdgeBillingEvents(input: {
+    now: Date;
+    limit: number;
+    nodeId?: string;
+  }): Promise<EdgeBillingAggregationEventRecord[]>;
+  markEdgeBillingEventReconciled(input: {
+    eventId: string;
+    reconciledAt: Date;
+  }): Promise<EdgeBillingAggregationEventRecord | null>;
+  markEdgeBillingEventFailed(input: {
+    eventId: string;
+    errorCode: string;
+    nextAttemptAt: Date;
+    deadLetter: boolean;
+    updatedAt: Date;
+  }): Promise<EdgeBillingAggregationEventRecord | null>;
+  retryEdgeBillingDeadLetters(input: { now: Date; limit: number }): Promise<number>;
+  getEdgeBillingAggregationStatus(deploymentId?: string): Promise<EdgeBillingAggregationStatus>;
   refundCredits(input: {
     transactionId: string;
     customerId: string;

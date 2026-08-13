@@ -60,6 +60,15 @@ describe('PostgreSQL migrations', () => {
       statement.includes('CREATE TABLE IF NOT EXISTS control_execution_receipt_keys')
     ))).toBe(true);
     expect(statements.some((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_edge_billing_nodes')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_edge_billing_events')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
+      statement.includes('idx_control_execution_receipts_source_sequence')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
       statement.includes('ALTER TABLE control_data_governance_requests')
       && statement.includes('ADD COLUMN IF NOT EXISTS due_at')
     ))).toBe(true);

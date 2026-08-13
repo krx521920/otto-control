@@ -25,6 +25,28 @@ const REQUIRED_ACCEPTANCE = {
     && report.durationSeconds >= 24 * 60 * 60,
   costLoad: (report) => report.kind === 'otto_edge_gateway_acceptance'
     && report.profile === 'cost-load' && report.result === 'passed',
+  esaInfrastructure: (report) => report.kind === 'otto_aliyun_esa_infrastructure_acceptance'
+    && report.result === 'passed' && report.publicRouteEnabled === true
+    && report.publicRouteBypass === false && report.certificateStatus === 'issued'
+    && report.wafEnabled === true && report.tls10 === false && report.tls11 === false
+    && report.tls12 === true && report.tls13 === true
+    && report.secretMaterialInTerraform === false
+    && typeof report.terraformPlanSha256 === 'string'
+    && SHA256.test(report.terraformPlanSha256),
+  esaRollout: (report) => report.drill === 'esa_canary_rollout'
+    && report.result === 'promoted' && report.startedPercent <= 10
+    && report.completedPercent === 100 && report.rollbackDrill === 'passed'
+    && report.billingReady === true,
+  esaKeyringRevocation: (report) => report.drill === 'esa_keyring_emergency_revocation'
+    && report.environment === 'preproduction' && report.result === 'passed'
+    && report.publicKeyringVerified === true && Array.isArray(report.nodeEvidence)
+    && report.nodeEvidence.length >= 2
+    && report.nodeEvidence.every((node) => node.oldTokenStatus === 401
+      && node.replacementTokenStatus >= 200 && node.replacementTokenStatus < 300),
+  multiNodeBilling: (report) => report.kind === 'otto_edge_multi_node_billing_acceptance'
+    && report.result === 'passed' && report.nodes >= 2 && report.activeNodes >= 2
+    && report.pending === 0 && report.retrying === 0 && report.deadLetter === 0
+    && report.sequenceGaps === 0 && report.reconciliationResult === 'passed',
 };
 const SHA256 = /^[a-f0-9]{64}$/u;
 const PLACEHOLDERS = /(?:TODO|TBD|UNSET|CONFIGURE|EXAMPLE|REPLACE)/iu;

@@ -28,6 +28,29 @@ async function fixture() {
       durationSeconds: 86_400,
     },
     costLoad: { kind: 'otto_edge_gateway_acceptance', profile: 'cost-load', result: 'passed' },
+    esaInfrastructure: {
+      kind: 'otto_aliyun_esa_infrastructure_acceptance', result: 'passed',
+      publicRouteEnabled: true, publicRouteBypass: false, certificateStatus: 'issued',
+      wafEnabled: true, tls10: false, tls11: false, tls12: true, tls13: true,
+      secretMaterialInTerraform: false, terraformPlanSha256: 'a'.repeat(64),
+    },
+    esaRollout: {
+      drill: 'esa_canary_rollout', result: 'promoted', startedPercent: 5,
+      completedPercent: 100, rollbackDrill: 'passed', billingReady: true,
+    },
+    esaKeyringRevocation: {
+      drill: 'esa_keyring_emergency_revocation', environment: 'preproduction',
+      result: 'passed', publicKeyringVerified: true,
+      nodeEvidence: [
+        { oldTokenStatus: 401, replacementTokenStatus: 200 },
+        { oldTokenStatus: 401, replacementTokenStatus: 204 },
+      ],
+    },
+    multiNodeBilling: {
+      kind: 'otto_edge_multi_node_billing_acceptance', result: 'passed', nodes: 2,
+      activeNodes: 2, pending: 0, retrying: 0, deadLetter: 0, sequenceGaps: 0,
+      reconciliationResult: 'passed',
+    },
   };
   const technicalAcceptance = Object.fromEntries(await Promise.all(
     Object.entries(reports).map(async ([name, report]) => {

@@ -1340,6 +1340,64 @@ const MIGRATIONS: Migration[] = [
        ON CONFLICT DO NOTHING`,
     ],
   },
+  {
+    id: '031_edge_billing_aggregation',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_edge_billing_nodes (
+        node_id TEXT PRIMARY KEY CHECK (node_id ~ '^edge_[a-f0-9]{32}$'),
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id) ON DELETE CASCADE,
+        organization_id TEXT NOT NULL,
+        signing_key_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+        last_sequence BIGINT NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
+        last_seen_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (deployment_id, signing_key_id),
+        FOREIGN KEY (deployment_id, signing_key_id)
+          REFERENCES control_execution_receipt_keys(deployment_id, key_id),
+        CHECK ((status = 'revoked') = (revoked_at IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_edge_billing_nodes_deployment
+       ON control_edge_billing_nodes(deployment_id, status, node_id)`,
+      `ALTER TABLE control_execution_receipts
+       ADD COLUMN IF NOT EXISTS edge_node_id TEXT
+       REFERENCES control_edge_billing_nodes(node_id)`,
+      `ALTER TABLE control_execution_receipts
+       DROP CONSTRAINT IF EXISTS control_execution_receipts_deployment_id_sequence_key`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_execution_receipts_source_sequence
+       ON control_execution_receipts(deployment_id, COALESCE(edge_node_id, ''), sequence)`,
+      `CREATE TABLE IF NOT EXISTS control_edge_billing_events (
+        event_id TEXT PRIMARY KEY CHECK (event_id ~ '^edgeevt_[a-f0-9]{32}$'),
+        node_id TEXT NOT NULL REFERENCES control_edge_billing_nodes(node_id),
+        node_sequence BIGINT NOT NULL CHECK (node_sequence > 0),
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id),
+        organization_id TEXT NOT NULL,
+        hold_id TEXT REFERENCES control_credit_holds(id),
+        receipt_id TEXT NOT NULL UNIQUE CHECK (receipt_id ~ '^exec_[a-f0-9]{32}$'),
+        payload JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+        payload_sha256 TEXT NOT NULL CHECK (payload_sha256 ~ '^[a-f0-9]{64}$'),
+        state TEXT NOT NULL DEFAULT 'pending'
+          CHECK (state IN ('pending', 'retrying', 'dead_letter', 'reconciled')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 1000),
+        next_attempt_at TIMESTAMPTZ NOT NULL,
+        last_error_code TEXT,
+        received_at TIMESTAMPTZ NOT NULL,
+        reconciled_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (node_id, node_sequence),
+        CHECK (node_sequence = ((payload->'receipt'->>'sequence')::BIGINT)),
+        CHECK ((state = 'reconciled') = (reconciled_at IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_edge_billing_events_ready
+       ON control_edge_billing_events(node_id, node_sequence, next_attempt_at)
+       WHERE state IN ('pending', 'retrying')`,
+      `CREATE INDEX IF NOT EXISTS idx_control_edge_billing_events_reconciliation
+       ON control_edge_billing_events(deployment_id, state, received_at)`,
+    ],
+  },
 ];
 
 export const CONTROL_SCHEMA_MIGRATION_IDS = Object.freeze(

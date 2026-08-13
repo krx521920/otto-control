@@ -192,6 +192,41 @@ describe('Control-backed Edge billing coordinator', () => {
     }
   });
 
+  it('submits node-bound receipts through the ordered Control aggregation endpoint', async () => {
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      calls.push({ path, body });
+      if (path.endsWith('/execution-receipt-keys/bootstrap')) return response({}, 201);
+      if (path === '/v1/billing/holds') return response({ hold: { id: HOLD_ONE } }, 201);
+      if (path === '/v1/billing/edge-events') return response({ replayed: false }, 202);
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const nodeId = `edge_${'a'.repeat(32)}`;
+    const coordinator = await create(fetchMock, signer(), undefined, { nodeId });
+    const request = identity('request_edge_node_1');
+    const reservation = await coordinator.reserve({ ...request, reserveUnits: 100 });
+    await coordinator.settle({
+      ...request,
+      reservation,
+      routeId: 'route_primary',
+      usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
+      occurredAtMs: NOW,
+    });
+
+    const aggregation = calls.find((call) => call.path === '/v1/billing/edge-events')!;
+    expect(aggregation.body).toMatchObject({
+      ...BINDING,
+      nodeId,
+      nodeSequence: 1,
+      holdId: HOLD_ONE,
+      eventId: expect.stringMatching(/^edgeevt_[a-f0-9]{32}$/u),
+      envelope: { receipt: { sequence: 1, units: 5 } },
+    });
+    expect(calls.some((call) => call.path.includes(`${HOLD_ONE}/execution-receipts`))).toBe(false);
+  });
+
   it('replays a durable pending settlement after restart and preserves sequence order', async () => {
     const receiptSigner = signer();
     let firstSettlement = true;

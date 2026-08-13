@@ -55,6 +55,34 @@
       "evidence": { "path": null, "sha256": null },
       "performedAt": null,
       "expiresAt": null
+    },
+    "esaInfrastructure": {
+      "status": "pending",
+      "releaseCandidate": null,
+      "evidence": { "path": null, "sha256": null },
+      "performedAt": null,
+      "expiresAt": null
+    },
+    "esaRollout": {
+      "status": "pending",
+      "releaseCandidate": null,
+      "evidence": { "path": null, "sha256": null },
+      "performedAt": null,
+      "expiresAt": null
+    },
+    "esaKeyringRevocation": {
+      "status": "pending",
+      "releaseCandidate": null,
+      "evidence": { "path": null, "sha256": null },
+      "performedAt": null,
+      "expiresAt": null
+    },
+    "multiNodeBilling": {
+      "status": "pending",
+      "releaseCandidate": null,
+      "evidence": { "path": null, "sha256": null },
+      "performedAt": null,
+      "expiresAt": null
     }
   },
   "providerDpaReviews": [

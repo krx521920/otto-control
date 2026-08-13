@@ -27,6 +27,7 @@ import {
 
 const IDENTIFIER = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,159}$/u;
 const HOLD_ID = /^hold_[a-f0-9]{32}$/u;
+const EDGE_NODE_ID = /^edge_[a-f0-9]{32}$/u;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_RETRY_MS = 10_000;
 const RECEIPT_LIFETIME_MS = 518_400_000;
@@ -122,6 +123,8 @@ export interface ControlEdgeBillingCoordinatorOptions {
   requestTimeoutMs?: number;
   retryIntervalMs?: number;
   bootstrapReceiptKey?: boolean;
+  /** Enables PostgreSQL-backed multi-node aggregation instead of legacy deployment sequencing. */
+  nodeId?: string;
 }
 
 class ControlBillingRequestError extends Error {
@@ -283,6 +286,7 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
   readonly #randomHex: () => string;
   readonly #requestTimeoutMs: number;
   readonly #retryIntervalMs: number;
+  readonly #nodeId?: string;
   readonly #reservations = new Map<string, ReservationState>();
   readonly #recoveredReservations = new Set<string>();
   readonly #pendingSettlements = new Map<string, PendingSettlement>();
@@ -318,6 +322,10 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
     this.#retryIntervalMs = boundedInteger(
       options.retryIntervalMs, DEFAULT_RETRY_MS, 1_000, 60 * 60 * 1000, 'retry interval',
     );
+    this.#nodeId = options.nodeId?.trim();
+    if (this.#nodeId && !EDGE_NODE_ID.test(this.#nodeId)) {
+      configurationError('edge billing node ID');
+    }
   }
 
   static async create(
@@ -507,12 +515,24 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
       .sort((left, right) => left.envelope.receipt.sequence - right.envelope.receipt.sequence);
     for (const item of pending) {
       try {
-        await this.#post(`/v1/billing/holds/${item.reservationId}/execution-receipts`, {
-          licenseId: this.#binding.licenseId,
-          machineFingerprint: this.#binding.machineFingerprint,
-          envelope: item.envelope,
-        });
+        if (this.#nodeId) {
+          await this.#post('/v1/billing/edge-events', {
+            ...this.#binding,
+            eventId: stableId('edgeevt_', `${this.#nodeId}:${item.envelope.receipt.receiptId}`),
+            nodeId: this.#nodeId,
+            nodeSequence: item.envelope.receipt.sequence,
+            holdId: item.reservationId,
+            envelope: item.envelope,
+          });
+        } else {
+          await this.#post(`/v1/billing/holds/${item.reservationId}/execution-receipts`, {
+            licenseId: this.#binding.licenseId,
+            machineFingerprint: this.#binding.machineFingerprint,
+            envelope: item.envelope,
+          });
+        }
       } catch (error) {
+        if (this.#nodeId) return;
         if (!(error instanceof ControlBillingRequestError)
           || error.status !== 409
           || error.code !== 'CREDIT_HOLD_UNAVAILABLE') return;

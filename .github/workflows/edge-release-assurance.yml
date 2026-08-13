@@ -6,6 +6,9 @@ on:
       - .github/workflows/edge-release-assurance.yml
       - security/edge-release-assurance-status.json
       - scripts/check-edge-release-assurance.mjs
+      - scripts/drill-esa-keyring-revocation.mjs
+      - scripts/preflight-aliyun-esa-iac.mjs
+      - deploy/aliyun-esa/**
       - test/edge-release-assurance.test.ts
   push:
     tags:

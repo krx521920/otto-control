@@ -306,6 +306,7 @@ describe('commercial control HTTP routes', () => {
       'credit_billing',
       'billing_statement_export',
       'signed_execution_receipts_v2',
+      'multi_edge_billing_aggregation',
     ]);
 
     const backupStatus = await app.inject({

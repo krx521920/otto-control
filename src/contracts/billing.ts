@@ -149,11 +149,65 @@ export interface SignedExecutionReceiptV2 {
 
 export interface ExecutionReceiptRecord extends ExecutionReceiptV2Payload {
   customerId: string;
+  /** Null for legacy single-node receipts; otherwise the registered edge node. */
+  edgeNodeId?: string | null;
   signingKeyId: string;
   signature: string;
   transactionId: string;
   verificationStatus: 'verified';
   receivedAt: Date;
+}
+
+export type EdgeBillingNodeStatus = 'active' | 'revoked';
+
+export interface EdgeBillingNodeRecord {
+  nodeId: string;
+  deploymentId: string;
+  organizationId: string;
+  signingKeyId: string;
+  status: EdgeBillingNodeStatus;
+  lastSequence: number;
+  lastSeenAt: Date | null;
+  revokedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type EdgeBillingAggregationState =
+  | 'pending'
+  | 'retrying'
+  | 'dead_letter'
+  | 'reconciled';
+
+export interface EdgeBillingAggregationEventRecord {
+  eventId: string;
+  nodeId: string;
+  nodeSequence: number;
+  customerId: string;
+  deploymentId: string;
+  organizationId: string;
+  holdId: string | null;
+  envelope: SignedExecutionReceiptV2;
+  payloadSha256: string;
+  state: EdgeBillingAggregationState;
+  attempts: number;
+  nextAttemptAt: Date;
+  lastErrorCode: string | null;
+  receivedAt: Date;
+  reconciledAt: Date | null;
+  updatedAt: Date;
+}
+
+export interface EdgeBillingAggregationStatus {
+  nodes: number;
+  activeNodes: number;
+  revokedNodes: number;
+  pending: number;
+  retrying: number;
+  deadLetter: number;
+  reconciled: number;
+  sequenceGaps: number;
+  oldestPendingAt: Date | null;
 }
 
 export interface ExecutionReceiptMutationResult extends CreditMutationResult {
