@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "product": "otto-edge-gateway",
+  "releaseCandidate": "UNSET",
+  "overallStatus": "blocked",
+  "externalSecurityAudit": {
+    "status": "pending",
+    "auditor": null,
+    "scope": [],
+    "report": {
+      "path": null,
+      "sha256": null
+    },
+    "openFindings": {
+      "critical": null,
+      "high": null,
+      "medium": null,
+      "low": null
+    },
+    "reviewedAt": null,
+    "expiresAt": null
+  },
+  "technicalAcceptance": {
+    "runtimeFailures": {
+      "status": "pending",
+      "releaseCandidate": null,
+      "evidence": { "path": null, "sha256": null },
+      "performedAt": null,
+      "expiresAt": null
+    },
+    "keyRevocation": {
+      "status": "pending",
+      "releaseCandidate": null,
+      "evidence": { "path": null, "sha256": null },
+      "performedAt": null,
+      "expiresAt": null
+    },
+    "billingReconciliation": {
+      "status": "pending",
+      "releaseCandidate": null,
+      "evidence": { "path": null, "sha256": null },
+      "performedAt": null,
+      "expiresAt": null
+    },
+    "soak24h": {
+      "status": "pending",
+      "releaseCandidate": null,
+      "evidence": { "path": null, "sha256": null },
+      "performedAt": null,
+      "expiresAt": null
+    },
+    "costLoad": {
+      "status": "pending",
+      "releaseCandidate": null,
+      "evidence": { "path": null, "sha256": null },
+      "performedAt": null,
+      "expiresAt": null
+    }
+  },
+  "providerDpaReviews": [
+    {
+      "providerId": "CONFIGURE_PROVIDER",
+      "status": "pending",
+      "legalReviewer": null,
+      "agreementReference": null,
+      "dataResidency": null,
+      "crossBorderTransferBasis": null,
+      "modelTrainingUse": null,
+      "subprocessorsReviewed": false,
+      "securityIncidentNoticeHours": null,
+      "deletionCommitmentDays": null,
+      "evidence": {
+        "path": null,
+        "sha256": null
+      },
+      "reviewedAt": null,
+      "expiresAt": null
+    }
+  ]
+}
