@@ -21,6 +21,7 @@ COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chmod=0755 deploy/control-entrypoint.sh /usr/local/bin/otto-control-entrypoint
+COPY --chmod=0755 deploy/edge-entrypoint.sh /usr/local/bin/otto-edge-entrypoint
 
 USER root
 EXPOSE 7788

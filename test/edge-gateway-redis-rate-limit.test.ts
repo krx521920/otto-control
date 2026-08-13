@@ -147,16 +147,25 @@ describe('Node Redis edge rate limiter composition', () => {
     const redis = redisClient();
     const factory = vi.fn(() => redis);
     const limiter = await createNodeRedisEdgeRateLimiter({
-      connectionString: 'rediss://user:secret@redis.internal:6379/0',
+      connectionString: 'rediss://redis.internal:6379/0',
       keySecret: SECRET,
+      password: 'secret-from-file',
+      tlsCa: 'test-ca',
+      tlsServerName: 'redis.service.internal',
       connectTimeoutMs: 2_500,
       clientFactory: factory,
     });
 
     expect(factory).toHaveBeenCalledWith(expect.objectContaining({
-      url: 'rediss://user:secret@redis.internal:6379/0',
+      url: 'rediss://redis.internal:6379/0',
+      password: 'secret-from-file',
       disableOfflineQueue: true,
-      socket: { connectTimeout: 2_500 },
+      socket: {
+        connectTimeout: 2_500,
+        tls: true,
+        servername: 'redis.service.internal',
+        ca: 'test-ca',
+      },
     }));
     expect(redis.on).toHaveBeenCalledWith('error', expect.any(Function));
     expect(redis.connect).toHaveBeenCalledTimes(1);
@@ -173,6 +182,15 @@ describe('Node Redis edge rate limiter composition', () => {
     await expect(createNodeRedisEdgeRateLimiter({
       connectionString: 'not a url', keySecret: SECRET,
     })).rejects.toThrow('valid Redis URL');
+    await expect(createNodeRedisEdgeRateLimiter({
+      connectionString: 'rediss://user:secret@redis.internal', keySecret: SECRET,
+    })).rejects.toThrow('must not contain credentials');
+    await expect(createNodeRedisEdgeRateLimiter({
+      connectionString: 'redis://localhost:6379',
+      keySecret: SECRET,
+      tlsCa: 'ca',
+      allowInsecure: true,
+    })).rejects.toThrow('requires a rediss URL');
     await expect(createNodeRedisEdgeRateLimiter({
       connectionString: 'redis://localhost:6379',
       keySecret: SECRET,

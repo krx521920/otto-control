@@ -527,6 +527,9 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_RATE_LIMIT_BACKEND: 'redis',
       OTTO_EDGE_REDIS_URL: 'rediss://redis.internal:6379/2',
       OTTO_EDGE_RATE_LIMIT_KEY_FILE: 'D:\\secure\\edge-rate-limit.key',
+      OTTO_EDGE_REDIS_PASSWORD_FILE: 'D:\\secure\\redis-password',
+      OTTO_EDGE_REDIS_CA_FILE: 'D:\\secure\\redis-ca.pem',
+      OTTO_EDGE_REDIS_SERVER_NAME: 'redis.internal',
       OTTO_EDGE_RATE_LIMIT_PREFIX: 'otto-production',
       OTTO_EDGE_REDIS_CONNECT_TIMEOUT_MS: '2500',
       OTTO_EDGE_RATE_LIMIT_BAN_THRESHOLD: '12',
@@ -554,6 +557,9 @@ describe('edge gateway server configuration', () => {
         type: 'redis',
         connectionString: 'rediss://redis.internal:6379/2',
         keySecretFile: 'D:\\secure\\edge-rate-limit.key',
+        passwordFile: 'D:\\secure\\redis-password',
+        tlsCaFile: 'D:\\secure\\redis-ca.pem',
+        tlsServerName: 'redis.internal',
         keyPrefix: 'otto-production',
         connectTimeoutMs: 2500,
         banThreshold: 12,
@@ -652,6 +658,11 @@ describe('edge gateway server configuration', () => {
       ...common,
       OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
       OTTO_EDGE_REDIS_URL: 'rediss://redis.internal:6379',
+    })).toThrow('OTTO_EDGE_RATE_LIMIT_BACKEND=redis');
+    expect(() => loadEdgeGatewayServerConfiguration({
+      ...common,
+      OTTO_EDGE_POLICY_FILE: 'D:\\secure\\policy.json',
+      OTTO_EDGE_REDIS_PASSWORD_FILE: 'D:\\secure\\password',
     })).toThrow('OTTO_EDGE_RATE_LIMIT_BACKEND=redis');
     expect(() => loadEdgeGatewayServerConfiguration({
       ...common,

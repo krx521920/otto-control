@@ -334,6 +334,195 @@ function validatePostgresIdentity(secretDirectory, errors) {
   }
 }
 
+function validateEdgeRedisIdentity(secretDirectory, errors) {
+  const caPath = resolve(secretDirectory, 'edge_redis_tls_ca.pem');
+  const certificatePath = resolve(secretDirectory, 'edge_redis_tls_cert.pem');
+  const keyPath = resolve(secretDirectory, 'edge_redis_tls_key.pem');
+  const caPrivateKeyPath = resolve(secretDirectory, 'edge_redis_tls_ca_private_key.pem');
+  const caPem = readRequiredFile(caPath, errors);
+  const certificatePem = readRequiredFile(certificatePath, errors);
+  const keyPem = readRequiredFile(keyPath, errors);
+  const caPrivateKeyPem = readRequiredFile(caPrivateKeyPath, errors);
+  if (!caPem || !certificatePem || !keyPem || !caPrivateKeyPem) return;
+  try {
+    const ca = new X509Certificate(caPem);
+    const certificate = new X509Certificate(certificatePem);
+    if (!ca.ca) errors.push('Edge Redis CA certificate is not marked as a CA');
+    if (!certificate.verify(ca.publicKey)) {
+      errors.push('Edge Redis server certificate is not signed by its CA');
+    }
+    if (!certificate.checkHost('edge-redis')) {
+      errors.push('Edge Redis server certificate does not cover edge-redis');
+    }
+    const caPrivateKey = createPrivateKey(caPrivateKeyPem);
+    const caPrivatePublicKey = createPublicKey(caPrivateKey).export({ type: 'spki', format: 'der' });
+    const caCertificateKey = ca.publicKey.export({ type: 'spki', format: 'der' });
+    if (!caCertificateKey.equals(caPrivatePublicKey)) {
+      errors.push('Edge Redis CA certificate and private key do not match');
+    }
+    const privateKey = createPrivateKey(keyPem);
+    const privatePublicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'der' });
+    const certificateKey = certificate.publicKey.export({ type: 'spki', format: 'der' });
+    if (!certificateKey.equals(privatePublicKey)) {
+      errors.push('Edge Redis server certificate and private key do not match');
+    }
+  } catch (error) {
+    errors.push(`Edge Redis TLS identity is invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function validateEdgeGateway(environmentFile, environment, secretDirectory, errors) {
+  const enabled = environment.get('OTTO_EDGE_ENABLED') === 'true';
+  if (!enabled) return false;
+  const configDirectoryValue = environment.get('OTTO_EDGE_CONFIG_DIR')?.trim();
+  const providerDirectoryValue = environment.get('OTTO_EDGE_PROVIDER_SECRETS_DIR')?.trim();
+  if (!configDirectoryValue) errors.push('OTTO_EDGE_CONFIG_DIR is required when Edge Gateway is enabled');
+  if (!providerDirectoryValue) {
+    errors.push('OTTO_EDGE_PROVIDER_SECRETS_DIR is required when Edge Gateway is enabled');
+  }
+  const configDirectory = isAbsolute(configDirectoryValue || '')
+    ? configDirectoryValue
+    : resolve(dirname(environmentFile), configDirectoryValue || 'edge-config');
+  const providerDirectory = isAbsolute(providerDirectoryValue || '')
+    ? providerDirectoryValue
+    : resolve(dirname(environmentFile), providerDirectoryValue || 'edge-provider-secrets');
+  for (const [directory, name] of [
+    [configDirectory, 'Edge Gateway configuration directory'],
+    [providerDirectory, 'Edge Gateway provider-secret directory'],
+  ]) {
+    try {
+      const stat = lstatSync(directory);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        errors.push(`${name} must be a real directory`);
+      } else if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
+        errors.push(`${name} must not be accessible by group/other users`);
+      }
+    } catch (error) {
+      errors.push(`${name} cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const publicKeysText = readRequiredFile(
+    resolve(configDirectory, 'control_public_keys.json'), errors,
+  );
+  const originsText = readRequiredFile(resolve(configDirectory, 'upstream_origins.json'), errors);
+  const identityText = readRequiredFile(
+    resolve(configDirectory, 'deployment_identity.json'), errors,
+  );
+  try {
+    const publicKeys = JSON.parse(publicKeysText);
+    if (!publicKeys || typeof publicKeys !== 'object' || Array.isArray(publicKeys)
+      || Object.keys(publicKeys).length < 1
+      || Object.values(publicKeys).some((value) => typeof value !== 'string' || !value.trim())) {
+      errors.push('Edge Gateway Control public keys are invalid');
+    }
+  } catch {
+    errors.push('Edge Gateway Control public keys must contain JSON');
+  }
+  const providerBindings = new Set();
+  try {
+    const origins = JSON.parse(originsText);
+    if (!origins || typeof origins !== 'object' || Array.isArray(origins)
+      || origins.version !== 2
+      || Object.keys(origins).length !== 2
+      || !Array.isArray(origins.allowedUpstreams)
+      || origins.allowedUpstreams.length < 1
+      || origins.allowedUpstreams.length > 256) {
+      errors.push('Edge Gateway upstream origins must use non-empty version 2 allowedUpstreams');
+    } else {
+      for (const upstream of origins.allowedUpstreams) {
+        if (!upstream || typeof upstream !== 'object' || Array.isArray(upstream)
+          || Object.keys(upstream).length !== 2
+          || typeof upstream.origin !== 'string'
+          || !Array.isArray(upstream.authentications)
+          || upstream.authentications.length < 1) {
+          errors.push('Edge Gateway upstream origins contain an invalid rule');
+          continue;
+        }
+        try {
+          const origin = new URL(upstream.origin);
+          if (origin.protocol !== 'https:' || origin.origin !== upstream.origin
+            || origin.username || origin.password) {
+            errors.push('Edge Gateway upstream rules require credential-free HTTPS origins');
+          }
+        } catch {
+          errors.push('Edge Gateway upstream origin is invalid');
+        }
+        for (const authentication of upstream.authentications) {
+          const binding = authentication?.secretBinding;
+          const expectedFields = authentication?.type === 'bearer'
+            ? ['type', 'secretBinding']
+            : authentication?.type === 'header'
+              ? ['type', 'headerName', 'secretBinding']
+              : [];
+          if (!authentication || typeof authentication !== 'object'
+            || Array.isArray(authentication)
+            || expectedFields.length === 0
+            || Object.keys(authentication).length !== expectedFields.length
+            || Object.keys(authentication).some((field) => !expectedFields.includes(field))
+            || typeof binding !== 'string'
+            || !/^[A-Z][A-Z0-9_]{2,127}$/u.test(binding)
+            || (authentication.type === 'header'
+              && (typeof authentication.headerName !== 'string'
+                || !/^[a-zA-Z0-9!#$%&'*+.^_`|~-]{1,80}$/u.test(authentication.headerName)))) {
+            errors.push('Edge Gateway upstream authentication binding is invalid');
+          } else {
+            providerBindings.add(binding);
+          }
+        }
+      }
+    }
+  } catch {
+    errors.push('Edge Gateway upstream origins must contain JSON');
+  }
+  for (const binding of providerBindings) {
+    if (environment.get(binding)?.trim()) {
+      errors.push(`${binding} must use a file-backed provider secret`);
+    }
+    const expectedPath = `/run/otto-edge-provider-secrets/${binding}`;
+    if (environment.get(`${binding}_FILE`) !== expectedPath) {
+      errors.push(`${binding}_FILE must reference ${expectedPath}`);
+    }
+    const value = readRequiredFile(resolve(providerDirectory, binding), errors);
+    if (value && (value.length > 8_192 || !/^[\x21-\x7e]+$/u.test(value))) {
+      errors.push(`provider secret ${binding} is invalid`);
+    }
+  }
+  try {
+    const identity = JSON.parse(identityText);
+    const fields = ['licenseId', 'deploymentId', 'organizationId', 'machineFingerprint'];
+    if (!identity || typeof identity !== 'object' || Array.isArray(identity)
+      || Object.keys(identity).some((field) => !fields.includes(field))
+      || fields.some((field) => typeof identity[field] !== 'string')
+      || !/^[a-f0-9]{64}$/u.test(identity.machineFingerprint)) {
+      errors.push('Edge Gateway deployment identity is invalid');
+    }
+  } catch {
+    errors.push('Edge Gateway deployment identity must contain JSON');
+  }
+  const leaseToken = readRequiredFile(resolve(secretDirectory, 'edge_lease_token'), errors);
+  if (leaseToken && (leaseToken.length < 32 || leaseToken.length > 8_192 || /\s/u.test(leaseToken))) {
+    errors.push('edge_lease_token is invalid');
+  }
+  for (const name of ['edge_rate_limit_key', 'edge_redis_password', 'edge_operations_token']) {
+    const value = readRequiredFile(resolve(secretDirectory, name), errors);
+    if (value && value.length < 32) errors.push(`${name} must contain at least 32 characters`);
+  }
+  const receiptKey = readRequiredFile(
+    resolve(secretDirectory, 'edge_execution_receipt_private_key.pem'), errors,
+  );
+  if (receiptKey) {
+    try {
+      if (createPrivateKey(receiptKey).asymmetricKeyType !== 'ed25519') {
+        errors.push('Edge execution receipt private key must be Ed25519');
+      }
+    } catch {
+      errors.push('Edge execution receipt private key is invalid');
+    }
+  }
+  validateEdgeRedisIdentity(secretDirectory, errors);
+  return true;
+}
+
 async function validateDns(hostnames, errors) {
   for (const hostname of hostnames) {
     try {
@@ -379,6 +568,7 @@ async function main() {
   const federationBaseUrl = requireValue('FEDERATION_PUBLIC_BASE_URL');
   const controlDomain = requireValue('CONTROL_DOMAIN');
   const federationDomain = requireValue('FEDERATION_DOMAIN');
+  const edgeDomain = requireValue('EDGE_DOMAIN');
   let controlUrl;
   let federationUrl;
   try {
@@ -402,6 +592,9 @@ async function main() {
     errors.push('FEDERATION_PUBLIC_BASE_URL is invalid');
   }
   if (controlDomain === federationDomain) errors.push('Control and Federation domains must differ');
+  if ([controlDomain, federationDomain].includes(edgeDomain)) {
+    errors.push('Control, Federation and Edge Gateway domains must differ');
+  }
 
   if (environment.get('CONTROL_DATABASE_SSL') !== 'true') {
     errors.push('CONTROL_DATABASE_SSL must be true');
@@ -507,6 +700,9 @@ async function main() {
     errors,
   );
   validatePostgresIdentity(secretDirectory, errors);
+  const edgeEnabled = validateEdgeGateway(
+    environmentFile, environment, secretDirectory, errors,
+  );
 
   const federationAttachmentStorageRequired =
     environment.get('FEDERATION_ATTACHMENT_STORAGE_REQUIRED') === 'true';
@@ -610,7 +806,9 @@ async function main() {
   }
 
   if (deploymentEnvironment === 'production') {
-    if (reservedHostname(controlDomain) || reservedHostname(federationDomain)) {
+    if (reservedHostname(controlDomain)
+      || reservedHostname(federationDomain)
+      || reservedHostname(edgeDomain)) {
       errors.push('production domains cannot use localhost or reserved example/test suffixes');
     }
     const productionValues = [
@@ -635,7 +833,11 @@ async function main() {
       errors.push('CONTROL_DATA_REGION must be an explicit region code such as CN-BJ');
     }
     if (!hasFlag('--skip-dns') && controlUrl && federationUrl) {
-      await validateDns([controlUrl.hostname, federationUrl.hostname], errors);
+      await validateDns([
+        controlUrl.hostname,
+        federationUrl.hostname,
+        ...(edgeEnabled ? [edgeDomain] : []),
+      ], errors);
     }
   }
 
@@ -649,6 +851,15 @@ async function main() {
         '--env-file', environmentFile,
         'config', '--quiet',
       ]);
+      if (edgeEnabled) {
+        run('docker', [
+          'compose',
+          '-f', resolve(repositoryRoot, 'compose.production.yaml'),
+          '--env-file', environmentFile,
+          '--profile', 'edge',
+          'config', '--quiet',
+        ]);
+      }
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));
     }
@@ -663,7 +874,7 @@ async function main() {
     throw new Error(`deployment preflight failed:\n- ${errors.join('\n- ')}`);
   }
   process.stdout.write(
-    `Deployment preflight passed for ${deploymentEnvironment}: ${controlDomain}, ${federationDomain}\n`,
+    `Deployment preflight passed for ${deploymentEnvironment}: ${controlDomain}, ${federationDomain}, Edge Gateway ${edgeEnabled ? edgeDomain : 'disabled'}\n`,
   );
 }
 

@@ -215,6 +215,9 @@ Multi-instance deployments require a shared ordered
 aggregator instead of sharing this file over NFS/SMB. See
 [`docs/otto-edge-gateway.zh-CN.md`](docs/otto-edge-gateway.zh-CN.md) for
 the trust boundary, configuration, and remaining production gates.
+For the single-server production Compose profile, TLS Redis, file-backed
+secrets, health checks, and staged upgrade/rollback procedure, see
+[`docs/edge-gateway-production-deployment.zh-CN.md`](docs/edge-gateway-production-deployment.zh-CN.md).
 
 Control persists deployment-scoped Edge policies in PostgreSQL and exposes
 authenticated policy-resolution and short-lived token-issuance APIs. They

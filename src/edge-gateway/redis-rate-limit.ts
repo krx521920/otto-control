@@ -184,6 +184,9 @@ export class RedisEdgeRateLimiter implements EdgeRateLimiter {
 export async function createNodeRedisEdgeRateLimiter(input: {
   connectionString: string;
   keySecret: Uint8Array;
+  password?: string;
+  tlsCa?: string | Buffer;
+  tlsServerName?: string;
   keyPrefix?: string;
   banThreshold?: number;
   strikeWindowMs?: number;
@@ -201,6 +204,12 @@ export async function createNodeRedisEdgeRateLimiter(input: {
   if (url.protocol !== 'rediss:' && !(input.allowInsecure && url.protocol === 'redis:')) {
     throw new Error('OTTO_EDGE_REDIS_URL must use rediss unless insecure Redis is explicitly allowed');
   }
+  if (url.username || url.password) {
+    throw new Error('OTTO_EDGE_REDIS_URL must not contain credentials; use a password file');
+  }
+  if (input.tlsCa && url.protocol !== 'rediss:') {
+    throw new Error('Redis TLS CA configuration requires a rediss URL');
+  }
   const connectTimeout = boundedInteger(
     input.connectTimeoutMs,
     10_000,
@@ -211,7 +220,15 @@ export async function createNodeRedisEdgeRateLimiter(input: {
   const options: RedisClientOptions = {
     url: input.connectionString,
     disableOfflineQueue: true,
-    socket: { connectTimeout },
+    ...(input.password ? { password: input.password } : {}),
+    socket: url.protocol === 'rediss:'
+      ? {
+          connectTimeout,
+          tls: true,
+          servername: input.tlsServerName ?? url.hostname,
+          ...(input.tlsCa ? { ca: input.tlsCa } : {}),
+        }
+      : { connectTimeout },
   };
   const client = input.clientFactory
     ? input.clientFactory(options)

@@ -39,6 +39,7 @@ import {
   loadEdgeNodeHttpLimits,
 } from './node-http-limits.js';
 import { createEdgeSignatureVerifier } from './protocol.js';
+import { normalizeEdgeProviderSecret } from './provider-secret.js';
 import { type EdgeRateLimiter, InMemoryEdgeRateLimiter } from './rate-limit.js';
 import { createNodeRedisEdgeRateLimiter } from './redis-rate-limit.js';
 import {
@@ -75,6 +76,9 @@ type EdgeRateLimitConfiguration =
       type: 'redis';
       connectionString: string;
       keySecretFile: string;
+      passwordFile?: string;
+      tlsCaFile?: string;
+      tlsServerName?: string;
       keyPrefix?: string;
       connectTimeoutMs?: number;
       banThreshold?: number;
@@ -152,8 +156,14 @@ function optionalBoolean(
 function rateLimitConfiguration(environment: NodeJS.ProcessEnv): EdgeRateLimitConfiguration {
   const backend = environment.OTTO_EDGE_RATE_LIMIT_BACKEND?.trim() || 'memory';
   if (backend === 'memory') {
-    if (environment.OTTO_EDGE_REDIS_URL?.trim()) {
-      throw new Error('OTTO_EDGE_REDIS_URL requires OTTO_EDGE_RATE_LIMIT_BACKEND=redis');
+    const redisConfiguration = [
+      'OTTO_EDGE_REDIS_URL',
+      'OTTO_EDGE_REDIS_PASSWORD_FILE',
+      'OTTO_EDGE_REDIS_CA_FILE',
+      'OTTO_EDGE_REDIS_SERVER_NAME',
+    ].find((name) => environment[name]?.trim());
+    if (redisConfiguration) {
+      throw new Error(`${redisConfiguration} requires OTTO_EDGE_RATE_LIMIT_BACKEND=redis`);
     }
     return {
       type: 'memory',
@@ -176,6 +186,15 @@ function rateLimitConfiguration(environment: NodeJS.ProcessEnv): EdgeRateLimitCo
     type: 'redis',
     connectionString: requiredEnvironment('OTTO_EDGE_REDIS_URL', environment),
     keySecretFile: requiredEnvironment('OTTO_EDGE_RATE_LIMIT_KEY_FILE', environment),
+    ...(environment.OTTO_EDGE_REDIS_PASSWORD_FILE?.trim()
+      ? { passwordFile: environment.OTTO_EDGE_REDIS_PASSWORD_FILE.trim() }
+      : {}),
+    ...(environment.OTTO_EDGE_REDIS_CA_FILE?.trim()
+      ? { tlsCaFile: environment.OTTO_EDGE_REDIS_CA_FILE.trim() }
+      : {}),
+    ...(environment.OTTO_EDGE_REDIS_SERVER_NAME?.trim()
+      ? { tlsServerName: environment.OTTO_EDGE_REDIS_SERVER_NAME.trim() }
+      : {}),
     keyPrefix,
     connectTimeoutMs: optionalInteger(
       'OTTO_EDGE_REDIS_CONNECT_TIMEOUT_MS', environment, 500, 120_000,
@@ -399,9 +418,34 @@ async function edgeRateLimiter(config: EdgeRateLimitConfiguration): Promise<Edge
   if (keySecret.byteLength < 32 || keySecret.byteLength > 4_096) {
     throw new Error('OTTO_EDGE_RATE_LIMIT_KEY_FILE must contain 32 to 4096 bytes');
   }
+  let password: string | undefined;
+  if (config.passwordFile) {
+    try {
+      password = (await readFile(config.passwordFile, 'utf8')).trim();
+    } catch {
+      throw new Error('OTTO_EDGE_REDIS_PASSWORD_FILE could not be read');
+    }
+    if (!password || password.length > 4_096 || /[\r\n]/u.test(password)) {
+      throw new Error('OTTO_EDGE_REDIS_PASSWORD_FILE is invalid');
+    }
+  }
+  let tlsCa: Buffer | undefined;
+  if (config.tlsCaFile) {
+    try {
+      tlsCa = Buffer.from(await readFile(config.tlsCaFile));
+    } catch {
+      throw new Error('OTTO_EDGE_REDIS_CA_FILE could not be read');
+    }
+    if (tlsCa.byteLength === 0 || tlsCa.byteLength > 1024 * 1024) {
+      throw new Error('OTTO_EDGE_REDIS_CA_FILE is invalid');
+    }
+  }
   return createNodeRedisEdgeRateLimiter({
     connectionString: config.connectionString,
     keySecret,
+    password,
+    tlsCa,
+    tlsServerName: config.tlsServerName,
     keyPrefix: config.keyPrefix,
     connectTimeoutMs: config.connectTimeoutMs,
     banThreshold: config.banThreshold,
@@ -409,6 +453,23 @@ async function edgeRateLimiter(config: EdgeRateLimitConfiguration): Promise<Edge
     banMs: config.banMs,
     allowInsecure: config.allowInsecure,
   });
+}
+
+export async function resolveEdgeProviderSecret(
+  binding: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<string | null> {
+  const inlineValue = environment[binding];
+  const fileName = environment[`${binding}_FILE`]?.trim();
+  if (inlineValue?.trim() && fileName) return null;
+  if (fileName) {
+    try {
+      return normalizeEdgeProviderSecret(await readFile(fileName, 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+  return normalizeEdgeProviderSecret(inlineValue);
 }
 
 export function createEdgeGatewayReadinessProbe(input: {
@@ -630,10 +691,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
     policySource: configuredPolicySource,
     verifier,
     secretResolver: {
-      async get(binding) {
-        const value = process.env[binding]?.trim();
-        return value || null;
-      },
+      get: resolveEdgeProviderSecret,
     },
     rateLimiter,
     concurrencyLimiter,

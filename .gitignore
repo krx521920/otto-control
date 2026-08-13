@@ -10,6 +10,11 @@ secrets/
 signing/
 signing-staging/
 backups/
+edge-config/
+edge-config-staging/
+edge-provider-secrets/
+edge-provider-secrets-staging/
+.edge-rollout/
 compose.*.resolved.yaml
 *.log
 .DS_Store

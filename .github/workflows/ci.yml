@@ -41,7 +41,7 @@ jobs:
 
       - name: Validate production HA deployment assets
         run: |
-          trap 'rm -rf .env.production secrets signing attestations backups' EXIT
+          trap 'rm -rf .env.production secrets signing attestations backups edge-config edge-provider-secrets edge-ci-inputs' EXIT
           npm run bootstrap:production -- \
             --environment production \
             --public-url https://control.ci.otto.cn \
@@ -55,6 +55,41 @@ jobs:
           npm run preflight:deployment -- \
             --env-file .env.production --skip-dns --allow-local-signing-for-test \
             --allow-unmanaged-artifacts-for-test
+          mkdir -p edge-ci-inputs
+          node --input-type=module -e "
+            import { createPublicKey, randomBytes } from 'node:crypto';
+            import { readFileSync, writeFileSync } from 'node:fs';
+            const privateKey = readFileSync('signing/control_signer_private_key.pem', 'utf8');
+            const publicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'pem' });
+            writeFileSync('edge-ci-inputs/control-public-keys.json', JSON.stringify({ ci: publicKey }));
+            writeFileSync('edge-ci-inputs/upstream-origins.json', JSON.stringify({
+              version: 2,
+              allowedUpstreams: [{
+                origin: 'https://api.openai.com',
+                authentications: [{ type: 'bearer', secretBinding: 'CI_PROVIDER_API_KEY' }],
+              }],
+            }));
+            writeFileSync('edge-ci-inputs/deployment-identity.json', JSON.stringify({
+              licenseId: 'license_ci',
+              deploymentId: 'deployment_ci',
+              organizationId: 'organization_ci',
+              machineFingerprint: 'a'.repeat(64),
+            }));
+            writeFileSync('edge-ci-inputs/lease-token', randomBytes(48).toString('base64url'));
+            writeFileSync('edge-ci-inputs/provider-api-key', randomBytes(48).toString('base64url'));
+          "
+          npm run bootstrap:edge -- \
+            --env-file .env.production \
+            --control-public-keys-file edge-ci-inputs/control-public-keys.json \
+            --upstream-origins-file edge-ci-inputs/upstream-origins.json \
+            --deployment-identity-file edge-ci-inputs/deployment-identity.json \
+            --lease-token-file edge-ci-inputs/lease-token \
+            --provider-secret CI_PROVIDER_API_KEY=edge-ci-inputs/provider-api-key
+          npm run preflight:deployment -- \
+            --env-file .env.production --skip-dns --allow-local-signing-for-test \
+            --allow-unmanaged-artifacts-for-test
+          docker compose -f compose.production.yaml --env-file .env.production \
+            --profile edge config --quiet
           sh -n deploy/*.sh deploy/postgres-ha/*.sh deploy/postgres-ha/otto-pgbackrest
 
       - name: Reject whitespace errors

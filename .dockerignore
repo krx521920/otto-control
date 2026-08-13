@@ -7,6 +7,10 @@ secrets
 signing
 signing-staging
 backups
+edge-config
+edge-config-staging
+edge-provider-secrets
+edge-provider-secrets-staging
 .env
 .env.*
 !.env.example
