@@ -31,6 +31,13 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 type KeyringKey = SignedKeyringPayload['keys'][number];
 
+const KEY_STATE_TRANSITIONS: Readonly<Record<KeyringKey['state'], ReadonlySet<KeyringKey['state']>>> = {
+  standby: new Set(['standby', 'active', 'revoked']),
+  active: new Set(['active', 'retired', 'revoked']),
+  retired: new Set(['retired', 'revoked']),
+  revoked: new Set(['revoked']),
+};
+
 export interface ControlEdgeKeyringVerifierOptions {
   controlBaseUrl: string;
   bootstrapPublicKeys: Readonly<Record<string, string>>;
@@ -215,6 +222,18 @@ function normalizeEnvelope(value: unknown, now: number): SignedKeyringEnvelope {
     || keys.find((key) => key.state === 'active')?.keyId !== activeKeyId) {
     keyringError('EDGE_KEYRING_INVALID', 'keyring active key set is invalid');
   }
+  for (const key of keys) {
+    const activatedAtMs = key.activatedAt === null ? null : Date.parse(key.activatedAt);
+    const retiredAtMs = key.retiredAt === null ? null : Date.parse(key.retiredAt);
+    const revokedAtMs = key.revokedAt === null ? null : Date.parse(key.revokedAt);
+    if ((activatedAtMs !== null && activatedAtMs > generatedAtMs)
+      || (retiredAtMs !== null && (retiredAtMs > generatedAtMs
+        || (activatedAtMs !== null && retiredAtMs < activatedAtMs)))
+      || (revokedAtMs !== null && (revokedAtMs > generatedAtMs
+        || (retiredAtMs !== null && revokedAtMs < retiredAtMs)))) {
+      keyringError('EDGE_KEYRING_INVALID', 'keyring key lifecycle chronology is invalid');
+    }
+  }
   return {
     keyring: {
       version: 1,
@@ -355,7 +374,9 @@ export class ControlEdgeKeyringVerifier implements EdgeSignatureVerifier {
         || now - this.#lastRefreshAttemptAtMs >= this.#unknownKeyRetryMs)) {
       await this.#ensureFresh(true);
     }
-    if (this.#states.get(signingKeyId) === 'revoked' || !this.#keys.has(signingKeyId)) {
+    const state = this.#states.get(signingKeyId);
+    if (!this.#keys.has(signingKeyId) || state === undefined
+      || state === 'standby' || state === 'retired' || state === 'revoked') {
       return false;
     }
     return this.#verifier.verify(payload, signingKeyId, signature);
@@ -427,7 +448,8 @@ export class ControlEdgeKeyringVerifier implements EdgeSignatureVerifier {
       keyringError('EDGE_KEYRING_UNAVAILABLE', 'Control rejected the keyring request');
     }
     const envelope = normalizeEnvelope(await responseJson(response), this.#now());
-    if (this.#states.get(envelope.signingKeyId) === 'revoked'
+    const signingState = this.#states.get(envelope.signingKeyId);
+    if ((this.#envelope !== undefined && signingState !== 'active' && signingState !== 'standby')
       || !this.#keys.has(envelope.signingKeyId)
       || !await this.#verifier.verify(
         envelope.keyring,
@@ -445,13 +467,31 @@ export class ControlEdgeKeyringVerifier implements EdgeSignatureVerifier {
       keyringError('EDGE_KEYRING_EQUIVOCATION', 'Control keyring revision is conflicting');
     }
     const nextKeys = new Map(envelope.keyring.keys.map((key) => [key.keyId, key]));
+    const currentKeys = new Map(current?.keyring.keys.map((key) => [key.keyId, key]) ?? []);
     for (const [keyId, pem] of this.#keys) {
       const next = nextKeys.get(keyId);
       if (!next || next.publicKeyPem !== pem) {
         keyringError('EDGE_KEYRING_CONTINUITY_BROKEN', 'Control keyring removed or changed a trusted key');
       }
-      if (this.#states.get(keyId) === 'revoked' && next.state !== 'revoked') {
-        keyringError('EDGE_KEYRING_CONTINUITY_BROKEN', 'Control keyring restored a revoked key');
+      const previous = currentKeys.get(keyId);
+      if (previous && !KEY_STATE_TRANSITIONS[previous.state].has(next.state)) {
+        keyringError('EDGE_KEYRING_CONTINUITY_BROKEN', 'Control keyring moved a key lifecycle backwards');
+      }
+      if (previous?.state === 'standby' && next.state === 'active'
+        && next.activatedAt === null) {
+        keyringError('EDGE_KEYRING_CONTINUITY_BROKEN', 'Control keyring activated a key without an activation time');
+      }
+      if (previous?.activatedAt !== null && previous?.activatedAt !== undefined
+        && next.activatedAt !== previous.activatedAt) {
+        keyringError('EDGE_KEYRING_CONTINUITY_BROKEN', 'Control keyring changed a key activation time');
+      }
+      if (previous?.retiredAt !== null && previous?.retiredAt !== undefined
+        && next.retiredAt !== previous.retiredAt) {
+        keyringError('EDGE_KEYRING_CONTINUITY_BROKEN', 'Control keyring changed a key retirement time');
+      }
+      if (previous?.revokedAt !== null && previous?.revokedAt !== undefined
+        && next.revokedAt !== previous.revokedAt) {
+        keyringError('EDGE_KEYRING_CONTINUITY_BROKEN', 'Control keyring changed a key revocation time');
       }
     }
     this.#keys.clear();
@@ -461,7 +501,10 @@ export class ControlEdgeKeyringVerifier implements EdgeSignatureVerifier {
       this.#states.set(key.keyId, key.state);
     }
     const usable = Object.fromEntries(
-      [...this.#keys].filter(([keyId]) => this.#states.get(keyId) !== 'revoked'),
+      [...this.#keys].filter(([keyId]) => {
+        const state = this.#states.get(keyId);
+        return state === 'active' || state === 'standby';
+      }),
     );
     this.#verifier = createEdgeSignatureVerifier(usable);
     this.#envelope = envelope;

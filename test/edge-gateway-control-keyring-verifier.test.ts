@@ -161,12 +161,173 @@ describe('Control edge keyring verifier', () => {
 
     await expect(keyringVerifier.verify(payload, first.keyId, await first.sign(payload)))
       .resolves.toBe(true);
+    await expect(keyringVerifier.verify(payload, second.keyId, await second.sign(payload)))
+      .resolves.toBe(false);
     now += 5_000;
     await expect(keyringVerifier.verify(payload, second.keyId, await second.sign(payload)))
       .resolves.toBe(true);
     await expect(keyringVerifier.verify(payload, first.keyId, await first.sign(payload)))
-      .resolves.toBe(true);
+      .resolves.toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects backdated online policies and access tokens signed by a retired key', async () => {
+    const initial = await envelope({
+      signer: first,
+      keys: [key(first, 'active'), key(second, 'standby')],
+      revisionMs: NOW,
+    });
+    const rotated = await envelope({
+      signer: second,
+      keys: [key(first, 'retired'), key(second, 'active')],
+      revisionMs: NOW + 5_000,
+      generatedAtMs: NOW + 5_000,
+    });
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(response(initial))
+      .mockResolvedValueOnce(response(rotated));
+    const keyringVerifier = verifier(fetchMock);
+
+    await keyringVerifier.refresh();
+    now += 5_000;
+    await keyringVerifier.refresh();
+
+    const backdatedPolicy = {
+      policyId: 'backdated-policy',
+      issuedAtMs: NOW - 60_000,
+      expiresAtMs: NOW + 60_000,
+    };
+    const backdatedToken = {
+      tokenId: 'backdated-token',
+      issuedAtMs: NOW - 60_000,
+      expiresAtMs: NOW + 60_000,
+    };
+    for (const artifact of [backdatedPolicy, backdatedToken]) {
+      await expect(keyringVerifier.verify(
+        artifact,
+        first.keyId,
+        await first.sign(artifact),
+      )).resolves.toBe(false);
+      await expect(keyringVerifier.verify(
+        artifact,
+        second.keyId,
+        await second.sign(artifact),
+      )).resolves.toBe(true);
+    }
+  });
+
+  it('rejects a new keyring signed by a key that was already retired', async () => {
+    const initial = await envelope({
+      signer: first,
+      keys: [key(first, 'active'), key(second, 'standby')],
+      revisionMs: NOW,
+    });
+    const rotated = await envelope({
+      signer: second,
+      keys: [key(first, 'retired'), key(second, 'active')],
+      revisionMs: NOW + 5_000,
+      generatedAtMs: NOW + 5_000,
+    });
+    const restoredByRetiredKey = await envelope({
+      signer: first,
+      keys: [key(first, 'active'), key(second, 'retired')],
+      revisionMs: NOW + 10_000,
+      generatedAtMs: NOW + 10_000,
+    });
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(response(initial))
+      .mockResolvedValueOnce(response(rotated))
+      .mockResolvedValueOnce(response(restoredByRetiredKey));
+    const keyringVerifier = verifier(fetchMock);
+
+    await keyringVerifier.refresh();
+    now += 5_000;
+    await keyringVerifier.refresh();
+    now += 5_000;
+    await expect(keyringVerifier.refresh()).resolves.toBeUndefined();
+    now = NOW + 5_001;
+    const freshPayload = { policyId: 'retired-keyring-signer', issuedAtMs: now };
+    await expect(keyringVerifier.verify(
+      freshPayload,
+      first.keyId,
+      await first.sign(freshPayload),
+    )).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects a lifecycle regression even when a current standby key signs it', async () => {
+    const third = localSigner();
+    const initial = await envelope({
+      signer: first,
+      keys: [key(first, 'active'), key(second, 'standby'), key(third, 'standby')],
+      revisionMs: NOW,
+    });
+    const rotated = await envelope({
+      signer: second,
+      keys: [key(first, 'retired'), key(second, 'active'), key(third, 'standby')],
+      revisionMs: NOW + 5_000,
+      generatedAtMs: NOW + 5_000,
+    });
+    const regressed = await envelope({
+      signer: third,
+      keys: [key(first, 'retired'), key(second, 'standby'), key(third, 'active')],
+      revisionMs: NOW + 10_000,
+      generatedAtMs: NOW + 10_000,
+    });
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(response(initial))
+      .mockResolvedValueOnce(response(rotated))
+      .mockResolvedValueOnce(response(regressed));
+    const keyringVerifier = verifier(fetchMock);
+
+    await keyringVerifier.refresh();
+    now += 5_000;
+    await keyringVerifier.refresh();
+    now += 5_000;
+    await expect(keyringVerifier.refresh()).resolves.toBeUndefined();
+    now = NOW + 5_001;
+    const payload = { policyId: 'lifecycle-regression', issuedAtMs: now };
+    await expect(keyringVerifier.verify(
+      payload,
+      third.keyId,
+      await third.sign(payload),
+    )).resolves.toBe(false);
+    await expect(keyringVerifier.verify(
+      payload,
+      second.keyId,
+      await second.sign(payload),
+    )).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects activation of a standby key without a durable activation timestamp', async () => {
+    const initial = await envelope({
+      signer: first,
+      keys: [key(first, 'active'), key(second, 'standby')],
+      revisionMs: NOW,
+    });
+    const nextActive = key(second, 'active');
+    nextActive.activatedAt = null;
+    const invalidActivation = await envelope({
+      signer: second,
+      keys: [key(first, 'retired'), nextActive],
+      revisionMs: NOW + 5_000,
+      generatedAtMs: NOW + 5_000,
+    });
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(response(initial))
+      .mockResolvedValueOnce(response(invalidActivation));
+    const keyringVerifier = verifier(fetchMock);
+
+    await keyringVerifier.refresh();
+    now += 5_000;
+    await expect(keyringVerifier.refresh()).resolves.toBeUndefined();
+    const payload = { policyId: 'missing-activation-time', issuedAtMs: now };
+    await expect(keyringVerifier.verify(
+      payload,
+      second.keyId,
+      await second.sign(payload),
+    )).resolves.toBe(false);
   });
 
   it('rejects a rotation that skipped pre-distribution of the replacement key', async () => {
@@ -505,6 +666,27 @@ describe('Control edge keyring verifier', () => {
       });
     },
   );
+
+  it.each([
+    ['future activation', (value: SignedKeyringEnvelope) => {
+      value.keyring.keys[0]!.activatedAt = new Date(NOW + 1).toISOString();
+    }],
+    ['retirement before activation', (value: SignedKeyringEnvelope) => {
+      const target = value.keyring.keys[0]!;
+      target.state = 'retired';
+      target.activatedAt = ISO_NOW;
+      target.retiredAt = new Date(NOW - 1).toISOString();
+    }],
+    ['revocation before retirement', (value: SignedKeyringEnvelope) => {
+      const target = value.keyring.keys[0]!;
+      target.state = 'revoked';
+      target.activatedAt = new Date(NOW - 2).toISOString();
+      target.retiredAt = ISO_NOW;
+      target.revokedAt = new Date(NOW - 1).toISOString();
+    }],
+  ] as const)('rejects invalid lifecycle chronology: %s', async (_name, mutate) => {
+    await expectInvalid(mutate);
+  });
 
   it('accepts local, KMS, and HSM providers in valid lifecycle states', async () => {
     const manifest = await envelope({

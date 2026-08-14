@@ -2,6 +2,7 @@ import type {
   EdgeModelRouteV1,
   EdgeProviderAuthentication,
 } from '../contracts/edge-gateway.js';
+import { isSafeEdgeAuthenticationHeaderName } from './protocol.js';
 
 const MAXIMUM_ALLOWED_UPSTREAMS = 256;
 const MAXIMUM_AUTHENTICATIONS_PER_UPSTREAM = 16;
@@ -37,11 +38,7 @@ function validSecretBinding(value: string): boolean {
 }
 
 function validAuthenticationHeader(value: string): boolean {
-  return /^[a-zA-Z0-9!#$%&'*+.^_`|~-]{1,80}$/u.test(value)
-    && ![
-      'authorization', 'cookie', 'host', 'proxy-authorization', 'set-cookie',
-      'transfer-encoding',
-    ].includes(value);
+  return isSafeEdgeAuthenticationHeaderName(value);
 }
 
 function normalizedHttpsOrigin(value: unknown): string {

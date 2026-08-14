@@ -40,9 +40,25 @@ const AUTH_BEARER_FIELDS = new Set(['type', 'secretBinding']);
 const AUTH_HEADER_FIELDS = new Set(['type', 'headerName', 'secretBinding']);
 const METERING_FIELDS = new Set(['type', 'reserveUnits']);
 const FORBIDDEN_AUTH_HEADERS = new Set([
-  'authorization', 'cookie', 'host', 'proxy-authorization', 'set-cookie',
-  'transfer-encoding',
+  'accept', 'accept-encoding', 'authorization', 'connection', 'content-encoding',
+  'content-length', 'content-range', 'content-type', 'cookie', 'expect', 'forwarded',
+  'host', 'keep-alive', 'origin', 'proxy-authenticate', 'proxy-authorization',
+  'referer', 'set-cookie', 'te', 'trailer', 'transfer-encoding', 'upgrade',
+  'baggage', 'traceparent', 'tracestate', 'x-http-method-override', 'x-original-url',
+  'x-rewrite-url',
+  'user-agent', 'via', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-port',
+  'x-forwarded-proto', 'x-real-ip', 'x-request-id',
 ]);
+const FORBIDDEN_AUTH_HEADER_PREFIXES = [
+  'access-control-', 'proxy-', 'sec-', 'x-forwarded-', 'x-otto-',
+];
+
+export function isSafeEdgeAuthenticationHeaderName(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return HEADER_NAME_PATTERN.test(value)
+    && !FORBIDDEN_AUTH_HEADERS.has(normalized)
+    && !FORBIDDEN_AUTH_HEADER_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
 
 export class EdgeGatewayProtocolError extends Error {
   readonly status: number;
@@ -173,7 +189,7 @@ function authentication(value: unknown): EdgeProviderAuthentication {
   }
   if (type === 'bearer') return { type, secretBinding };
   const headerName = requiredString(body, 'headerName', 80);
-  if (!HEADER_NAME_PATTERN.test(headerName) || FORBIDDEN_AUTH_HEADERS.has(headerName.toLowerCase())) {
+  if (!isSafeEdgeAuthenticationHeaderName(headerName)) {
     protocolError(400, 'EDGE_INVALID_ENVELOPE', 'route authentication header is invalid');
   }
   return { type, headerName, secretBinding };
