@@ -1,14 +1,18 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   createServer,
-  type Server,
   type ServerResponse,
 } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
+import { createClient, type RedisClientOptions } from 'redis';
 
 import { LocalEd25519Signer } from '../crypto/signed-envelope.js';
+import {
+  type EdgeGatewayBackgroundTaskWaiter,
+  InMemoryEdgeGatewayBackgroundTasks,
+} from './background-tasks.js';
 import type { EdgeBillingCoordinator } from './billing-coordinator.js';
 import {
   type EdgeConcurrencyLimiter,
@@ -41,7 +45,14 @@ import {
 import { createEdgeSignatureVerifier } from './protocol.js';
 import { normalizeEdgeProviderSecret } from './provider-secret.js';
 import { type EdgeRateLimiter, InMemoryEdgeRateLimiter } from './rate-limit.js';
-import { createNodeRedisEdgeRateLimiter } from './redis-rate-limit.js';
+import {
+  createNodeRedisEdgeRateLimiter,
+  type RedisEdgeClientLike,
+} from './redis-rate-limit.js';
+import {
+  drainEdgeGatewayServer,
+  isEdgeDrainExemptRequest,
+} from './server-lifecycle.js';
 import {
   type EdgeRequestLimits,
   loadEdgeRequestLimits,
@@ -412,9 +423,19 @@ async function upstreamOriginPolicy(file: string): Promise<StaticEdgeUpstreamOri
   }
 }
 
-async function edgeRateLimiter(config: EdgeRateLimitConfiguration): Promise<EdgeRateLimiter> {
+interface EdgeRateLimiterResource {
+  rateLimiter: EdgeRateLimiter;
+  close(): Promise<void>;
+  forceClose(): void;
+}
+
+async function edgeRateLimiter(config: EdgeRateLimitConfiguration): Promise<EdgeRateLimiterResource> {
   if (config.type === 'memory') {
-    return new InMemoryEdgeRateLimiter(config.maximumEntries);
+    return {
+      rateLimiter: new InMemoryEdgeRateLimiter(config.maximumEntries),
+      async close() {},
+      forceClose() {},
+    };
   }
   let keySecret: Buffer;
   try {
@@ -447,7 +468,8 @@ async function edgeRateLimiter(config: EdgeRateLimitConfiguration): Promise<Edge
       throw new Error('OTTO_EDGE_REDIS_CA_FILE is invalid');
     }
   }
-  return createNodeRedisEdgeRateLimiter({
+  let client: RedisEdgeClientLike | undefined;
+  const limiter = await createNodeRedisEdgeRateLimiter({
     connectionString: config.connectionString,
     keySecret,
     password,
@@ -459,7 +481,34 @@ async function edgeRateLimiter(config: EdgeRateLimitConfiguration): Promise<Edge
     strikeWindowMs: config.strikeWindowMs,
     banMs: config.banMs,
     allowInsecure: config.allowInsecure,
+    clientFactory(options: RedisClientOptions) {
+      client = createClient(options) as unknown as RedisEdgeClientLike;
+      return client;
+    },
   });
+  let closed = false;
+  return {
+    rateLimiter: limiter,
+    async close() {
+      if (closed || !client) return;
+      closed = true;
+      try {
+        await client.quit();
+      } catch (error) {
+        try {
+          client.disconnect();
+        } catch {
+          // The graceful-close failure remains authoritative.
+        }
+        throw error;
+      }
+    },
+    forceClose() {
+      if (!client) return;
+      closed = true;
+      client.disconnect();
+    },
+  };
 }
 
 export async function resolveEdgeProviderSecret(
@@ -484,17 +533,23 @@ export function createEdgeGatewayReadinessProbe(input: {
   rateLimiter: EdgeRateLimiter;
   billingCoordinator?: EdgeBillingCoordinator;
   lifecycle?: EdgeGatewayLifecycle;
+  backgroundTasks?: EdgeGatewayBackgroundTaskWaiter;
 }): EdgeGatewayReadinessProbe {
   return {
     async check() {
       try {
         if (input.lifecycle && !input.lifecycle.isAccepting()) return 'unavailable';
+        const backgroundState = input.backgroundTasks?.snapshot().state;
+        if (backgroundState === 'unavailable') return 'unavailable';
         await input.policySource.load();
         await input.rateLimiter.healthCheck?.();
+        const billingState = input.billingCoordinator?.operationalStatus?.().state ?? 'ready';
+        return backgroundState === 'degraded' && billingState === 'ready'
+          ? 'degraded'
+          : billingState;
       } catch {
         return 'unavailable';
       }
-      return input.billingCoordinator?.operationalStatus?.().state ?? 'ready';
     },
   };
 }
@@ -541,6 +596,7 @@ export async function handleEdgeOperationsRequest(
     concurrencyLimiter?: EdgeConcurrencyLimiter;
     circuitBreaker?: EdgeRouteCircuitBreaker;
     lifecycle?: EdgeGatewayLifecycle;
+    backgroundTasks?: EdgeGatewayBackgroundTaskWaiter;
   },
 ): Promise<Response | null> {
   const url = new URL(request.url);
@@ -560,6 +616,7 @@ export async function handleEdgeOperationsRequest(
         concurrency: input.concurrencyLimiter?.snapshot() ?? null,
         circuits: input.circuitBreaker?.snapshot() ?? null,
         lifecycle: input.lifecycle?.snapshot() ?? null,
+        backgroundTasks: input.backgroundTasks?.snapshot() ?? null,
       });
     } catch {
       return operationsResponse(503, {
@@ -608,39 +665,7 @@ async function writeResponse(response: Response, target: ServerResponse): Promis
   });
 }
 
-export function isEdgeDrainExemptRequest(
-  method: string | undefined,
-  requestUrl: string | undefined,
-): boolean {
-  if (method !== 'GET') return false;
-  const path = (requestUrl ?? '').split('?', 1)[0];
-  return path === '/healthz'
-    || path === '/readyz'
-    || path === '/v1/operations/status';
-}
-
-export async function drainEdgeGatewayServer(input: {
-  server: Pick<Server, 'close' | 'closeAllConnections'>;
-  lifecycle: EdgeGatewayLifecycle;
-  timeoutMs: number;
-}): Promise<boolean> {
-  input.lifecycle.beginDrain();
-  const serverClosed = new Promise<void>((resolve, reject) => {
-    try {
-      input.server.close((error) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
-  const drained = await input.lifecycle.waitForIdle(input.timeoutMs);
-  if (!drained) input.server.closeAllConnections();
-  await serverClosed;
-  input.lifecycle.markStopped();
-  return drained;
-}
+export { drainEdgeGatewayServer, isEdgeDrainExemptRequest };
 
 export async function startEdgeGatewayServer(): Promise<void> {
   const config = loadEdgeGatewayServerConfiguration();
@@ -688,13 +713,15 @@ export async function startEdgeGatewayServer(): Promise<void> {
     : undefined;
   const configuredPolicySource = await policySource(config.policy, verifier);
   const configuredUpstreamOriginPolicy = await upstreamOriginPolicy(config.upstreamOriginsFile);
-  const rateLimiter = await edgeRateLimiter(config.rateLimit);
+  const rateLimiterResource = await edgeRateLimiter(config.rateLimit);
+  const rateLimiter = rateLimiterResource.rateLimiter;
   const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(
     config.concurrency.globalLimit,
     config.concurrency.perSubjectLimit,
   );
   const circuitBreaker = new InMemoryEdgeRouteCircuitBreaker(config.circuitBreaker);
   const lifecycle = new InMemoryEdgeGatewayLifecycle();
+  const backgroundTasks = new InMemoryEdgeGatewayBackgroundTasks();
   const gateway = createOttoEdgeGateway({
     policySource: configuredPolicySource,
     verifier,
@@ -711,6 +738,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
       rateLimiter,
       billingCoordinator,
       lifecycle,
+      backgroundTasks,
     }),
     requestLimits: config.request,
     responseLimits: config.upstreamResponse,
@@ -719,8 +747,9 @@ export async function startEdgeGatewayServer(): Promise<void> {
   const server = createServer(edgeNodeHttpServerOptions(config.http), (request, response) => {
     let lifecycleLease: EdgeGatewayLifecycleLease | null = null;
     if (!isEdgeDrainExemptRequest(request.method, request.url)) {
+      const backgroundAccepting = backgroundTasks.isAccepting();
       try {
-        lifecycleLease = lifecycle.acquire();
+        lifecycleLease = backgroundAccepting ? lifecycle.acquire() : null;
       } catch {
         lifecycleLease = null;
       }
@@ -731,7 +760,12 @@ export async function startEdgeGatewayServer(): Promise<void> {
           'retry-after': '1',
         });
         response.end(JSON.stringify({
-          error: { code: 'EDGE_GATEWAY_DRAINING', message: 'gateway is draining' },
+          error: backgroundAccepting
+            ? { code: 'EDGE_GATEWAY_DRAINING', message: 'gateway is draining' }
+            : {
+                code: 'EDGE_BACKGROUND_TASKS_UNAVAILABLE',
+                message: 'gateway background processing is unavailable',
+              },
         }));
         return;
       }
@@ -767,9 +801,11 @@ export async function startEdgeGatewayServer(): Promise<void> {
           concurrencyLimiter,
           circuitBreaker,
           lifecycle,
+          backgroundTasks,
         })
-        .then((operationsResponseResult) => operationsResponseResult ?? gateway.fetch(convertedRequest))
-      : gateway.fetch(convertedRequest);
+        .then((operationsResponseResult) => operationsResponseResult
+          ?? gateway.fetch(convertedRequest, backgroundTasks))
+      : gateway.fetch(convertedRequest, backgroundTasks);
     void result
       .then((result) => writeResponse(result, response))
       .catch(() => {
@@ -803,6 +839,17 @@ export async function startEdgeGatewayServer(): Promise<void> {
     shutdown = drainEdgeGatewayServer({
       server,
       lifecycle,
+      backgroundTasks,
+      resources: [
+        ...(billingCoordinator ? [{
+          close: async () => {
+            billingCoordinator.close();
+            await billingCoordinator.flushPending();
+          },
+          forceClose: () => billingCoordinator.close(),
+        }] : []),
+        rateLimiterResource,
+      ],
       timeoutMs: config.shutdownGraceMs,
     });
     void shutdown

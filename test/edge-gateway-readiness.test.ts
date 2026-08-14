@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { InMemoryEdgeGatewayBackgroundTasks } from '../src/edge-gateway/background-tasks.js';
 import type { EdgeBillingCoordinator } from '../src/edge-gateway/billing-coordinator.js';
 import { InMemoryEdgeGatewayLifecycle } from '../src/edge-gateway/lifecycle.js';
 import { createEdgeGatewayReadinessProbe } from '../src/edge-gateway/server.js';
@@ -86,5 +87,27 @@ describe('Edge Gateway readiness composition', () => {
     expect(policySource.load).not.toHaveBeenCalled();
     expect(healthCheck).not.toHaveBeenCalled();
     expect(billingCoordinator.operationalStatus).not.toHaveBeenCalled();
+  });
+
+  it('degrades on background failures and fails closed when the bounded queue overflows', async () => {
+    const policySource = { load: vi.fn(async () => ({})) };
+    const rateLimiter = { consume: vi.fn(), healthCheck: vi.fn(async () => undefined) };
+    const failedTasks = new InMemoryEdgeGatewayBackgroundTasks();
+    failedTasks.waitUntil(Promise.reject(new Error('outcome write failed')));
+    await failedTasks.waitForIdle(1_000);
+    await expect(createEdgeGatewayReadinessProbe({
+      policySource,
+      rateLimiter,
+      backgroundTasks: failedTasks,
+    }).check()).resolves.toBe('degraded');
+
+    const overflowedTasks = new InMemoryEdgeGatewayBackgroundTasks(1);
+    overflowedTasks.waitUntil(new Promise<void>(() => undefined));
+    overflowedTasks.waitUntil(Promise.resolve());
+    await expect(createEdgeGatewayReadinessProbe({
+      policySource,
+      rateLimiter,
+      backgroundTasks: overflowedTasks,
+    }).check()).resolves.toBe('unavailable');
   });
 });

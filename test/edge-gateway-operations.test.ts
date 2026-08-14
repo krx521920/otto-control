@@ -8,6 +8,7 @@ import type {
   EdgeBillingCoordinator,
   EdgeBillingOperationalState,
 } from '../src/edge-gateway/billing-coordinator.js';
+import { InMemoryEdgeGatewayBackgroundTasks } from '../src/edge-gateway/background-tasks.js';
 import { InMemoryEdgeConcurrencyLimiter } from '../src/edge-gateway/concurrency-limit.js';
 import { InMemoryEdgeRouteCircuitBreaker } from '../src/edge-gateway/circuit-breaker.js';
 import { InMemoryEdgeGatewayLifecycle } from '../src/edge-gateway/lifecycle.js';
@@ -84,6 +85,11 @@ describe('Edge Gateway protected operations API', () => {
     const lifecycle = new InMemoryEdgeGatewayLifecycle({ now: () => 200 });
     const lifecycleLease = lifecycle.acquire();
     lifecycle.beginDrain();
+    const backgroundTasks = new InMemoryEdgeGatewayBackgroundTasks();
+    let completeBackgroundTask!: () => void;
+    backgroundTasks.waitUntil(new Promise<void>((resolve) => {
+      completeBackgroundTask = resolve;
+    }));
     const response = await handleEdgeOperationsRequest(
       request('/v1/operations/status'),
       {
@@ -92,6 +98,7 @@ describe('Edge Gateway protected operations API', () => {
         concurrencyLimiter,
         circuitBreaker,
         lifecycle,
+        backgroundTasks,
       },
     );
     expect(response?.status).toBe(200);
@@ -129,10 +136,22 @@ describe('Edge Gateway protected operations API', () => {
         activeRequests: 1,
         drainStartedAtMs: 200,
       },
+      backgroundTasks: {
+        state: 'ready',
+        activeTasks: 1,
+        maximumTasks: 1_024,
+        peakActiveTasks: 1,
+        failedTasks: 0,
+        overflowedTasks: 0,
+        lastFailureAtMs: null,
+        lastOverflowAtMs: null,
+      },
     });
     expect(body).not.toContain(TOKEN);
     expect(body).not.toContain('organization');
     expect(body).not.toContain('amount');
+    completeBackgroundTask();
+    await expect(backgroundTasks.waitForIdle(1_000)).resolves.toBe(true);
     expect(body).not.toContain('private-subject');
     expect(body).not.toContain('private-route');
     lease!.release();
