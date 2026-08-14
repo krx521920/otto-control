@@ -1,7 +1,12 @@
 import type { EdgeGatewayOutcomeV2 } from '../contracts/edge-gateway.js';
+import type { EdgeBillingCoordinator } from './billing-coordinator.js';
 import type { EdgeConcurrencyLimiter } from './concurrency-limit.js';
 import type { EdgeRouteCircuitBreaker } from './circuit-breaker.js';
-import { createOttoEdgeGateway, type EdgeGatewayOutcomeSink } from './gateway.js';
+import {
+  createOttoEdgeGateway,
+  type EdgeGatewayBackgroundContext,
+  type EdgeGatewayOutcomeSink,
+} from './gateway.js';
 import { createEdgeSignatureVerifier } from './protocol.js';
 import type { EdgeRateLimiter } from './rate-limit.js';
 import type { EdgeRequestLimits } from './request-limits.js';
@@ -20,6 +25,7 @@ export interface AliyunEsaGatewayOptions {
   rateLimiter: EdgeRateLimiter;
   concurrencyLimiter: EdgeConcurrencyLimiter;
   circuitBreaker?: EdgeRouteCircuitBreaker;
+  billingCoordinator?: EdgeBillingCoordinator;
   recordOutcome?(outcome: EdgeGatewayOutcomeV2): Promise<void>;
   fetch?: typeof fetch;
   now?: () => number;
@@ -35,7 +41,7 @@ export interface AliyunEsaGatewayOptions {
  * credentials nor Alibaba-specific globals enter the portable gateway core.
  */
 export function createAliyunEsaGateway(options: AliyunEsaGatewayOptions): {
-  fetch(request: Request): Promise<Response>;
+  fetch(request: Request, context?: EdgeGatewayBackgroundContext): Promise<Response>;
 } {
   const outcomeSink: EdgeGatewayOutcomeSink | undefined = options.recordOutcome
     ? { record: options.recordOutcome }
@@ -44,20 +50,23 @@ export function createAliyunEsaGateway(options: AliyunEsaGatewayOptions): {
     policySource: {
       async load() {
         const value = await options.policyKv.get(options.policyKey, { type: 'text' });
-        if (!value) throw new Error('gateway policy is missing from EdgeKV');
-        return JSON.parse(value) as unknown;
+        // JSON.parse fails closed for both a missing value and malformed JSON;
+        // the portable gateway translates either failure into policy-unavailable.
+        return JSON.parse(value as string) as unknown;
       },
     },
     verifier: createEdgeSignatureVerifier(options.controlPublicKeys),
+    // The portable core owns provider-secret normalization and byte validation,
+    // so every runtime has one authoritative security boundary.
     secretResolver: {
       async get(binding) {
-        const value = await options.providerSecret(binding);
-        return typeof value === 'string' && value.trim() ? value.trim() : null;
+        return options.providerSecret(binding);
       },
     },
     rateLimiter: options.rateLimiter,
     concurrencyLimiter: options.concurrencyLimiter,
     circuitBreaker: options.circuitBreaker,
+    billingCoordinator: options.billingCoordinator,
     outcomeSink,
     fetch: options.fetch,
     now: options.now,
@@ -67,8 +76,8 @@ export function createAliyunEsaGateway(options: AliyunEsaGatewayOptions): {
     upstreamOriginPolicy: options.upstreamOriginPolicy,
   });
   return {
-    fetch(request) {
-      return gateway.fetch(request);
+    fetch(request, context) {
+      return gateway.fetch(request, context);
     },
   };
 }

@@ -21,19 +21,46 @@
 实现位于 `src/edge-gateway/aliyun-esa-rollout.ts`。建议阶梯为 5%、25%、100%，并满足：
 
 1. 首批流量不超过 10%，每一阶段只能单调增加，最后一步必须为 100%；
-2. 每步切流都带确定性的幂等键；控制面重试不得创建第二个发布；
+2. staging 使用固定的 `<rolloutId>:stage` 幂等键；每步切流也带确定性的幂等键，控制面
+   重试不得创建第二个发布；
 3. 健康样本必须达到最小请求数，并同时满足就绪、计费聚合就绪、错误率和 P95 门槛；
 4. 探针必须回报它实际观察到的完整不可变版本绑定；只检查 HTTP 200 不算通过；
 5. 任何阶段失败，立即把候选比例设为 0，恢复已钉住的基线并再次执行完整健康门槛；
 6. 只有基线验证通过才能停用候选并写入 `rolled_back`；回滚验证失败必须进入
    `manual_intervention`，不得宣称发布或回滚成功；
-7. 每个状态转换写入外部耐久 checkpoint。checkpoint 只含摘要、版本和健康数据，不含
-   Secret、访问令牌或模型输入输出。
+7. 创建候选 deployment 后必须先写入 `staged` checkpoint，再允许首次切流；每个状态转换
+   写入外部耐久 checkpoint。checkpoint 只含摘要、版本和健康数据，不含 Secret、访问令牌
+   或模型输入输出。
+
+执行器重启时必须读取该 `rolloutId` 最新的耐久 checkpoint，通过 `resumeFrom` 传回状态机。
+状态机只接受与候选、基线和流量阶梯完全一致的 checkpoint：
+
+- 从 `preparing` 重试固定 staging 幂等键；
+- 从 `staged` 开始首次金丝雀，不再创建候选 deployment；
+- 从健康的 `canary` 继续下一阶梯；健康样本、失败原因与阶段必须相互一致，否则拒绝恢复；
+- 从 `rollback_pending` 重放同一个回滚幂等键；
+- `stable` 和 `rolled_back` 是幂等终态；`manual_intervention` 禁止自动恢复。
+
+未知阶段、非规范时间、非法流量比例、与健康证据矛盾的失败原因和含路径分隔符的 deployment
+身份均 fail-closed。`stage` 返回的 deployment 身份必须先通过校验，未验证的值不得传入
+`switchTraffic` 或 `deactivate`。
+
+Checkpoint 存储必须对 `(rolloutId, sequence)` 做唯一约束与 compare-and-set，并在整个发布期间
+持有带 fencing token 的分布式租约。驱动层在租约丢失、fencing token 过期或 checkpoint CAS
+失败时必须抛出 `AliyunEsaRolloutExecutionLostError`；状态机随后立即停止，禁止落败执行器回滚
+另一个执行器已经推进的流量。若同一个 rollout 已被其他执行器持有，应拒绝启动，不能依靠
+本机文件锁。
+
+任何 `resumeFrom` 在执行前都必须通过 `verifyCheckpoint` 与 ESA 实际状态核对，包括签名后的
+Worker/策略/Keyring/Secret 版本绑定、候选 deployment 身份和当前流量比例。存储回滚、人工
+改流量、绑定不一致或无法读取实际状态时必须 fail-closed，终态 checkpoint 也不能跳过核对。
 
 基础设施实现 `AliyunEsaRolloutDriver` 时，应把 checkpoint 写入独立于 ESA Worker 的
-不可篡改审计存储，并为同一 `rolloutId` 加分布式锁。100% 健康门槛通过后可以停用旧
-deployment 以避免继续接收流量，但不得删除它绑定的不可变 Worker、策略、Keyring 和
-Secret 版本；这些旧版本只能在观察窗口结束后由单独的受审计退役任务清理。
+不可篡改审计存储，并为同一 `rolloutId` 加分布式锁。`stage` 和 `switchTraffic` 都必须按传入
+幂等键执行，不能把随机请求 ID 当成发布身份。状态机在 100% 健康门槛通过后必须先耐久
+写入 `stable`，并保留零流量的旧 deployment 作为回滚目标；状态机本身不得停用旧版本。
+观察窗口结束后，再由单独、可重试且受审计的退役任务停用旧 deployment。不得删除它绑定
+的不可变 Worker、策略、Keyring 和 Secret 版本。
 
 ## Keyring 紧急撤销预生产演练
 

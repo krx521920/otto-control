@@ -3,7 +3,10 @@
   "testRunner": "vitest",
   "plugins": ["@stryker-mutator/vitest-runner"],
   "mutate": [
+    "src/edge-gateway/aliyun-esa.ts",
+    "src/edge-gateway/aliyun-esa-rollout.ts",
     "src/edge-gateway/gateway.ts",
+    "src/edge-gateway/background-tasks.ts",
     "src/edge-gateway/adapter-contracts.ts",
     "src/edge-gateway/control-keyring-verifier.ts",
     "src/edge-gateway/control-billing-coordinator.ts",
@@ -21,6 +24,7 @@
     "src/edge-gateway/redis-rate-limit.ts",
     "src/edge-gateway/request-id.ts",
     "src/edge-gateway/request-limits.ts",
+    "src/edge-gateway/server-lifecycle.ts",
     "src/edge-gateway/usage-meter.ts",
     "src/edge-gateway/upstream-response-headers.ts",
     "src/edge-gateway/upstream-response-limits.ts",
@@ -28,6 +32,8 @@
     "src/modules/edge-gateway/service.ts"
   ],
   "testFiles": [
+    "test/edge-gateway-aliyun-esa-adapter.test.ts",
+    "test/edge-gateway-aliyun-esa-rollout.test.ts",
     "test/edge-gateway.test.ts",
     "test/edge-gateway-properties.test.ts",
     "test/edge-gateway-adapter-contracts.test.ts",

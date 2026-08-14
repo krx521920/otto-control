@@ -35,14 +35,15 @@ require_immutable_image "$previous_image"
 
 docker pull "$image"
 
-# Start the isolated canary with separate durable state. It must load the live
-# signed policy, connect to TLS Redis and Control, and pass /readyz before cutover.
+# Start the isolated preflight instance with separate durable state. It never
+# receives user traffic; it must load the live signed policy, connect to TLS
+# Redis and Control, and pass /readyz before cutover.
 OTTO_EDGE_IMAGE=$image edge_compose --profile edge-rollout up -d --no-deps edge-gateway-canary
 if ! wait_for_healthy edge-gateway-canary 180 edge-rollout; then
   edge_compose --profile edge-rollout logs --tail 100 edge-gateway-canary >&2 || true
   edge_compose --profile edge-rollout stop edge-gateway-canary || true
   edge_compose --profile edge-rollout rm -f edge-gateway-canary || true
-  printf '%s\n' 'Edge Gateway canary failed; production was not changed' >&2
+  printf '%s\n' 'Edge Gateway preflight failed; production was not changed' >&2
   exit 1
 fi
 edge_compose --profile edge-rollout stop edge-gateway-canary

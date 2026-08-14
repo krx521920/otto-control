@@ -1,6 +1,11 @@
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const KEY_ID_PATTERN = /^[a-f0-9]{16}$/u;
 const IDENTIFIER_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._/-]{2,127}$/u;
+const DEPLOYMENT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{2,127}$/u;
+const ROLLOUT_PHASES = new Set<AliyunEsaRolloutPhase>([
+  'preparing', 'staged', 'canary', 'promoting', 'stable',
+  'rollback_pending', 'rolled_back', 'manual_intervention',
+]);
 
 export interface AliyunEsaImmutableReleaseBinding {
   releaseId: string;
@@ -37,6 +42,7 @@ export interface AliyunEsaHealthGate {
 
 export type AliyunEsaRolloutPhase =
   | 'preparing'
+  | 'staged'
   | 'canary'
   | 'promoting'
   | 'stable'
@@ -68,7 +74,11 @@ export interface AliyunEsaRolloutPlan {
 }
 
 export interface AliyunEsaRolloutDriver {
-  stage(binding: AliyunEsaImmutableReleaseBinding): Promise<AliyunEsaDeployment>;
+  stage(input: {
+    rolloutId: string;
+    binding: AliyunEsaImmutableReleaseBinding;
+    idempotencyKey: string;
+  }): Promise<AliyunEsaDeployment>;
   switchTraffic(input: {
     rolloutId: string;
     candidateDeploymentId: string;
@@ -77,6 +87,11 @@ export interface AliyunEsaRolloutDriver {
     idempotencyKey: string;
   }): Promise<void>;
   measure(deploymentId: string, candidatePercent: number): Promise<AliyunEsaHealthSample>;
+  /**
+   * Reconcile a durable checkpoint with the provider's signed deployment
+   * binding and live traffic state before any resumed action is allowed.
+   */
+  verifyCheckpoint(value: AliyunEsaRolloutCheckpoint): Promise<boolean>;
   checkpoint(value: AliyunEsaRolloutCheckpoint): Promise<void>;
   deactivate(deploymentId: string): Promise<void>;
   now?(): number;
@@ -85,6 +100,14 @@ export interface AliyunEsaRolloutDriver {
 export interface AliyunEsaRolloutResult {
   result: 'promoted' | 'rolled_back';
   checkpoints: readonly AliyunEsaRolloutCheckpoint[];
+}
+
+export interface AliyunEsaRolloutExecutionOptions {
+  /**
+   * Latest durable checkpoint for this rollout. The driver must enforce
+   * compare-and-set checkpoint sequencing outside this pure state machine.
+   */
+  resumeFrom?: AliyunEsaRolloutCheckpoint;
 }
 
 export class AliyunEsaRolloutError extends Error {
@@ -96,6 +119,20 @@ export class AliyunEsaRolloutError extends Error {
     this.name = 'AliyunEsaRolloutError';
     this.code = code;
     this.checkpoints = checkpoints;
+  }
+}
+
+/**
+ * Drivers must throw this when a rollout lease, fencing token, or checkpoint
+ * compare-and-set is lost. The state machine must stop without rollback,
+ * because another executor now owns the rollout.
+ */
+export class AliyunEsaRolloutExecutionLostError extends Error {
+  readonly code = 'ESA_ROLLOUT_EXECUTION_LOST';
+
+  constructor(message = 'rollout execution lease or checkpoint ownership was lost') {
+    super(message);
+    this.name = 'AliyunEsaRolloutExecutionLostError';
   }
 }
 
@@ -140,9 +177,111 @@ function stableBinding(binding: AliyunEsaImmutableReleaseBinding): string {
   });
 }
 
+function assertResumeCheckpoint(
+  plan: AliyunEsaRolloutPlan,
+  checkpoint: AliyunEsaRolloutCheckpoint,
+): void {
+  let immutablePlanMatches = false;
+  try {
+    immutablePlanMatches = stableBinding(checkpoint.candidate) === stableBinding(plan.candidate)
+      && stableBinding(checkpoint.baseline) === stableBinding(plan.baseline.binding);
+  } catch {
+    configurationError('resume checkpoint immutable binding is invalid');
+  }
+  if (checkpoint.version !== 1 || checkpoint.rolloutId !== plan.rolloutId
+    || !Number.isSafeInteger(checkpoint.sequence) || checkpoint.sequence < 1
+    || checkpoint.baselineDeploymentId !== plan.baseline.deploymentId
+    || !immutablePlanMatches
+    || typeof checkpoint.recordedAt !== 'string'
+    || !Number.isFinite(Date.parse(checkpoint.recordedAt))
+    || new Date(checkpoint.recordedAt).toISOString() !== checkpoint.recordedAt
+    || !Number.isSafeInteger(checkpoint.candidatePercent)
+    || checkpoint.candidatePercent < 0 || checkpoint.candidatePercent > 100
+    || !ROLLOUT_PHASES.has(checkpoint.phase)
+    || (checkpoint.reason !== null
+      && (typeof checkpoint.reason !== 'string'
+        || !checkpoint.reason.trim() || checkpoint.reason.length > 2_048))) {
+    configurationError('resume checkpoint does not match the immutable rollout plan');
+  }
+  if (checkpoint.phase === 'preparing') {
+    if (checkpoint.candidateDeploymentId !== null || checkpoint.candidatePercent !== 0
+      || checkpoint.reason !== null || checkpoint.health !== null) {
+      configurationError('preparing checkpoint is invalid');
+    }
+    return;
+  }
+  if (typeof checkpoint.candidateDeploymentId !== 'string'
+    || !DEPLOYMENT_ID_PATTERN.test(checkpoint.candidateDeploymentId)) {
+    configurationError('resume checkpoint candidate deployment identity is invalid');
+  }
+  if (checkpoint.phase === 'staged') {
+    if (checkpoint.candidatePercent !== 0 || checkpoint.reason !== null
+      || checkpoint.health !== null) {
+      configurationError('staged checkpoint is invalid');
+    }
+    return;
+  }
+
+  const validatedHealthFailure = (
+    expected: AliyunEsaImmutableReleaseBinding,
+  ): string | null => {
+    const sample = checkpoint.health as unknown;
+    if (!sample || typeof sample !== 'object' || Array.isArray(sample)) {
+      configurationError(`${checkpoint.phase} checkpoint health is invalid`);
+    }
+    const body = sample as Record<string, unknown>;
+    if (typeof body.requestCount !== 'number' || typeof body.errorRate !== 'number'
+      || typeof body.p95LatencyMs !== 'number' || typeof body.ready !== 'boolean'
+      || typeof body.billingReady !== 'boolean' || !body.observedBinding
+      || typeof body.observedBinding !== 'object' || Array.isArray(body.observedBinding)) {
+      configurationError(`${checkpoint.phase} checkpoint health is invalid`);
+    }
+    try {
+      return healthFailure(sample as AliyunEsaHealthSample, expected, plan.healthGate);
+    } catch {
+      configurationError(`${checkpoint.phase} checkpoint health is invalid`);
+    }
+  };
+
+  if (checkpoint.phase === 'stable') {
+    if (checkpoint.candidatePercent !== 100 || checkpoint.reason !== null
+      || checkpoint.health !== null) {
+      configurationError('stable checkpoint is invalid');
+    }
+    return;
+  }
+  if (checkpoint.phase === 'promoting') {
+    if (checkpoint.candidatePercent !== 100 || checkpoint.reason !== null
+      || validatedHealthFailure(plan.candidate) !== null) {
+      configurationError('promoting checkpoint is invalid');
+    }
+    return;
+  }
+  if (checkpoint.phase === 'canary') {
+    const failure = validatedHealthFailure(plan.candidate);
+    if (checkpoint.candidatePercent === 100
+      || !plan.percentages.includes(checkpoint.candidatePercent)
+      || checkpoint.reason !== failure) {
+      configurationError('canary checkpoint is inconsistent with its health evidence');
+    }
+    return;
+  }
+  if (checkpoint.phase === 'rolled_back') {
+    if (checkpoint.candidatePercent !== 0 || checkpoint.reason === null
+      || validatedHealthFailure(plan.baseline.binding) !== null) {
+      configurationError('rolled_back checkpoint is invalid');
+    }
+    return;
+  }
+  if (!plan.percentages.includes(checkpoint.candidatePercent)
+    || checkpoint.reason === null || checkpoint.health !== null) {
+    configurationError(`${checkpoint.phase} checkpoint is invalid`);
+  }
+}
+
 function assertPlan(plan: AliyunEsaRolloutPlan): void {
   if (!IDENTIFIER_PATTERN.test(plan.rolloutId)
-    || !IDENTIFIER_PATTERN.test(plan.baseline.deploymentId)) {
+    || !DEPLOYMENT_ID_PATTERN.test(plan.baseline.deploymentId)) {
     configurationError('rollout or baseline deployment identity is invalid');
   }
   assertBinding(plan.candidate, 'candidate');
@@ -195,13 +334,40 @@ function healthFailure(
 export async function runAliyunEsaCanaryRollout(
   plan: AliyunEsaRolloutPlan,
   driver: AliyunEsaRolloutDriver,
+  options: AliyunEsaRolloutExecutionOptions = {},
 ): Promise<AliyunEsaRolloutResult> {
   assertPlan(plan);
-  const checkpoints: AliyunEsaRolloutCheckpoint[] = [];
+  if (options.resumeFrom) {
+    assertResumeCheckpoint(plan, options.resumeFrom);
+    let verified = false;
+    try {
+      verified = await driver.verifyCheckpoint(options.resumeFrom);
+    } catch (error) {
+      if (error instanceof AliyunEsaRolloutExecutionLostError) throw error;
+      throw new AliyunEsaRolloutError(
+        'ESA_ROLLOUT_RESUME_VERIFICATION_FAILED',
+        `failed to reconcile rollout checkpoint with ESA: ${
+          error instanceof Error ? error.message : String(error)}`,
+        [options.resumeFrom],
+      );
+    }
+    if (!verified) {
+      throw new AliyunEsaRolloutError(
+        'ESA_ROLLOUT_STATE_DIVERGED',
+        'durable checkpoint does not match the signed ESA deployment and live traffic state',
+        [options.resumeFrom],
+      );
+    }
+  }
+  const checkpoints: AliyunEsaRolloutCheckpoint[] = options.resumeFrom
+    ? [options.resumeFrom]
+    : [];
   const now = driver.now ?? Date.now;
-  let sequence = 0;
-  let candidate: AliyunEsaDeployment | null = null;
-  let candidatePercent = 0;
+  let sequence = options.resumeFrom?.sequence ?? 0;
+  let candidate: AliyunEsaDeployment | null = options.resumeFrom?.candidateDeploymentId
+    ? { deploymentId: options.resumeFrom.candidateDeploymentId, binding: plan.candidate }
+    : null;
+  let candidatePercent = options.resumeFrom?.candidatePercent ?? 0;
 
   const record = async (
     phase: AliyunEsaRolloutPhase,
@@ -226,38 +392,30 @@ export async function runAliyunEsaCanaryRollout(
     checkpoints.push(checkpoint);
   };
 
-  await record('preparing');
-  try {
-    candidate = await driver.stage(plan.candidate);
-    if (!IDENTIFIER_PATTERN.test(candidate.deploymentId)
-      || stableBinding(candidate.binding) !== stableBinding(plan.candidate)) {
-      await driver.deactivate(candidate.deploymentId);
-      candidate = null;
-      throw new Error('staged deployment does not match the immutable candidate binding');
-    }
-    for (const percentage of plan.percentages) {
-      candidatePercent = percentage;
-      await driver.switchTraffic({
-        rolloutId: plan.rolloutId,
-        candidateDeploymentId: candidate.deploymentId,
-        baselineDeploymentId: plan.baseline.deploymentId,
-        candidatePercent,
-        idempotencyKey: `${plan.rolloutId}:${sequence + 1}:${candidatePercent}`,
-      });
-      const sample = await driver.measure(candidate.deploymentId, candidatePercent);
-      const reason = healthFailure(sample, plan.candidate, plan.healthGate);
-      await record(candidatePercent === 100 ? 'promoting' : 'canary', reason, sample);
-      if (reason) throw new Error(reason);
-    }
-    await driver.deactivate(plan.baseline.deploymentId);
-    await record('stable');
+  if (options.resumeFrom?.phase === 'stable') {
     return { result: 'promoted', checkpoints };
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+  }
+  if (options.resumeFrom?.phase === 'rolled_back') {
+    return { result: 'rolled_back', checkpoints };
+  }
+  if (options.resumeFrom?.phase === 'manual_intervention') {
+    throw new AliyunEsaRolloutError(
+      'ESA_ROLLOUT_MANUAL_INTERVENTION_REQUIRED',
+      'rollout cannot resume after entering manual intervention',
+      checkpoints,
+    );
+  }
+
+  if (!options.resumeFrom) await record('preparing');
+
+  const rollback = async (reason: string): Promise<AliyunEsaRolloutResult> => {
     if (!candidate || candidatePercent === 0) {
+      if (candidate) await driver.deactivate(candidate.deploymentId);
       throw new AliyunEsaRolloutError('ESA_ROLLOUT_PREPARATION_FAILED', reason, checkpoints);
     }
-    await record('rollback_pending', reason);
+    if (options.resumeFrom?.phase !== 'rollback_pending') {
+      await record('rollback_pending', reason);
+    }
     try {
       await driver.switchTraffic({
         rolloutId: plan.rolloutId,
@@ -274,6 +432,7 @@ export async function runAliyunEsaCanaryRollout(
       await record('rolled_back', reason, baselineHealth);
       return { result: 'rolled_back', checkpoints };
     } catch (rollbackError) {
+      if (rollbackError instanceof AliyunEsaRolloutExecutionLostError) throw rollbackError;
       const rollbackReason = rollbackError instanceof Error
         ? rollbackError.message
         : String(rollbackError);
@@ -284,5 +443,55 @@ export async function runAliyunEsaCanaryRollout(
         checkpoints,
       );
     }
+  };
+
+  if (options.resumeFrom?.phase === 'rollback_pending'
+    || (options.resumeFrom?.phase === 'canary' && options.resumeFrom.reason)) {
+    return rollback(options.resumeFrom.reason ?? 'resuming a pending rollback');
+  }
+
+  try {
+    if (!candidate) {
+      candidate = await driver.stage({
+        rolloutId: plan.rolloutId,
+        binding: plan.candidate,
+        idempotencyKey: `${plan.rolloutId}:stage`,
+      });
+      if (typeof candidate.deploymentId !== 'string'
+        || !DEPLOYMENT_ID_PATTERN.test(candidate.deploymentId)) {
+        candidate = null;
+        throw new Error('staged deployment returned an invalid identity');
+      }
+      if (stableBinding(candidate.binding) !== stableBinding(plan.candidate)) {
+        await driver.deactivate(candidate.deploymentId);
+        candidate = null;
+        throw new Error('staged deployment does not match the immutable candidate binding');
+      }
+      await record('staged');
+    }
+
+    const completedIndex = candidatePercent === 0
+      ? -1
+      : plan.percentages.indexOf(candidatePercent);
+    for (const percentage of plan.percentages.slice(completedIndex + 1)) {
+      candidatePercent = percentage;
+      await driver.switchTraffic({
+        rolloutId: plan.rolloutId,
+        candidateDeploymentId: candidate.deploymentId,
+        baselineDeploymentId: plan.baseline.deploymentId,
+        candidatePercent,
+        idempotencyKey: `${plan.rolloutId}:${sequence + 1}:${candidatePercent}`,
+      });
+      const sample = await driver.measure(candidate.deploymentId, candidatePercent);
+      const reason = healthFailure(sample, plan.candidate, plan.healthGate);
+      await record(candidatePercent === 100 ? 'promoting' : 'canary', reason, sample);
+      if (reason) throw new Error(reason);
+    }
+    await record('stable');
+    return { result: 'promoted', checkpoints };
+  } catch (error) {
+    if (error instanceof AliyunEsaRolloutExecutionLostError) throw error;
+    const reason = error instanceof Error ? error.message : String(error);
+    return rollback(reason);
   }
 }
