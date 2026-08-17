@@ -258,17 +258,18 @@ export class EdgeGatewayControlService {
       || body.allowedModels.length > 64) {
       throw invalidRequest('allowedModels is invalid');
     }
-    const allowedModels = body.allowedModels.map((model) => {
+    const requestedModels = body.allowedModels.map((model) => {
       if (typeof model !== 'string' || !model.trim() || model.trim().length > 160) {
         throw invalidRequest('allowedModels is invalid');
       }
       return model.trim();
     });
-    if (new Set(allowedModels).size !== allowedModels.length) {
+    if (new Set(requestedModels).size !== requestedModels.length) {
       throw invalidRequest('allowedModels must be unique');
     }
     const configuredModels = new Set(policy.routes.map((route) => route.publicModel));
-    if (allowedModels.some((model) => !configuredModels.has(model))) {
+    const allowedModels = requestedModels.filter((model) => configuredModels.has(model));
+    if (allowedModels.length === 0) {
       throw forbidden('requested model is not allowed by the active edge policy');
     }
     const envelope = await this.issueAccessToken({

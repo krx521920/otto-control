@@ -441,15 +441,17 @@ describe('edge gateway Control plane', () => {
       signedAuthentication(invalidSubject),
     )).rejects.toMatchObject({ statusCode: 400, code: 'INVALID_REQUEST' });
 
-    const partlyForbidden = {
+    const partlyAllowed = {
       ...binding(),
       subjectId: 'account_edge_user',
       allowedModels: ['otto-fast', 'not-configured'],
     };
     await expect(service.issueDeploymentAccessToken(
-      partlyForbidden,
-      signedAuthentication(partlyForbidden),
-    )).rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' });
+      partlyAllowed,
+      signedAuthentication(partlyAllowed),
+    )).resolves.toMatchObject({
+      envelope: { token: { allowedModels: ['otto-fast'] } },
+    });
 
     const persisted = store.edgeGatewayPolicies.get(DEPLOYMENT_ID)!;
     store.edgeGatewayPolicies.set(DEPLOYMENT_ID, { ...persisted, status: 'suspended' });
