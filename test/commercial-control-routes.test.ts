@@ -287,6 +287,7 @@ describe('commercial control HTTP routes', () => {
       'prometheus_metrics',
       'service_level_objectives',
       'customer_deployment',
+      'private_deployment_enrollment',
       'license_authority',
       'signing_key_rotation',
       'lease_revocation',
@@ -1210,5 +1211,107 @@ describe('commercial control HTTP routes', () => {
       releasePaused: true,
       artifact: { state: 'revoked' },
     });
+  });
+  it('activates a private deployment once and only replays the exact claim', async () => {
+    const authorization = { authorization: `Bearer ${adminSessionToken}` };
+    const customerResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/customers',
+      headers: authorization,
+      payload: { name: 'Private Deployment Customer' },
+    });
+    expect(customerResponse.statusCode).toBe(201);
+    const customerId = customerResponse.json().customer.id as string;
+
+    const enrollmentResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/deployment-enrollments',
+      headers: authorization,
+      payload: {
+        customerId,
+        organizationId: 'org_private_bootstrap',
+        deploymentName: 'Private deployment',
+        plan: 'enterprise',
+        expiresAt: '2030-01-01T00:00:00.000Z',
+        seatLimit: 80,
+        validForHours: 1,
+        federationGatewayUrl: 'https://federation.otto.test',
+        modelGatewayUrl: 'https://models.otto.test',
+        updateDistributionId: 'stable',
+      },
+    });
+    expect(enrollmentResponse.statusCode).toBe(201);
+    const bootstrapSecret = enrollmentResponse.json().bootstrapSecret as string;
+    expect(bootstrapSecret.length).toBeGreaterThanOrEqual(43);
+    expect(enrollmentResponse.json().enrollment.tokenHash).toBeUndefined();
+
+    const claim = {
+      version: 1,
+      deploymentId: 'dep_privatebootstrap001',
+      machineFingerprint: 'd'.repeat(64),
+      appVersion: '1.10.2',
+      buildCommit: '92ac6bbf',
+      publicOrigin: 'https://private.customer.test',
+      deploymentKind: 'self-hosted',
+    };
+    const activated = await app.inject({
+      method: 'POST',
+      url: '/v1/deployment-enrollments/claim',
+      headers: { authorization: `Bearer ${bootstrapSecret}` },
+      payload: claim,
+    });
+    expect(activated.statusCode).toBe(200);
+    expect(activated.json()).toMatchObject({
+      status: 'activated',
+      licenseEnvelope: {
+        license: {
+          deploymentId: claim.deploymentId,
+          organizationId: 'org_private_bootstrap',
+          machineFingerprint: claim.machineFingerprint,
+          seatLimit: 80,
+        },
+        signingKeyId: activeKeyId,
+      },
+      capabilities: {
+        telemetry: true,
+        federation: true,
+        updates: true,
+        modelGateway: true,
+        storage: true,
+      },
+      federationGatewayUrl: 'https://federation.otto.test/',
+      modelGatewayUrl: 'https://models.otto.test/',
+      updateDistributionId: 'stable',
+    });
+    expect(activated.json().licenseEnvelope.signature).toMatch(/^ed25519:/u);
+    const licenseId = activated.json().licenseEnvelope.license.id as string;
+
+    const replayed = await app.inject({
+      method: 'POST',
+      url: '/v1/deployment-enrollments/claim',
+      headers: { authorization: `Bearer ${bootstrapSecret}` },
+      payload: claim,
+    });
+    expect(replayed.statusCode).toBe(200);
+    expect(replayed.json()).toMatchObject({
+      status: 'already_activated',
+      licenseEnvelope: { license: { id: licenseId } },
+    });
+
+    const changedBinding = await app.inject({
+      method: 'POST',
+      url: '/v1/deployment-enrollments/claim',
+      headers: { authorization: `Bearer ${bootstrapSecret}` },
+      payload: { ...claim, publicOrigin: 'https://other.customer.test' },
+    });
+    expect(changedBinding.statusCode).toBe(401);
+
+    const injectedCommercialTerms = await app.inject({
+      method: 'POST',
+      url: '/v1/deployment-enrollments/claim',
+      headers: { authorization: `Bearer ${bootstrapSecret}` },
+      payload: { ...claim, plan: 'government' },
+    });
+    expect(injectedCommercialTerms.statusCode).toBe(400);
   });
 });

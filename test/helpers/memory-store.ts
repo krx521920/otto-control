@@ -9,6 +9,8 @@ import type {
   CustomerRecord,
   DeploymentUpdateAssignmentRecord,
   DeploymentRecord,
+  DeploymentEnrollmentRecord,
+  DeploymentEnrollmentReservation,
   EdgeGatewayPolicyRecord,
   LicenseLifecycleEventRecord,
   LicenseRecord,
@@ -112,6 +114,7 @@ interface StoredTelemetryEvent extends OttoTelemetryEvent {
 export class MemoryControlStore implements ControlStore {
   readonly customers = new Map<string, CustomerRecord>();
   readonly deployments = new Map<string, DeploymentRecord>();
+  readonly deploymentEnrollments = new Map<string, DeploymentEnrollmentRecord>();
   readonly edgeGatewayPolicies = new Map<string, EdgeGatewayPolicyRecord>();
   readonly edgeGatewayNonces = new Map<string, number>();
   readonly licenses = new Map<string, LicenseRecord>();
@@ -195,6 +198,10 @@ export class MemoryControlStore implements ControlStore {
     return customer;
   }
 
+  async getCustomer(id: string): Promise<CustomerRecord | null> {
+    return this.customers.get(id) ?? null;
+  }
+
   async getCommercialInventory(input: {
     nowMs: number;
     expiringWithinMs: number;
@@ -275,6 +282,133 @@ export class MemoryControlStore implements ControlStore {
     return this.deployments.get(id) ?? null;
   }
 
+  async createDeploymentEnrollment(input: {
+    id: string;
+    tokenHash: string;
+    customerId: string;
+    organizationId: string;
+    deploymentName: string;
+    plan: string;
+    licenseExpiresAtMs: number;
+    seatLimit: number;
+    modules: DeploymentEnrollmentRecord['modules'];
+    telemetryAllowed: boolean;
+    federationGatewayUrl: string | null;
+    modelGatewayUrl: string | null;
+    telemetryEndpoint: string | null;
+    updateDistributionId: string | null;
+    licenseId: string;
+    expiresAt: Date;
+  }): Promise<DeploymentEnrollmentRecord> {
+    if (!this.customers.has(input.customerId)) throw new Error('customer does not exist');
+    const now = new Date();
+    const record: DeploymentEnrollmentRecord = {
+      ...input,
+      requestHash: null,
+      modules: [...input.modules],
+      status: 'pending',
+      deploymentId: null,
+      machineFingerprint: null,
+      claimLeaseId: null,
+      claimLeaseExpiresAt: null,
+      replayExpiresAt: null,
+      appVersion: null,
+      buildCommit: null,
+      publicOrigin: null,
+      deploymentKind: null,
+      claimedAt: null,
+      activatedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.deploymentEnrollments.set(record.id, record);
+    return structuredClone(record);
+  }
+
+  async reserveDeploymentEnrollmentClaim(input: {
+    tokenHash: string;
+    requestHash: string;
+    deploymentId: string;
+    machineFingerprint: string;
+    claimLeaseId: string;
+    claimLeaseExpiresAt: Date;
+    appVersion: string;
+    buildCommit: string;
+    publicOrigin: string | null;
+    deploymentKind: string;
+    now: Date;
+  }): Promise<DeploymentEnrollmentReservation | null> {
+    const record = [...this.deploymentEnrollments.values()]
+      .find((candidate) => candidate.tokenHash === input.tokenHash);
+    if (!record || record.status === 'revoked' || record.expiresAt <= input.now) {
+      return null;
+    }
+    if (
+      (record.requestHash !== null && record.requestHash !== input.requestHash)
+      || (record.deploymentId !== null && record.deploymentId !== input.deploymentId)
+      || (
+        record.machineFingerprint !== null
+        && record.machineFingerprint !== input.machineFingerprint
+      )
+    ) {
+      return null;
+    }
+    if (record.status === 'activated') {
+      if (!record.replayExpiresAt || record.replayExpiresAt <= input.now) return null;
+      return { state: 'activated', enrollment: structuredClone(record) };
+    }
+    if (
+      record.status === 'claiming'
+      && record.claimLeaseExpiresAt
+      && record.claimLeaseExpiresAt > input.now
+    ) {
+      return { state: 'in_progress', enrollment: structuredClone(record) };
+    }
+    const updated: DeploymentEnrollmentRecord = {
+      ...record,
+      status: 'claiming',
+      requestHash: input.requestHash,
+      deploymentId: input.deploymentId,
+      machineFingerprint: input.machineFingerprint,
+      claimLeaseId: input.claimLeaseId,
+      claimLeaseExpiresAt: input.claimLeaseExpiresAt,
+      appVersion: input.appVersion,
+      buildCommit: input.buildCommit,
+      publicOrigin: input.publicOrigin,
+      deploymentKind: input.deploymentKind,
+      claimedAt: record.claimedAt ?? input.now,
+      updatedAt: input.now,
+    };
+    this.deploymentEnrollments.set(updated.id, updated);
+    return { state: 'reserved', enrollment: structuredClone(updated) };
+  }
+
+  async completeDeploymentEnrollmentClaim(input: {
+    enrollmentId: string;
+    claimLeaseId: string;
+    activatedAt: Date;
+    replayExpiresAt: Date;
+  }): Promise<DeploymentEnrollmentRecord | null> {
+    const record = this.deploymentEnrollments.get(input.enrollmentId);
+    if (
+      !record
+      || record.status !== 'claiming'
+      || record.claimLeaseId !== input.claimLeaseId
+    ) {
+      return null;
+    }
+    const updated: DeploymentEnrollmentRecord = {
+      ...record,
+      status: 'activated',
+      claimLeaseId: null,
+      claimLeaseExpiresAt: null,
+      replayExpiresAt: input.replayExpiresAt,
+      activatedAt: input.activatedAt,
+      updatedAt: input.activatedAt,
+    };
+    this.deploymentEnrollments.set(updated.id, updated);
+    return structuredClone(updated);
+  }
   async upsertEdgeGatewayPolicy(
     input: Omit<EdgeGatewayPolicyRecord, 'createdAt' | 'updatedAt'> & { changedAt: Date },
   ): Promise<EdgeGatewayPolicyRecord> {

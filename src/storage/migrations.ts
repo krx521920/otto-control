@@ -1398,6 +1398,53 @@ const MIGRATIONS: Migration[] = [
        ON control_edge_billing_events(deployment_id, state, received_at)`,
     ],
   },
+  {
+    id: '032_private_deployment_enrollments',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_deployment_enrollments (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE CHECK (token_hash ~ '^[a-f0-9]{64}$'),
+        request_hash TEXT CHECK (request_hash ~ '^[a-f0-9]{64}$'),
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        organization_id TEXT NOT NULL,
+        deployment_name TEXT NOT NULL,
+        plan TEXT NOT NULL,
+        license_expires_at_ms BIGINT NOT NULL,
+        seat_limit INTEGER NOT NULL CHECK (seat_limit BETWEEN 1 AND 100000),
+        modules JSONB NOT NULL CHECK (jsonb_typeof(modules) = 'array'),
+        telemetry_allowed BOOLEAN NOT NULL DEFAULT true,
+        federation_gateway_url TEXT,
+        model_gateway_url TEXT,
+        telemetry_endpoint TEXT,
+        update_distribution_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'claiming', 'activated', 'revoked')),
+        deployment_id TEXT,
+        machine_fingerprint TEXT,
+        license_id TEXT NOT NULL UNIQUE,
+        claim_lease_id TEXT,
+        claim_lease_expires_at TIMESTAMPTZ,
+        replay_expires_at TIMESTAMPTZ,
+        app_version TEXT,
+        build_commit TEXT,
+        public_origin TEXT,
+        deployment_kind TEXT,
+        expires_at TIMESTAMPTZ NOT NULL,
+        claimed_at TIMESTAMPTZ,
+        activated_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CHECK (machine_fingerprint IS NULL OR machine_fingerprint ~ '^[a-f0-9]{64}$'),
+        CHECK ((deployment_id IS NULL) = (machine_fingerprint IS NULL)),
+        CHECK (status <> 'activated' OR activated_at IS NOT NULL)
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_deployment_enrollments_deployment
+       ON control_deployment_enrollments(deployment_id)
+       WHERE deployment_id IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_control_deployment_enrollments_expiry
+       ON control_deployment_enrollments(status, expires_at)`,
+    ],
+  },
 ];
 
 export const CONTROL_SCHEMA_MIGRATION_IDS = Object.freeze(

@@ -35,6 +35,17 @@ export async function registerCommercialControlRoutes(
       return reply.code(201).send({ deployment });
     });
 
+    admin.post('/deployment-enrollments', {
+      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    }, async (request, reply) => {
+      const auth = await authenticateAdmin(request, options, 'deployment.create');
+      options.identity.requirePermission(auth.principal, 'license.issue');
+      const enrollment = await options.service.createDeploymentEnrollment(
+        request.body,
+        auth.actorId,
+      );
+      return reply.code(201).send(enrollment);
+    });
     admin.post('/licenses', async (request, reply) => {
       const auth = await authenticateAdmin(request, options, 'license.issue');
       const envelope = await options.service.issueLicense(request.body, auth.actorId);
@@ -230,6 +241,18 @@ export async function registerCommercialControlRoutes(
     });
   }, { prefix: '/v1/admin' });
 
+  app.post('/v1/deployment-enrollments/claim', {
+    config: {
+      rateLimit: {
+        max: 20,
+        timeWindow: '1 minute',
+        ban: 10,
+      },
+    },
+  }, async (request) => options.service.claimDeploymentEnrollment(
+    request.body,
+    bearerToken(request),
+  ));
   app.get('/v1/signing-keyring', {
     config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
   }, async () => options.service.publicSigningKeyring());

@@ -111,6 +111,46 @@ export interface DeploymentRecord {
   updatedAt: Date;
 }
 
+export type DeploymentEnrollmentStatus = 'pending' | 'claiming' | 'activated' | 'revoked';
+
+export interface DeploymentEnrollmentRecord {
+  id: string;
+  tokenHash: string;
+  requestHash: string | null;
+  customerId: string;
+  organizationId: string;
+  deploymentName: string;
+  plan: string;
+  licenseExpiresAtMs: number;
+  seatLimit: number;
+  modules: OttoLicenseCapability[];
+  telemetryAllowed: boolean;
+  federationGatewayUrl: string | null;
+  modelGatewayUrl: string | null;
+  telemetryEndpoint: string | null;
+  updateDistributionId: string | null;
+  status: DeploymentEnrollmentStatus;
+  deploymentId: string | null;
+  machineFingerprint: string | null;
+  licenseId: string;
+  claimLeaseId: string | null;
+  claimLeaseExpiresAt: Date | null;
+  replayExpiresAt: Date | null;
+  appVersion: string | null;
+  buildCommit: string | null;
+  publicOrigin: string | null;
+  deploymentKind: string | null;
+  expiresAt: Date;
+  claimedAt: Date | null;
+  activatedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface DeploymentEnrollmentReservation {
+  state: 'reserved' | 'in_progress' | 'activated';
+  enrollment: DeploymentEnrollmentRecord;
+}
 export interface EdgeGatewayPolicyRecord {
   deploymentId: string;
   organizationId: string;
@@ -322,6 +362,7 @@ export interface ControlStore {
   ping(): Promise<void>;
   close(): Promise<void>;
   createCustomer(input: { id: string; name: string }): Promise<CustomerRecord>;
+  getCustomer(id: string): Promise<CustomerRecord | null>;
   getCommercialInventory(input: {
     nowMs: number;
     expiringWithinMs: number;
@@ -335,6 +376,43 @@ export interface ControlStore {
     name: string;
   }): Promise<DeploymentRecord>;
   getDeployment(id: string): Promise<DeploymentRecord | null>;
+  createDeploymentEnrollment(input: {
+    id: string;
+    tokenHash: string;
+    customerId: string;
+    organizationId: string;
+    deploymentName: string;
+    plan: string;
+    licenseExpiresAtMs: number;
+    seatLimit: number;
+    modules: OttoLicenseCapability[];
+    telemetryAllowed: boolean;
+    federationGatewayUrl: string | null;
+    modelGatewayUrl: string | null;
+    telemetryEndpoint: string | null;
+    updateDistributionId: string | null;
+    licenseId: string;
+    expiresAt: Date;
+  }): Promise<DeploymentEnrollmentRecord>;
+  reserveDeploymentEnrollmentClaim(input: {
+    tokenHash: string;
+    requestHash: string;
+    deploymentId: string;
+    machineFingerprint: string;
+    claimLeaseId: string;
+    claimLeaseExpiresAt: Date;
+    appVersion: string;
+    buildCommit: string;
+    publicOrigin: string | null;
+    deploymentKind: string;
+    now: Date;
+  }): Promise<DeploymentEnrollmentReservation | null>;
+  completeDeploymentEnrollmentClaim(input: {
+    enrollmentId: string;
+    claimLeaseId: string;
+    activatedAt: Date;
+    replayExpiresAt: Date;
+  }): Promise<DeploymentEnrollmentRecord | null>;
   upsertEdgeGatewayPolicy(input: {
     deploymentId: string;
     organizationId: string;

@@ -33,6 +33,8 @@ import type {
   CustomerRecord,
   DeploymentUpdateAssignmentRecord,
   DeploymentRecord,
+  DeploymentEnrollmentRecord,
+  DeploymentEnrollmentReservation,
   EdgeGatewayPolicyRecord,
   LicenseLifecycleEventRecord,
   LicenseRecord,
@@ -190,6 +192,39 @@ interface DeploymentRow {
   updated_at: Date;
 }
 
+interface DeploymentEnrollmentRow {
+  id: string;
+  token_hash: string;
+  request_hash: string | null;
+  customer_id: string;
+  organization_id: string;
+  deployment_name: string;
+  plan: string;
+  license_expires_at_ms: string;
+  seat_limit: number;
+  modules: OttoLicenseCapability[];
+  telemetry_allowed: boolean;
+  federation_gateway_url: string | null;
+  model_gateway_url: string | null;
+  telemetry_endpoint: string | null;
+  update_distribution_id: string | null;
+  status: DeploymentEnrollmentRecord['status'];
+  deployment_id: string | null;
+  machine_fingerprint: string | null;
+  license_id: string;
+  claim_lease_id: string | null;
+  claim_lease_expires_at: Date | null;
+  replay_expires_at: Date | null;
+  app_version: string | null;
+  build_commit: string | null;
+  public_origin: string | null;
+  deployment_kind: string | null;
+  expires_at: Date;
+  claimed_at: Date | null;
+  activated_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
 interface EdgeGatewayPolicyRow {
   deployment_id: string;
   organization_id: string;
@@ -689,6 +724,43 @@ function deploymentFromRow(row: DeploymentRow): DeploymentRecord {
   };
 }
 
+function deploymentEnrollmentFromRow(
+  row: DeploymentEnrollmentRow,
+): DeploymentEnrollmentRecord {
+  return {
+    id: row.id,
+    tokenHash: row.token_hash,
+    requestHash: row.request_hash,
+    customerId: row.customer_id,
+    organizationId: row.organization_id,
+    deploymentName: row.deployment_name,
+    plan: row.plan,
+    licenseExpiresAtMs: Number(row.license_expires_at_ms),
+    seatLimit: row.seat_limit,
+    modules: row.modules,
+    telemetryAllowed: row.telemetry_allowed,
+    federationGatewayUrl: row.federation_gateway_url,
+    modelGatewayUrl: row.model_gateway_url,
+    telemetryEndpoint: row.telemetry_endpoint,
+    updateDistributionId: row.update_distribution_id,
+    status: row.status,
+    deploymentId: row.deployment_id,
+    machineFingerprint: row.machine_fingerprint,
+    licenseId: row.license_id,
+    claimLeaseId: row.claim_lease_id,
+    claimLeaseExpiresAt: row.claim_lease_expires_at,
+    replayExpiresAt: row.replay_expires_at,
+    appVersion: row.app_version,
+    buildCommit: row.build_commit,
+    publicOrigin: row.public_origin,
+    deploymentKind: row.deployment_kind,
+    expiresAt: row.expires_at,
+    claimedAt: row.claimed_at,
+    activatedAt: row.activated_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 function edgeGatewayPolicyFromRow(row: EdgeGatewayPolicyRow): EdgeGatewayPolicyRecord {
   return {
     deploymentId: row.deployment_id,
@@ -1298,6 +1370,14 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     }
   }
 
+  async getCustomer(id: string): Promise<CustomerRecord | null> {
+    const result = await this.#pool.query<CustomerRow>(
+      'SELECT * FROM control_customers WHERE id = $1',
+      [id],
+    );
+    return result.rows[0] ? customerFromRow(result.rows[0]) : null;
+  }
+
   async getCommercialInventory(input: {
     nowMs: number;
     expiringWithinMs: number;
@@ -1432,6 +1512,180 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     return result.rows[0] ? deploymentFromRow(result.rows[0]) : null;
   }
 
+  async createDeploymentEnrollment(input: {
+    id: string;
+    tokenHash: string;
+    customerId: string;
+    organizationId: string;
+    deploymentName: string;
+    plan: string;
+    licenseExpiresAtMs: number;
+    seatLimit: number;
+    modules: OttoLicenseCapability[];
+    telemetryAllowed: boolean;
+    federationGatewayUrl: string | null;
+    modelGatewayUrl: string | null;
+    telemetryEndpoint: string | null;
+    updateDistributionId: string | null;
+    licenseId: string;
+    expiresAt: Date;
+  }): Promise<DeploymentEnrollmentRecord> {
+    try {
+      const result = await this.#pool.query<DeploymentEnrollmentRow>(
+        `INSERT INTO control_deployment_enrollments
+          (id, token_hash, customer_id, organization_id, deployment_name, plan,
+           license_expires_at_ms, seat_limit, modules, telemetry_allowed,
+           federation_gateway_url, model_gateway_url, telemetry_endpoint,
+           update_distribution_id, license_id, expires_at)
+         VALUES
+          ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13,
+           $14, $15, $16)
+         RETURNING *`,
+        [
+          input.id,
+          input.tokenHash,
+          input.customerId,
+          input.organizationId,
+          input.deploymentName,
+          input.plan,
+          input.licenseExpiresAtMs,
+          input.seatLimit,
+          JSON.stringify(input.modules),
+          input.telemetryAllowed,
+          input.federationGatewayUrl,
+          input.modelGatewayUrl,
+          input.telemetryEndpoint,
+          input.updateDistributionId,
+          input.licenseId,
+          input.expiresAt,
+        ],
+      );
+      return deploymentEnrollmentFromRow(result.rows[0]!);
+    } catch (error) {
+      if (postgresCode(error) === '23503') throw conflict('customer does not exist');
+      if (postgresCode(error) === '23505') throw conflict('deployment enrollment already exists');
+      throw error;
+    }
+  }
+
+  async reserveDeploymentEnrollmentClaim(input: {
+    tokenHash: string;
+    requestHash: string;
+    deploymentId: string;
+    machineFingerprint: string;
+    claimLeaseId: string;
+    claimLeaseExpiresAt: Date;
+    appVersion: string;
+    buildCommit: string;
+    publicOrigin: string | null;
+    deploymentKind: string;
+    now: Date;
+  }): Promise<DeploymentEnrollmentReservation | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const selected = await client.query<DeploymentEnrollmentRow>(
+        'SELECT * FROM control_deployment_enrollments WHERE token_hash = $1 FOR UPDATE',
+        [input.tokenHash],
+      );
+      const row = selected.rows[0];
+      if (!row || row.status === 'revoked' || row.expires_at <= input.now) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const sameBinding = (
+        (row.request_hash === null || row.request_hash === input.requestHash)
+        && (row.deployment_id === null || row.deployment_id === input.deploymentId)
+        && (row.machine_fingerprint === null
+          || row.machine_fingerprint === input.machineFingerprint)
+      );
+      if (!sameBinding) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (row.status === 'activated') {
+        await client.query('COMMIT');
+        if (!row.replay_expires_at || row.replay_expires_at <= input.now) return null;
+        return { state: 'activated', enrollment: deploymentEnrollmentFromRow(row) };
+      }
+      if (
+        row.status === 'claiming'
+        && row.claim_lease_expires_at
+        && row.claim_lease_expires_at > input.now
+      ) {
+        await client.query('COMMIT');
+        return { state: 'in_progress', enrollment: deploymentEnrollmentFromRow(row) };
+      }
+      const updated = await client.query<DeploymentEnrollmentRow>(
+        `UPDATE control_deployment_enrollments
+         SET status = 'claiming',
+             deployment_id = $2,
+             machine_fingerprint = $3,
+             claim_lease_id = $4,
+             claim_lease_expires_at = $5,
+             app_version = $6,
+             build_commit = $7,
+             public_origin = $8,
+             deployment_kind = $9,
+             claimed_at = COALESCE(claimed_at, $10),
+             updated_at = $10,
+             request_hash = $11
+         WHERE id = $1
+         RETURNING *`,
+        [
+          row.id,
+          input.deploymentId,
+          input.machineFingerprint,
+          input.claimLeaseId,
+          input.claimLeaseExpiresAt,
+          input.appVersion,
+          input.buildCommit,
+          input.publicOrigin,
+          input.deploymentKind,
+          input.now,
+          input.requestHash,
+        ],
+      );
+      await client.query('COMMIT');
+      return {
+        state: 'reserved',
+        enrollment: deploymentEnrollmentFromRow(updated.rows[0]!),
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async completeDeploymentEnrollmentClaim(input: {
+    enrollmentId: string;
+    claimLeaseId: string;
+    activatedAt: Date;
+    replayExpiresAt: Date;
+  }): Promise<DeploymentEnrollmentRecord | null> {
+    const result = await this.#pool.query<DeploymentEnrollmentRow>(
+      `UPDATE control_deployment_enrollments
+       SET status = 'activated',
+           activated_at = $3,
+           replay_expires_at = $4,
+           claim_lease_id = NULL,
+           claim_lease_expires_at = NULL,
+           updated_at = $3
+       WHERE id = $1
+         AND status = 'claiming'
+         AND claim_lease_id = $2
+       RETURNING *`,
+      [
+        input.enrollmentId,
+        input.claimLeaseId,
+        input.activatedAt,
+        input.replayExpiresAt,
+      ],
+    );
+    return result.rows[0] ? deploymentEnrollmentFromRow(result.rows[0]) : null;
+  }
   async upsertEdgeGatewayPolicy(input: {
     deploymentId: string;
     organizationId: string;

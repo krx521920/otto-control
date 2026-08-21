@@ -133,6 +133,7 @@ export async function buildControlApp(
   if (commercialControl) {
     capabilities.push(
       'customer_deployment',
+      'private_deployment_enrollment',
       'license_authority',
       'signing_key_rotation',
       'lease_revocation',
