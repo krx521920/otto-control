@@ -56,7 +56,7 @@ export const OTTO_COMMERCIAL_PLAN_CATALOG = Object.freeze({
       offlineAllowed: false,
       defaultTelemetryAllowed: true,
       defaultSeatEnforcement: 'monitor',
-      defaultBillingEnforcement: 'disabled',
+      defaultBillingEnforcement: 'enforce',
       overagePolicy: 'block_after_grace',
     },
     {
@@ -74,7 +74,7 @@ export const OTTO_COMMERCIAL_PLAN_CATALOG = Object.freeze({
       offlineAllowed: false,
       defaultTelemetryAllowed: true,
       defaultSeatEnforcement: 'monitor',
-      defaultBillingEnforcement: 'disabled',
+      defaultBillingEnforcement: 'enforce',
       overagePolicy: 'block_after_grace',
     },
     {
@@ -87,7 +87,7 @@ export const OTTO_COMMERCIAL_PLAN_CATALOG = Object.freeze({
       offlineAllowed: false,
       defaultTelemetryAllowed: true,
       defaultSeatEnforcement: 'monitor',
-      defaultBillingEnforcement: 'disabled',
+      defaultBillingEnforcement: 'enforce',
       overagePolicy: 'block_after_grace',
     },
     {
@@ -100,7 +100,7 @@ export const OTTO_COMMERCIAL_PLAN_CATALOG = Object.freeze({
       offlineAllowed: true,
       defaultTelemetryAllowed: false,
       defaultSeatEnforcement: 'monitor',
-      defaultBillingEnforcement: 'disabled',
+      defaultBillingEnforcement: 'enforce',
       overagePolicy: 'contract_review',
     },
   ] satisfies OttoCommercialPlanDefinition[],

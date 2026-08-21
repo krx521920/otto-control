@@ -9,9 +9,14 @@ import type {
   SignedEdgeAccessTokenV1,
   SignedEdgeGatewayPolicyV1,
 } from '../contracts/edge-gateway.js';
+import {
+  OPENAI_PROVIDER_ADAPTER_ID,
+  resolveEdgeProviderAdapter,
+} from './provider-adapter.js';
 
 const SIGNATURE_PREFIX = 'ed25519:';
 const IDENTIFIER_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,159}$/u;
+const PROVIDER_ADAPTER_PATTERN = /^[a-z][a-z0-9-]{0,79}$/u;
 const SECRET_BINDING_PATTERN = /^[A-Z][A-Z0-9_]{2,127}$/u;
 const HEADER_NAME_PATTERN = /^[a-zA-Z0-9!#$%&'*+.^_`|~-]{1,80}$/u;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -28,7 +33,7 @@ const POLICY_FIELDS = new Set([
   'routes', 'limits', 'issuedAtMs', 'expiresAtMs',
 ]);
 const ROUTE_FIELDS = new Set([
-  'id', 'endpoint', 'publicModel', 'upstreamModel', 'upstreamUrl', 'priority',
+  'id', 'providerAdapter', 'endpoint', 'publicModel', 'upstreamModel', 'upstreamUrl', 'priority',
   'authentication',
   'metering',
 ]);
@@ -208,6 +213,14 @@ function metering(value: unknown): EdgeRouteMeteringV1 | undefined {
   };
 }
 
+function providerAdapter(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !PROVIDER_ADAPTER_PATTERN.test(value)) {
+    protocolError(400, 'EDGE_INVALID_ENVELOPE', 'route.providerAdapter is invalid');
+  }
+  return value;
+}
+
 function route(value: unknown): EdgeModelRouteV1 {
   const body = objectValue(value, 'gateway route');
   exactFields(body, ROUTE_FIELDS, 'gateway route');
@@ -227,9 +240,22 @@ function route(value: unknown): EdgeModelRouteV1 {
     );
   }
   const routeMetering = metering(body.metering);
+  const routeProviderAdapter = providerAdapter(body.providerAdapter);
+  const routeEndpoint = endpoint(body.endpoint);
+  const adapter = resolveEdgeProviderAdapter(
+    routeProviderAdapter ?? OPENAI_PROVIDER_ADAPTER_ID,
+  );
+  if (!adapter || !adapter.supportedEndpoints.includes(routeEndpoint)) {
+    protocolError(
+      400,
+      'EDGE_INVALID_ENVELOPE',
+      'route provider adapter and endpoint are unsupported',
+    );
+  }
   return {
     id: identifier(body, 'id'),
-    endpoint: endpoint(body.endpoint),
+    ...(routeProviderAdapter ? { providerAdapter: routeProviderAdapter } : {}),
+    endpoint: routeEndpoint,
     publicModel: requiredString(body, 'publicModel', 160),
     upstreamModel: requiredString(body, 'upstreamModel', 160),
     upstreamUrl: parsed.toString(),

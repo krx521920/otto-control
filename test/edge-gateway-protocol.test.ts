@@ -143,6 +143,26 @@ describe('edge gateway signed protocol boundaries', () => {
     }, NOW).policy.routes[0]?.endpoint).toBe('responses');
   });
 
+  it('preserves a signed provider adapter id and rejects malformed ids', () => {
+    const normalized = normalizeSignedEdgeGatewayPolicy({
+      ...policy,
+      policy: {
+        ...policy.policy,
+        routes: [{ ...route, providerAdapter: 'volcengine-ark' }],
+      },
+    }, NOW);
+    expect(normalized.policy.routes[0]?.providerAdapter).toBe('volcengine-ark');
+
+    for (const providerAdapter of [
+      '', 'OpenAI', 'bad_adapter', 'bad adapter', `a${'x'.repeat(80)}`,
+    ]) {
+      invalidPolicy({
+        ...policy,
+        policy: { ...policy.policy, routes: [{ ...route, providerAdapter }] },
+      });
+    }
+  });
+
   it('enforces HTTPS route, authentication binding, and custom-header boundaries', () => {
     for (const upstreamUrl of [
       'not-a-url',

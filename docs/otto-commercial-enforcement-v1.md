@@ -7,8 +7,11 @@ in the desktop UI is never an authorization decision.
 ## Signed policy
 
 Control signs `billingEnforcement` and `billingHoldEndpoint` into an online
-License. Existing and offline Licenses use `disabled`. An offline License
-cannot request real-time enforcement because it cannot obtain a Control hold.
+License. Newly issued online Licenses default to `enforce`; an online License
+with `disabled` cannot receive managed model-gateway policy or access tokens.
+Legacy Licenses must be renewed before managed model access. Offline Licenses
+remain `disabled` because they cannot obtain a real-time Control hold and
+therefore cannot consume centrally funded model credits.
 
 Otto verifies the Ed25519 License, deployment ID, organization ID, machine
 fingerprint and short lease before executing a protected route. It then checks

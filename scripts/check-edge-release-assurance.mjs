@@ -20,11 +20,18 @@ const REQUIRED_ACCEPTANCE = {
     && report.result === 'passed',
   billingReconciliation: (report) => report.schemaVersion === 1
     && report.result === 'passed' && Array.isArray(report.issues) && report.issues.length === 0,
-  soak24h: (report) => report.kind === 'otto_edge_gateway_acceptance'
-    && report.profile === 'soak-24h' && report.result === 'passed'
-    && report.durationSeconds >= 24 * 60 * 60,
-  costLoad: (report) => report.kind === 'otto_edge_gateway_acceptance'
-    && report.profile === 'cost-load' && report.result === 'passed',
+  soak24h: (report, releaseCandidate) => formalEdgeAcceptance(
+    report,
+    releaseCandidate,
+    'soak-24h',
+    24 * 60 * 60,
+  ),
+  costLoad: (report, releaseCandidate) => formalEdgeAcceptance(
+    report,
+    releaseCandidate,
+    'cost-load',
+    5 * 60,
+  ),
   esaInfrastructure: (report) => report.kind === 'otto_aliyun_esa_infrastructure_acceptance'
     && report.result === 'passed' && report.publicRouteEnabled === true
     && report.publicRouteBypass === false && report.certificateStatus === 'issued'
@@ -50,6 +57,51 @@ const REQUIRED_ACCEPTANCE = {
 };
 const SHA256 = /^[a-f0-9]{64}$/u;
 const PLACEHOLDERS = /(?:TODO|TBD|UNSET|CONFIGURE|EXAMPLE|REPLACE)/iu;
+
+function formalEdgeAcceptance(report, releaseCandidate, profile, minimumDurationSeconds) {
+  const provenance = report?.provenance;
+  const runner = provenance?.runner;
+  const releaseArtifact = provenance?.releaseArtifact;
+  const timing = report?.timing;
+  const traffic = report?.traffic;
+  const tokens = report?.tokens;
+  const cost = report?.cost;
+  const ledger = report?.evidence?.ledger;
+  const duration = report?.durationSeconds;
+  return report?.version === 2
+    && report?.kind === 'otto_edge_gateway_acceptance'
+    && report?.profile === profile
+    && report?.result === 'passed'
+    && Array.isArray(report?.violations) && report.violations.length === 0
+    && Number.isFinite(duration) && duration >= minimumDurationSeconds
+    && Number.isFinite(timing?.wallClockDurationSeconds)
+    && timing.wallClockDurationSeconds >= minimumDurationSeconds
+    && Number.isFinite(timing?.monotonicDurationSeconds)
+    && timing.monotonicDurationSeconds >= minimumDurationSeconds
+    && Math.abs(timing.wallClockDurationSeconds - timing.monotonicDurationSeconds) <= 5
+    && provenance?.schemaVersion === 1
+    && provenance?.evidenceClass === 'production-live'
+    && provenance?.releaseCandidate === releaseCandidate
+    && typeof releaseArtifact?.path === 'string'
+    && SHA256.test(releaseArtifact?.sha256)
+    && Number.isSafeInteger(releaseArtifact?.bytes) && releaseArtifact.bytes > 0
+    && runner?.system === 'github-actions'
+    && runner?.environment === 'self-hosted'
+    && runner?.event === 'workflow_dispatch'
+    && /^[1-9][0-9]*$/u.test(runner?.runId ?? '')
+    && /^[1-9][0-9]*$/u.test(runner?.runAttempt ?? '')
+    && typeof runner?.repository === 'string' && runner.repository.includes('/')
+    && typeof runner?.workflow === 'string' && runner.workflow !== 'unknown'
+    && typeof runner?.job === 'string' && runner.job !== 'unknown'
+    && typeof runner?.runnerName === 'string' && runner.runnerName !== 'unknown'
+    && Number.isSafeInteger(traffic?.succeeded) && traffic.succeeded > 0
+    && Number.isSafeInteger(tokens?.reportedResponses)
+    && tokens.reportedResponses === traffic.succeeded
+    && Number.isFinite(cost?.usageReportedFraction) && cost.usageReportedFraction === 1
+    && Number.isFinite(cost?.meteredEstimateUsd) && cost.meteredEstimateUsd > 0
+    && typeof ledger?.path === 'string' && SHA256.test(ledger?.sha256)
+    && Number.isSafeInteger(ledger?.bytes) && ledger.bytes > 0;
+}
 
 function object(value, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -283,7 +335,21 @@ export function checkEdgeReleaseAssurance(raw, options) {
       const path = assertEvidence(root, record.evidence, name);
       approvedWindow(record.performedAt, record.expiresAt, now, name);
       const report = JSON.parse(readFileSync(path, 'utf8'));
-      if (!validate(report)) blockers.push(`${name} report does not prove the required result`);
+      if (!validate(report, status.releaseCandidate)) {
+        blockers.push(name + ' report does not prove the required result');
+      }
+      if (key === 'soak24h' || key === 'costLoad') {
+        assertEvidence(
+          root,
+          report?.provenance?.releaseArtifact ?? {},
+          name + ' release artifact',
+        );
+        assertEvidence(
+          root,
+          report?.evidence?.ledger ?? {},
+          name + ' request ledger',
+        );
+      }
     } catch (error) {
       blockers.push(error instanceof Error ? error.message : String(error));
     }

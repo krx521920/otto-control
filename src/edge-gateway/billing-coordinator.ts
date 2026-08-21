@@ -32,6 +32,7 @@ export interface EdgeBillingSettlementRequest extends EdgeBillingRequestIdentity
 export type EdgeBillingReleaseReason =
   | 'no_usable_route'
   | 'unmetered_route'
+  | 'upstream_rejected'
   | 'zero_usage';
 
 export interface EdgeBillingReleaseRequest extends EdgeBillingRequestIdentity {

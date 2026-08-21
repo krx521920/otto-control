@@ -5,6 +5,13 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { issueEdgeAcceptanceCredential } from './drill-edge-runtime-failures.mjs';
+import {
+  classifyEvidenceEnvironment,
+  elapsedEvidence,
+  fileEvidence,
+  immutableReleaseEvidence,
+  productionProvenance,
+} from './edge-live-evidence.mjs';
 
 export const EDGE_ACCEPTANCE_CONFIRMATION = 'RUN_REAL_EDGE_ACCEPTANCE';
 
@@ -149,6 +156,9 @@ export function parseEdgeAcceptanceArguments(argv, environment = process.env) {
     operationsToken: environment.OTTO_EDGE_OPERATIONS_TOKEN?.trim() || null,
     operationsTokenFile: options.get('operations-token-file') ?? null,
     outputDirectory,
+    repositoryRoot: resolve(options.get('repository-root') ?? process.cwd()),
+    releaseCandidate: options.get('release-candidate') ?? null,
+    releaseArtifact: options.get('release-artifact') ?? null,
     confirmation: options.get('confirm') ?? environment.OTTO_EDGE_ACCEPTANCE_CONFIRM ?? '',
     planOnly,
   };
@@ -158,12 +168,24 @@ export function parseEdgeAcceptanceArguments(argv, environment = process.env) {
     throw new Error('Control-backed token renewal requires control URL, identity file, and lease token file');
   }
   if (['soak-24h', 'cost-load'].includes(profile)) {
+    if (options.has('duration-seconds') && config.durationSeconds !== defaults.durationSeconds) {
+      throw new Error(`${profile} duration is fixed at ${defaults.durationSeconds} seconds`);
+    }
     if (config.budgetUsd <= 0) throw new Error(`${profile} requires --budget-usd`);
     if (config.inputPricePerMillionUsd <= 0 || config.outputPricePerMillionUsd <= 0) {
       throw new Error(`${profile} requires non-zero input and output token prices`);
     }
     if (!config.controlUrl || !config.identityFile || !config.leaseTokenFile) {
       throw new Error(`${profile} requires Control-backed short-lived token renewal`);
+    }
+    if (!config.releaseCandidate || !config.releaseArtifact) {
+      throw new Error(`${profile} requires --release-candidate and --release-artifact`);
+    }
+    if (config.baseUrl && config.baseUrl.protocol !== 'https:') {
+      throw new Error(`${profile} requires an HTTPS Edge Gateway URL`);
+    }
+    if (config.controlUrl.protocol !== 'https:') {
+      throw new Error(`${profile} requires an HTTPS Control URL`);
     }
   }
   if (!planOnly && config.confirmation !== EDGE_ACCEPTANCE_CONFIRMATION) {
@@ -331,6 +353,33 @@ function safePlan(config) {
 
 export async function runEdgeAcceptance(config, options = {}) {
   if (!config.baseUrl) throw new Error('base URL is required for execution');
+  const productionProfile = config.profile === 'soak-24h' || config.profile === 'cost-load';
+  const classified = classifyEvidenceEnvironment(options.environment);
+  let provenance = {
+    schemaVersion: 1,
+    evidenceClass: classified.evidenceClass,
+    generator: 'scripts/edge-gateway-acceptance.mjs',
+    releaseCandidate: null,
+    releaseArtifact: null,
+    runner: classified.runner,
+  };
+  if (productionProfile) {
+    if (classified.evidenceClass !== 'production-live') {
+      throw new Error(
+        `${config.profile} formal evidence must run through workflow_dispatch on a self-hosted runner`,
+      );
+    }
+    const release = immutableReleaseEvidence({
+      root: config.repositoryRoot,
+      releaseCandidate: config.releaseCandidate,
+      artifactPath: config.releaseArtifact,
+    });
+    provenance = productionProvenance({
+      environment: options.environment,
+      generator: 'scripts/edge-gateway-acceptance.mjs',
+      release,
+    });
+  }
   const accessTokens = tokenSource(config, options);
   const operationsToken = config.operationsToken || config.operationsTokenFile
     ? await secret(config.operationsToken, config.operationsTokenFile, 'Edge operations token')
@@ -347,6 +396,7 @@ export async function runEdgeAcceptance(config, options = {}) {
   const eventLoop = monitorEventLoopDelay({ resolution: 20 });
   eventLoop.enable();
   const startedAtMs = Date.now();
+  const monotonicStartedAtMs = performance.now();
   const endsAtMs = startedAtMs + config.durationSeconds * 1_000;
   const startedAt = new Date(startedAtMs).toISOString();
   const latency = new BoundedSamples();
@@ -453,6 +503,11 @@ export async function runEdgeAcceptance(config, options = {}) {
   eventLoop.disable();
   await endStream(ledger);
   const completedAtMs = Date.now();
+  const timing = elapsedEvidence(
+    startedAtMs,
+    completedAtMs,
+    performance.now() - monotonicStartedAtMs,
+  );
   const durationSeconds = Math.max((completedAtMs - startedAtMs) / 1_000, 0.001);
   const latencySummary = latency.summary();
   const errorRate = counters.completed ? counters.failed / counters.completed : 1;
@@ -471,16 +526,30 @@ export async function runEdgeAcceptance(config, options = {}) {
   if (operationsStart && operationsStart.status !== 200) violations.push('initial operations capacity probe failed');
   if (operationsEnd && operationsEnd.status !== 200) violations.push('final operations capacity probe failed');
   if (abortController.signal.aborted) violations.push('run was aborted');
+  if (productionProfile && durationSeconds + 1 < config.durationSeconds) {
+    violations.push(`actual duration ${durationSeconds}s is shorter than required ${config.durationSeconds}s`);
+  }
+  if (productionProfile && tokens.reportedResponses !== counters.succeeded) {
+    violations.push('not every successful provider response included trustworthy token usage');
+  }
+  if (productionProfile && actualCostUsd <= 0) {
+    violations.push('real provider usage did not produce a positive metered cost');
+  }
   const cpu = process.cpuUsage(initialCpu);
   const achievedRps = counters.completed / durationSeconds;
+  const ledgerEvidence = productionProfile
+    ? fileEvidence(config.repositoryRoot, ledgerFile, 'acceptance request ledger')
+    : null;
   const report = {
-    version: 1,
+    version: 2,
     kind: 'otto_edge_gateway_acceptance',
     runId,
     result: violations.length === 0 ? 'passed' : 'failed',
     startedAt,
     completedAt: new Date(completedAtMs).toISOString(),
     durationSeconds,
+    timing,
+    provenance,
     profile: config.profile,
     configuration: {
       baseUrl: config.baseUrl.origin,
@@ -535,7 +604,7 @@ export async function runEdgeAcceptance(config, options = {}) {
     },
     thresholds: { maxErrorRate: config.maxErrorRate, maxP99LatencyMs: config.maxP99LatencyMs },
     violations,
-    evidence: { ledgerFile, reportFile },
+    evidence: { ledgerFile, reportFile, ledger: ledgerEvidence },
   };
   await writeFile(reportFile, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
   return report;

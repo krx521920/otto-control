@@ -26,15 +26,24 @@ function normalizeUsage(body: Record<string, unknown>): EdgeModelUsageV1 | null 
  * buffers provider prompt/response content and works for both JSON responses
  * and `data: {...}` SSE frames, including arbitrary UTF-8 chunk boundaries.
  */
+export interface OpenAiUsageMeterOptions {
+  allowResponseEnvelope?: boolean;
+}
+
+type TrustedUsageKey = 'usage' | 'response';
+
 export class OpenAiUsageMeter {
   readonly #decoder = new TextDecoder('utf-8', { fatal: true });
   readonly #encoder = new TextEncoder();
+  readonly #allowResponseEnvelope: boolean;
   #inString = false;
   #escaped = false;
   #string = '';
   #stringOverflow = false;
-  #pendingUsageKey = false;
-  #waitingUsageValue = false;
+  #pendingKey: TrustedUsageKey | null = null;
+  #waitingValueFor: TrustedUsageKey | null = null;
+  #objectDepth = 0;
+  #responseObjectDepth: number | null = null;
   #capture: string | null = null;
   #captureDepth = 0;
   #captureInString = false;
@@ -43,6 +52,10 @@ export class OpenAiUsageMeter {
   #captureBytes = 0;
   #usage: EdgeModelUsageV1 | null = null;
   #finished = false;
+
+  constructor(options: OpenAiUsageMeterOptions = {}) {
+    this.#allowResponseEnvelope = options.allowResponseEnvelope === true;
+  }
 
   push(bytes: Uint8Array): void {
     if (this.#finished) throw new Error('usage meter is already finished');
@@ -53,7 +66,10 @@ export class OpenAiUsageMeter {
     if (this.#finished) return this.#usage;
     this.#finished = true;
     this.#scan(this.#decoder.decode());
-    return this.#captureDepth === 0 ? this.#usage : null;
+    if (this.#captureDepth !== 0 || this.#objectDepth !== 0 || this.#inString) {
+      this.#usage = null;
+    }
+    return this.#usage;
   }
 
   #scan(text: string): void {
@@ -84,18 +100,30 @@ export class OpenAiUsageMeter {
       }
       return;
     }
-    if (this.#waitingUsageValue) {
+
+    if (this.#waitingValueFor) {
       if (/\s/u.test(character)) return;
-      this.#waitingUsageValue = false;
-      if (character === '{') this.#startCapture();
+      const valueFor = this.#waitingValueFor;
+      this.#waitingValueFor = null;
+      if (character === '{') {
+        if (valueFor === 'usage') this.#startCapture();
+        else {
+          this.#objectDepth += 1;
+          this.#responseObjectDepth = this.#objectDepth;
+        }
+      } else this.#structuralCharacter(character);
       return;
     }
-    if (this.#pendingUsageKey) {
+
+    if (this.#pendingKey) {
       if (/\s/u.test(character)) return;
-      this.#pendingUsageKey = false;
-      if (character === ':') this.#waitingUsageValue = true;
+      const pending = this.#pendingKey;
+      this.#pendingKey = null;
+      if (character === ':') this.#waitingValueFor = pending;
+      else this.#structuralCharacter(character);
       return;
     }
+
     if (this.#inString) {
       if (this.#escaped) {
         this.#escaped = false;
@@ -104,18 +132,48 @@ export class OpenAiUsageMeter {
         this.#escaped = true;
       } else if (character === '"') {
         this.#inString = false;
-        this.#pendingUsageKey = !this.#stringOverflow && this.#string === 'usage';
+        this.#pendingKey = this.#trustedKey(
+          this.#stringOverflow ? '' : this.#string,
+        );
       } else if (!this.#stringOverflow) {
         if (this.#string.length < 32) this.#string += character;
         else this.#stringOverflow = true;
       }
       return;
     }
+
+    this.#structuralCharacter(character);
+  }
+
+  #trustedKey(value: string): TrustedUsageKey | null {
+    if (value === 'usage'
+      && (this.#objectDepth === 1
+        || (this.#allowResponseEnvelope
+          && this.#responseObjectDepth === this.#objectDepth))) {
+      return 'usage';
+    }
+    if (value === 'response' && this.#allowResponseEnvelope && this.#objectDepth === 1) {
+      return 'response';
+    }
+    return null;
+  }
+
+  #structuralCharacter(character: string): void {
     if (character === '"') {
       this.#inString = true;
       this.#escaped = false;
       this.#string = '';
       this.#stringOverflow = false;
+      return;
+    }
+    if (character === '{') {
+      this.#objectDepth += 1;
+      return;
+    }
+    if (character === '}' && this.#objectDepth > 0) {
+      const closingDepth = this.#objectDepth;
+      this.#objectDepth -= 1;
+      if (this.#responseObjectDepth === closingDepth) this.#responseObjectDepth = null;
     }
   }
 

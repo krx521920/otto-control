@@ -27,6 +27,9 @@ export interface EdgeAcceptanceConfiguration {
   operationsToken: string | null;
   operationsTokenFile: string | null;
   outputDirectory: string;
+  repositoryRoot: string;
+  releaseCandidate: string | null;
+  releaseArtifact: string | null;
   confirmation: string;
   planOnly: boolean;
 }
@@ -53,7 +56,19 @@ export interface EdgeAcceptanceReport {
   };
   resources: { peakRssBytes: number };
   violations: string[];
-  evidence: { ledgerFile: string; reportFile: string };
+  evidence: {
+    ledgerFile: string;
+    reportFile: string;
+    ledger: { path: string; sha256: string; bytes: number } | null;
+  };
+  provenance: {
+    schemaVersion: number;
+    evidenceClass: 'production-live' | 'simulation';
+    generator: string;
+    releaseCandidate: string | null;
+    releaseArtifact: { path: string; sha256: string; bytes: number } | null;
+    runner: Record<string, string>;
+  };
 }
 export function parseEdgeAcceptanceArguments(
   argv: string[],
@@ -64,6 +79,7 @@ export function runEdgeAcceptance(
   options?: {
     signal?: AbortSignal;
     now?: () => number;
+    environment?: NodeJS.ProcessEnv;
     issueCredential?: (input: unknown) => Promise<{ encodedToken: string; expiresAtMs: number }>;
   },
 ): Promise<EdgeAcceptanceReport>;

@@ -16,18 +16,69 @@ async function fixture() {
   await mkdir(join(root, 'evidence'));
   const auditBytes = Buffer.from('independent audit report', 'utf8');
   const dpaBytes = Buffer.from('countersigned provider DPA', 'utf8');
+  const releaseArtifactBytes = Buffer.from('signed release artifact', 'utf8');
+  const soakLedgerBytes = Buffer.from('{"request":1}\n', 'utf8');
+  const costLedgerBytes = Buffer.from('{"request":2}\n', 'utf8');
   await writeFile(join(root, 'evidence', 'audit.pdf'), auditBytes);
   await writeFile(join(root, 'evidence', 'provider-dpa.pdf'), dpaBytes);
-  const releaseCandidate = 'sha256:1234567890abcdef';
+  await writeFile(join(root, 'evidence', 'release.bin'), releaseArtifactBytes);
+  await writeFile(join(root, 'evidence', 'soak-ledger.ndjson'), soakLedgerBytes);
+  await writeFile(join(root, 'evidence', 'cost-ledger.ndjson'), costLedgerBytes);
+  const releaseCandidate = '1'.repeat(40);
+  const formalReport = (
+    profile: 'soak-24h' | 'cost-load',
+    durationSeconds: number,
+    ledgerName: string,
+    ledgerBytes: Buffer,
+  ) => ({
+    version: 2,
+    kind: 'otto_edge_gateway_acceptance',
+    profile,
+    result: 'passed',
+    durationSeconds,
+    timing: {
+      wallClockDurationSeconds: durationSeconds,
+      monotonicDurationSeconds: durationSeconds,
+    },
+    provenance: {
+      schemaVersion: 1,
+      evidenceClass: 'production-live',
+      releaseCandidate,
+      releaseArtifact: {
+        path: 'evidence/release.bin',
+        sha256: createHash('sha256').update(releaseArtifactBytes).digest('hex'),
+        bytes: releaseArtifactBytes.byteLength,
+      },
+      runner: {
+        system: 'github-actions',
+        environment: 'self-hosted',
+        event: 'workflow_dispatch',
+        repository: 'krx521920/otto-control',
+        workflow: 'Edge live acceptance',
+        runId: '123',
+        runAttempt: '1',
+        job: 'acceptance',
+        runnerName: 'controlled-runner-1',
+      },
+    },
+    traffic: { succeeded: 1 },
+    tokens: { reportedResponses: 1 },
+    cost: { usageReportedFraction: 1, meteredEstimateUsd: 0.01 },
+    violations: [],
+    evidence: {
+      ledger: {
+        path: 'evidence/' + ledgerName,
+        sha256: createHash('sha256').update(ledgerBytes).digest('hex'),
+        bytes: ledgerBytes.byteLength,
+      },
+    },
+  });
   const reports = {
     runtimeFailures: { drill: 'edge_runtime_failures', result: 'passed' },
     keyRevocation: { drill: 'edge_signing_key_revocation', result: 'passed' },
     billingReconciliation: { schemaVersion: 1, result: 'passed', issues: [] },
-    soak24h: {
-      kind: 'otto_edge_gateway_acceptance', profile: 'soak-24h', result: 'passed',
-      durationSeconds: 86_400,
-    },
-    costLoad: { kind: 'otto_edge_gateway_acceptance', profile: 'cost-load', result: 'passed' },
+    soak24h: formalReport('soak-24h', 86_400, 'soak-ledger.ndjson', soakLedgerBytes),
+    costLoad: formalReport('cost-load', 300, 'cost-ledger.ndjson', costLedgerBytes),
     esaInfrastructure: {
       kind: 'otto_aliyun_esa_infrastructure_acceptance', result: 'passed',
       publicRouteEnabled: true, publicRouteBypass: false, certificateStatus: 'issued',
@@ -127,6 +178,26 @@ describe('Edge Gateway external assurance release gate', () => {
       result: 'passed',
       blockers: [],
     });
+  });
+
+  it('rejects a hand-written acceptance summary without production provenance and ledgers', async () => {
+    const { root, status } = await fixture();
+    const fake = Buffer.from(JSON.stringify({
+      kind: 'otto_edge_gateway_acceptance',
+      profile: 'soak-24h',
+      result: 'passed',
+      durationSeconds: 86_400,
+    }));
+    await writeFile(join(root, 'evidence', 'soak24h.json'), fake);
+    status.technicalAcceptance.soak24h.evidence.sha256 = createHash('sha256')
+      .update(fake).digest('hex');
+
+    const report = checkEdgeReleaseAssurance(status, { root, now: () => now });
+
+    expect(report.result).toBe('blocked');
+    expect(report.blockers).toContain(
+      'technical acceptance soak24h report does not prove the required result',
+    );
   });
 
   it('does not treat declarations without real evidence as approval', async () => {

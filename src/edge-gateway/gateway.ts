@@ -36,13 +36,18 @@ import {
 } from './completion-hook.js';
 import type { EdgeGatewayLifecycle } from './lifecycle.js';
 import { normalizeEdgeProviderSecret } from './provider-secret.js';
+import {
+  type EdgePreparedProviderRequest,
+  type EdgeTokenUsageMeter,
+  prepareEdgeProviderRequest,
+  UnsupportedEdgeProviderAdapterError,
+} from './provider-adapter.js';
 import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
 import { normalizeEdgeRequestId } from './request-id.js';
 import {
   type EdgeRequestLimits,
   normalizeEdgeRequestLimits,
 } from './request-limits.js';
-import { OpenAiUsageMeter } from './usage-meter.js';
 import {
   type EdgeUpstreamResponseLimits,
   normalizeEdgeUpstreamResponseLimits,
@@ -65,7 +70,6 @@ const ENDPOINT_PATHS: Readonly<Record<string, EdgeGatewayEndpoint>> = {
   '/v1/chat/completions': 'chat_completions',
   '/v1/responses': 'responses',
 };
-const RETRYABLE_UPSTREAM_STATUSES = new Set([429, 502, 503, 504]);
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const CLIENT_ROUTING_FIELDS = new Set([
   'apiKey', 'api_key', 'authentication', 'headers', 'providerSecret',
@@ -333,7 +337,7 @@ function managedUpstreamBody(
   clientSignal: AbortSignal,
   idleTimeoutMs: number,
   responseLimits: EdgeUpstreamResponseLimits,
-  meterUsage: boolean,
+  initialUsageMeter: EdgeTokenUsageMeter | null,
   onComplete: (completion: EdgeStreamCompletion, usage: EdgeModelUsageV1 | null) => void,
 ): ReadableStream<Uint8Array> | null {
   if (!body) {
@@ -341,7 +345,7 @@ function managedUpstreamBody(
     return null;
   }
   const reader = body.getReader();
-  let usageMeter: OpenAiUsageMeter | null = meterUsage ? new OpenAiUsageMeter() : null;
+  let usageMeter = initialUsageMeter;
   let completed = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let totalTimer: ReturnType<typeof setTimeout> | undefined;
@@ -520,21 +524,6 @@ function uncertainReason(completion: EdgeStreamCompletion): EdgeBillingUncertain
   return 'usage_unavailable';
 }
 
-function providerRequestBody(
-  body: Record<string, unknown>,
-  route: EdgeModelRouteV1,
-): Record<string, unknown> {
-  const result: Record<string, unknown> = { ...body, model: route.upstreamModel };
-  if (!route.metering || result.stream !== true) return result;
-  const existing = result.stream_options;
-  result.stream_options = {
-    ...(existing && typeof existing === 'object' && !Array.isArray(existing)
-      ? existing as Record<string, unknown>
-      : {}),
-    include_usage: true,
-  };
-  return result;
-}
 
 async function authorize(
   request: Request,
@@ -742,6 +731,30 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         );
       }
 
+      let routes: Array<{
+        route: EdgeModelRouteV1;
+        prepared: EdgePreparedProviderRequest;
+      }>;
+      try {
+        routes = authorized.routes
+          .slice(0, authorized.policy.limits.maxRouteAttempts)
+          .map((route) => ({
+            route,
+            prepared: prepareEdgeProviderRequest(route, authorized.upstreamBody),
+          }));
+      } catch (error) {
+        return jsonResponse(
+          503,
+          error instanceof UnsupportedEdgeProviderAdapterError
+            ? 'EDGE_PROVIDER_ADAPTER_UNSUPPORTED'
+            : 'EDGE_PROVIDER_ADAPTER_UNAVAILABLE',
+          error instanceof UnsupportedEdgeProviderAdapterError
+            ? 'model route provider adapter is unsupported'
+            : 'model route provider adapter is unavailable',
+          { 'x-otto-edge-request-id': id },
+        );
+      }
+
       const evidence: RequestEvidence = {
         requestId: id,
         startedAt,
@@ -781,13 +794,12 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
       const releaseConcurrency = createOnceEdgeCompletionHook(
         () => concurrencyLease.release(),
       );
-      const routes = authorized.routes.slice(0, authorized.policy.limits.maxRouteAttempts);
       let lastStatus: number | null = null;
       let lastRouteId: string | null = null;
       let billingReservation: EdgeBillingReservation | null = null;
 
       for (let index = 0; index < routes.length; index += 1) {
-        const route = routes[index]!;
+        const { route, prepared } = routes[index]!;
         let routeAttempt: EdgeRouteAttempt | null;
         try {
           const candidate = circuitBreaker.acquire(route.id, startedAt);
@@ -870,9 +882,9 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
                 route,
                 secret,
                 id,
-                authorized.upstreamBody.stream === true,
+                prepared.body.stream === true,
               ),
-              body: JSON.stringify(providerRequestBody(authorized.upstreamBody, route)),
+              body: JSON.stringify(prepared.body),
               redirect: 'error',
             },
             authorized.policy.limits.upstreamConnectTimeoutMs,
@@ -886,7 +898,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         const upstream = connection.response;
         lastStatus = upstream.status;
         const hasFallback = index + 1 < routes.length;
-        const retryableUpstream = RETRYABLE_UPSTREAM_STATUSES.has(upstream.status);
+        const retryableUpstream = prepared.classifyError(upstream.status)?.retryable === true;
         if (retryableUpstream) {
           const failedAt = readEdgeClockAtOrAfter(now, startedAt);
           runEdgeCompletionHook(() => routeAttempt.failed(failedAt));
@@ -908,7 +920,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             request.signal,
             authorized.policy.limits.upstreamIdleTimeoutMs,
             responseLimits,
-            Boolean(route.metering),
+            prepared.usageMeter,
             (completion, usage) => {
               releaseConcurrency();
               const completedAt = readEdgeClockAtOrAfter(now, evidence.startedAt);
@@ -945,14 +957,21 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
               const billingCoordinator = options.billingCoordinator;
               if (reservation && billingCoordinator) {
                 const identity = billingIdentity(evidence);
-                const operation = () => !route.metering
+                const operation = () => !upstream.ok
                   ? billingCoordinator.release({
                       ...identity,
                       reservation,
-                      reason: 'unmetered_route',
+                      reason: 'upstream_rejected',
                       occurredAtMs: completedAt,
                     })
-                  : usage?.totalTokens === 0
+                  : !route.metering
+                    ? billingCoordinator.release({
+                        ...identity,
+                        reservation,
+                        reason: 'unmetered_route',
+                        occurredAtMs: completedAt,
+                      })
+                    : usage?.totalTokens === 0
                     ? billingCoordinator.release({
                         ...identity,
                         reservation,

@@ -82,11 +82,26 @@ describe('OpenAI-compatible streaming usage meter', () => {
     })])).toEqual({ inputTokens: 8, outputTokens: 2, totalTokens: 10 });
   });
 
-  it('keeps the last valid usage when a later candidate is malformed', () => {
+  it('ignores a later valid-looking usage object outside the trusted root path', () => {
     expect(measure([
       '{"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5},',
-      '"metadata":{"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":99}}}',
+      '"metadata":{"usage":{"prompt_tokens":400,"completion_tokens":100,"total_tokens":500}}}',
     ])).toEqual({ inputTokens: 4, outputTokens: 1, totalTokens: 5 });
+  });
+
+  it('accepts a Responses SSE envelope only when that endpoint explicitly enables it', () => {
+    const payload = JSON.stringify({
+      type: 'response.completed',
+      response: {
+        output: [{ content: 'private' }],
+        usage: { input_tokens: 6, output_tokens: 2, total_tokens: 8 },
+      },
+    });
+    expect(measure([payload])).toBeNull();
+
+    const meter = new OpenAiUsageMeter({ allowResponseEnvelope: true });
+    meter.push(encoder.encode(payload));
+    expect(meter.finish()).toEqual({ inputTokens: 6, outputTokens: 2, totalTokens: 8 });
   });
 
   it.each([

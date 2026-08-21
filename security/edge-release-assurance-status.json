@@ -87,7 +87,7 @@
   },
   "providerDpaReviews": [
     {
-      "providerId": "CONFIGURE_PROVIDER",
+      "providerId": "openai",
       "status": "pending",
       "legalReviewer": null,
       "agreementReference": null,
@@ -97,10 +97,37 @@
       "subprocessorsReviewed": false,
       "securityIncidentNoticeHours": null,
       "deletionCommitmentDays": null,
-      "evidence": {
-        "path": null,
-        "sha256": null
-      },
+      "evidence": { "path": null, "sha256": null },
+      "reviewedAt": null,
+      "expiresAt": null
+    },
+    {
+      "providerId": "volcengine-ark",
+      "status": "pending",
+      "legalReviewer": null,
+      "agreementReference": null,
+      "dataResidency": null,
+      "crossBorderTransferBasis": null,
+      "modelTrainingUse": null,
+      "subprocessorsReviewed": false,
+      "securityIncidentNoticeHours": null,
+      "deletionCommitmentDays": null,
+      "evidence": { "path": null, "sha256": null },
+      "reviewedAt": null,
+      "expiresAt": null
+    },
+    {
+      "providerId": "zhipu-bigmodel",
+      "status": "pending",
+      "legalReviewer": null,
+      "agreementReference": null,
+      "dataResidency": null,
+      "crossBorderTransferBasis": null,
+      "modelTrainingUse": null,
+      "subprocessorsReviewed": false,
+      "securityIncidentNoticeHours": null,
+      "deletionCommitmentDays": null,
+      "evidence": { "path": null, "sha256": null },
       "reviewedAt": null,
       "expiresAt": null
     }

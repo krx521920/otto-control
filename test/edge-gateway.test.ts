@@ -205,6 +205,32 @@ describe('otto edge gateway', () => {
     expect(now).not.toHaveBeenCalled();
   });
 
+  it('fails closed before secrets, concurrency, billing, or upstream for an unknown adapter', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const secretGet = vi.fn(async () => 'provider-secret-value');
+    const billing = billingCoordinatorFixture();
+    const concurrencyLimiter = new InMemoryEdgeConcurrencyLimiter(1, 1);
+    await expect(fixture({
+      routes: [{
+        ...primaryRoute,
+        providerAdapter: 'unknown-provider',
+        metering: { type: 'openai_tokens', reserveUnits: 100 },
+      }],
+      fetch: fetchMock,
+      secretResolver: { get: secretGet },
+      billingCoordinator: billing.coordinator,
+      concurrencyLimiter,
+    })).rejects.toMatchObject({
+      status: 400,
+      code: 'EDGE_INVALID_ENVELOPE',
+      message: 'route provider adapter and endpoint are unsupported',
+    });
+    expect(secretGet).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(billing.reserve).not.toHaveBeenCalled();
+    expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
+  });
+
   it.each([
     () => 'request id with spaces',
     () => '请求编号',
@@ -821,6 +847,33 @@ describe('otto edge gateway', () => {
     expect(billing.release).not.toHaveBeenCalled();
     expect(billing.markUncertain).not.toHaveBeenCalled();
     expect(JSON.stringify(values.outcomes)).not.toContain('private');
+  });
+
+  it('releases metered reservations for non-2xx provider responses even if they contain usage', async () => {
+    const meteredRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 10_000 },
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      error: { code: 'invalid_request' },
+      usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
+    }), { status: 400, headers: { 'content-type': 'application/json' } }));
+    const billing = billingCoordinatorFixture();
+    const values = await fixture({
+      routes: [meteredRoute], fetch: fetchMock, billingCoordinator: billing.coordinator,
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(response.status).toBe(400);
+    await response.arrayBuffer();
+
+    expect(billing.release).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'upstream_rejected',
+    }));
+    expect(billing.settle).not.toHaveBeenCalled();
+    expect(billing.markUncertain).not.toHaveBeenCalled();
   });
 
   it('records unavailable usage instead of trusting malformed provider totals', async () => {

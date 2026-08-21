@@ -69,6 +69,8 @@ describe('Edge Gateway long-running and cost acceptance tool', () => {
       '--control-url=https://control.acceptance.example.com',
       '--identity-file=secure/deployment-identity.json',
       '--lease-token-file=secure/lease-token',
+      '--release-candidate=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      '--release-artifact=dist/otto-control.tar.gz',
       '--plan-only',
     ]);
     expect(config.durationSeconds).toBe(86_400);

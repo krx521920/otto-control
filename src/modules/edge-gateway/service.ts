@@ -373,7 +373,9 @@ export class EdgeGatewayControlService {
     organizationId: string,
     enforcement: 'disabled' | 'enforce',
   ): Promise<void> {
-    if (enforcement !== 'enforce') return;
+    if (enforcement !== 'enforce') {
+      throw forbidden('model gateway requires enforced billing');
+    }
     const account = await this.#requireStore().getCreditAccount(customerId, organizationId);
     if (!account || account.availableBalance < 1) {
       throw forbidden('model gateway credit balance is exhausted');

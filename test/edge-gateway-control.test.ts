@@ -85,7 +85,7 @@ describe('edge gateway Control plane', () => {
       seatLimit: 100,
       gracePeriodMs: 0,
       seatEnforcement: 'monitor',
-      billingEnforcement: 'disabled',
+      billingEnforcement: 'enforce',
       modules: [],
       offline: false,
       telemetryAllowed: false,
@@ -94,6 +94,18 @@ describe('edge gateway Control plane', () => {
       signature: 'fixture-signature',
       signingKeyId: 'fixture-signing-key',
       revokedAtMs: null,
+    });
+    store.creditAccounts.set(`${CUSTOMER_ID}\0${ORGANIZATION_ID}`, {
+      customerId: CUSTOMER_ID,
+      organizationId: ORGANIZATION_ID,
+      availableBalance: 100,
+      frozenBalance: 0,
+      totalToppedUp: 100,
+      totalConsumed: 0,
+      totalRefunded: 0,
+      version: 1,
+      createdAt: new Date(NOW),
+      updatedAt: new Date(NOW),
     });
     leaseToken = tokens.issue({
       purpose: 'lease',
@@ -300,10 +312,7 @@ describe('edge gateway Control plane', () => {
 
   it('fails closed for enforced billing without credits and for revoked licenses', async () => {
     await service.configurePolicy(DEPLOYMENT_ID, policyBody(), 'admin_edge');
-    store.licenses.set(LICENSE_ID, {
-      ...store.licenses.get(LICENSE_ID)!,
-      billingEnforcement: 'enforce',
-    });
+    store.creditAccounts.delete(`${CUSTOMER_ID}\0${ORGANIZATION_ID}`);
     const request = binding();
     await expect(service.resolvePolicy(request, signedAuthentication(request)))
       .rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' });
@@ -329,6 +338,27 @@ describe('edge gateway Control plane', () => {
     });
     await expect(service.resolvePolicy(request, signedAuthentication(request)))
       .rejects.toMatchObject({ statusCode: 401, code: 'UNAUTHORIZED' });
+  });
+
+  it('rejects model access when the License does not enforce billing', async () => {
+    await service.configurePolicy(DEPLOYMENT_ID, policyBody(), 'admin_edge');
+    store.licenses.set(LICENSE_ID, {
+      ...store.licenses.get(LICENSE_ID)!,
+      billingEnforcement: 'disabled',
+    });
+    const request = binding();
+    const tokenRequest = {
+      ...request,
+      subjectId: 'account_edge_disabled_billing',
+      allowedModels: ['otto-business'],
+    };
+
+    await expect(service.resolvePolicy(request, signedAuthentication(request)))
+      .rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' });
+    await expect(service.issueDeploymentAccessToken(
+      tokenRequest,
+      signedAuthentication(tokenRequest),
+    )).rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' });
   });
 
   it('enforces timestamp, nonce, policy-state, tenant, and model-list boundaries', async () => {

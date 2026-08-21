@@ -22,6 +22,7 @@ export interface EdgeRouteMeteringV1 {
  */
 export interface EdgeModelRouteV1 {
   id: string;
+  providerAdapter?: string;
   endpoint: EdgeGatewayEndpoint;
   publicModel: string;
   upstreamModel: string;
