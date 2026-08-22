@@ -43,6 +43,14 @@ import {
   UnsupportedEdgeProviderAdapterError,
 } from './provider-adapter.js';
 import { EdgeRateLimitUnavailableError, type EdgeRateLimiter } from './rate-limit.js';
+import {
+  EdgeRequestLedgerConflictError,
+  hashEdgeRequest,
+  MemoryEdgeRequestLedger,
+  type EdgeRequestBinding,
+  type EdgeRequestLedger,
+  type EdgeRequestState,
+} from './request-ledger.js';
 import { normalizeEdgeRequestId } from './request-id.js';
 import {
   type EdgeRequestLimits,
@@ -99,6 +107,7 @@ export interface EdgeGatewayReadinessProbe {
 }
 
 export interface OttoEdgeGatewayOptions {
+  requestLedger?: EdgeRequestLedger;
   policySource: EdgeGatewayPolicySource;
   verifier: EdgeSignatureVerifier;
   secretResolver: EdgeGatewaySecretResolver;
@@ -173,6 +182,74 @@ function jsonResponse(
       ...extraHeaders,
     },
   });
+}
+
+function requestStateHeaders(
+  requestId: string,
+  state: EdgeRequestState,
+  providerRequestId?: string | null,
+): Record<string, string> {
+  return {
+    'x-otto-edge-request-id': requestId,
+    'x-otto-provider-request-state': state,
+    ...(providerRequestId ? { 'x-otto-provider-request-id': providerRequestId } : {}),
+  };
+}
+
+function clientRequestId(request: Request): string | null {
+  const values = [
+    request.headers.get('x-otto-request-id'),
+    request.headers.get('idempotency-key'),
+    request.headers.get('x-otto-idempotency-key'),
+  ];
+  const normalized = values.map((value) => (
+    value === null ? null : normalizeEdgeRequestId(value)
+  ));
+  if (values.some((value, index) => value !== null && !normalized[index])) {
+    throw new EdgeGatewayProtocolError(
+      400,
+      'EDGE_INVALID_REQUEST_ID',
+      'request ID is invalid',
+    );
+  }
+  const supplied = normalized.filter((value): value is string => value !== null);
+  if (new Set(supplied).size > 1) {
+    throw new EdgeGatewayProtocolError(
+      400,
+      'EDGE_REQUEST_ID_MISMATCH',
+      'request ID and idempotency keys must match',
+    );
+  }
+  return supplied[0] ?? null;
+}
+
+function providerSwitchConfirmed(request: Request, requestId: string): boolean {
+  return request.headers.get('x-otto-provider-switch-confirmation')?.trim() === requestId;
+}
+
+function networkErrorCode(error: unknown): string {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!current || typeof current !== 'object') return '';
+    const record = current as { code?: unknown; cause?: unknown };
+    if (typeof record.code === 'string') return record.code.toUpperCase();
+    current = record.cause;
+  }
+  return '';
+}
+
+function providerDefinitelyDidNotReceive(error: unknown): boolean {
+  return new Set([
+    'ECONNREFUSED',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+  ]).has(networkErrorCode(error));
+}
+
+function zeroUsage(): EdgeModelUsageV1 {
+  return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 }
 
 function bearerToken(value: string | null): string {
@@ -294,12 +371,16 @@ function clientResponse(
   const headers = new Headers({
     'cache-control': 'no-store',
     'content-type': normalizeEdgeUpstreamContentType(upstream.headers.get('content-type')),
+    'x-otto-provider-request-state': 'executing',
     'x-otto-edge-request-id': requestId,
     'x-content-type-options': 'nosniff',
     'x-ratelimit-remaining': String(remaining),
   });
   const providerRequestId = normalizeEdgeUpstreamRequestId(upstream.headers.get('x-request-id'));
-  if (providerRequestId) headers.set('x-upstream-request-id', providerRequestId);
+  if (providerRequestId) {
+    headers.set('x-upstream-request-id', providerRequestId);
+    headers.set('x-otto-provider-request-id', providerRequestId);
+  }
   return new Response(body, {
     status: upstream.status,
     statusText: upstream.statusText,
@@ -620,6 +701,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
 } {
   const fetchImplementation = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
+  const requestLedger = options.requestLedger ?? new MemoryEdgeRequestLedger();
   const concurrencyLimiter = options.concurrencyLimiter
     ?? new InMemoryEdgeConcurrencyLimiter();
   const circuitBreaker = options.circuitBreaker
@@ -667,11 +749,24 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           allow: 'POST',
         });
       }
+      let clientId: string | null;
+      try {
+        clientId = clientRequestId(request);
+      } catch (error) {
+        if (error instanceof EdgeGatewayProtocolError) {
+          return jsonResponse(error.status, error.code, error.message);
+        }
+        return jsonResponse(
+          400,
+          'EDGE_INVALID_REQUEST_ID',
+          'request ID is invalid',
+        );
+      }
       let requestContext: { startedAt: number | null; id: string | null };
       try {
         requestContext = {
           startedAt: normalizeEdgeClock(now()),
-          id: normalizeEdgeRequestId(requestId()),
+          id: normalizeEdgeRequestId(clientId ?? requestId()),
         };
       } catch {
         requestContext = { startedAt: null, id: null };
@@ -762,6 +857,133 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         publicModel: authorized.publicModel,
         token: authorized.token,
       };
+      const recordOutcome = (
+        routeId: string | null,
+        upstreamStatus: number | null,
+        providerRequestId: string | null,
+        outcome: EdgeGatewayOutcomeV2['outcome'],
+        occurredAtMs: number,
+        usage: EdgeModelUsageV1 | null = null,
+      ): void => scheduleOutcome(options.outcomeSink, context, {
+        version: 2, requestId: evidence.requestId, tokenId: evidence.token.tokenId,
+        deploymentId: evidence.token.deploymentId,
+        organizationId: evidence.token.organizationId,
+        subjectId: evidence.token.subjectId, endpoint: evidence.endpoint,
+        publicModel: evidence.publicModel, routeId, upstreamStatus, providerRequestId,
+        outcome, durationMs: Math.max(0, occurredAtMs - evidence.startedAt),
+        occurredAtMs, usage,
+      });
+      const requestBinding: EdgeRequestBinding = {
+        requestId: id,
+        tenant: {
+          deploymentId: authorized.token.deploymentId,
+          organizationId: authorized.token.organizationId,
+          subjectId: authorized.token.subjectId,
+        },
+        requestHash: hashEdgeRequest(JSON.stringify({
+          endpoint,
+          body: authorized.upstreamBody,
+        })),
+      };
+      const reservedUnits = routes.reduce(
+        (maximum, candidate) => Math.max(maximum, candidate.route.metering?.reserveUnits ?? 0),
+        0,
+      );
+      let admission;
+      try {
+        admission = await requestLedger.admit({
+          ...requestBinding,
+          reservedUnits,
+        });
+      } catch (error) {
+        if (error instanceof EdgeRequestLedgerConflictError) {
+          return jsonResponse(
+            409,
+            error.code,
+            'request ID is already bound to different request evidence',
+            requestStateHeaders(id, 'received'),
+          );
+        }
+        return jsonResponse(
+          503,
+          'EDGE_REQUEST_LEDGER_UNAVAILABLE',
+          'gateway request ledger is unavailable',
+          { 'x-otto-edge-request-id': id },
+        );
+      }
+      if (!admission.created) {
+        const record = admission.record;
+        if (record.state === 'completed') {
+          return jsonResponse(
+            409,
+            'EDGE_REQUEST_ALREADY_COMPLETED',
+            'request already completed; the provider will not be called again',
+            requestStateHeaders(id, record.state, record.providerRequestId),
+          );
+        }
+        const previousAttempt = record.attempts.at(-1);
+        const retryingConfirmedNotSent = record.state === 'received'
+          && previousAttempt?.outcome === 'not_sent';
+        if ((record.state === 'received' && !retryingConfirmedNotSent)
+          || record.state === 'executing') {
+          return jsonResponse(
+            409,
+            'EDGE_REQUEST_IN_PROGRESS',
+            'request is already being processed',
+            requestStateHeaders(id, record.state, record.providerRequestId),
+          );
+        }
+        if (retryingConfirmedNotSent && providerSwitchConfirmed(request, id)) {
+          try {
+            await requestLedger.confirmFailover(requestBinding);
+          } catch {
+            return jsonResponse(
+              503,
+              'EDGE_REQUEST_LEDGER_UNAVAILABLE',
+              'gateway could not record provider switch confirmation',
+              requestStateHeaders(id, record.state, record.providerRequestId),
+            );
+          }
+          routes = routes.filter((candidate) => candidate.route.id !== record.routeId);
+          if (routes.length === 0) {
+            return jsonResponse(
+              503,
+              'EDGE_MODEL_UNAVAILABLE',
+              'no different provider route is available after confirmation',
+              requestStateHeaders(id, 'not_sent', record.providerRequestId),
+            );
+          }
+        }
+        if (record.state === 'unknown_outcome') {
+          if (!providerSwitchConfirmed(request, id)) {
+            return jsonResponse(
+              409,
+              'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED',
+              'request outcome is unknown; switching provider may cause double billing and requires explicit user confirmation',
+              requestStateHeaders(id, record.state, record.providerRequestId),
+            );
+          }
+          try {
+            await requestLedger.confirmFailover(requestBinding);
+          } catch {
+            return jsonResponse(
+              503,
+              'EDGE_REQUEST_LEDGER_UNAVAILABLE',
+              'gateway could not record provider switch confirmation',
+              requestStateHeaders(id, record.state, record.providerRequestId),
+            );
+          }
+          routes = routes.filter((candidate) => candidate.route.id !== record.routeId);
+          if (routes.length === 0) {
+            return jsonResponse(
+              503,
+              'EDGE_MODEL_UNAVAILABLE',
+              'no different provider route is available after confirmation',
+              requestStateHeaders(id, record.state, record.providerRequestId),
+            );
+          }
+        }
+      }
       let concurrencyLease: EdgeConcurrencyLease | null;
       try {
         const candidate = concurrencyLimiter.acquire(
@@ -773,21 +995,41 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           throw new Error('concurrency limiter returned an invalid lease');
         }
       } catch {
+        try {
+          await requestLedger.markNotSent(requestBinding);
+        } catch {
+          return jsonResponse(
+            503,
+            'EDGE_REQUEST_LEDGER_UNAVAILABLE',
+            'gateway could not record the unsent request',
+            requestStateHeaders(id, 'received'),
+          );
+        }
         return jsonResponse(
           503,
           'EDGE_CONCURRENCY_UNAVAILABLE',
           'gateway concurrency admission is unavailable',
-          { 'x-otto-edge-request-id': id },
+          requestStateHeaders(id, 'not_sent'),
         );
       }
       if (!concurrencyLease) {
+        try {
+          await requestLedger.markNotSent(requestBinding);
+        } catch {
+          return jsonResponse(
+            503,
+            'EDGE_REQUEST_LEDGER_UNAVAILABLE',
+            'gateway could not record the unsent request',
+            requestStateHeaders(id, 'received'),
+          );
+        }
         return jsonResponse(
           429,
           'EDGE_CONCURRENCY_LIMITED',
           'too many concurrent model requests',
           {
+            ...requestStateHeaders(id, 'not_sent'),
             'retry-after': '1',
-            'x-otto-edge-request-id': id,
           },
         );
       }
@@ -800,6 +1042,20 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
 
       for (let index = 0; index < routes.length; index += 1) {
         const { route, prepared } = routes[index]!;
+        try {
+          await requestLedger.beginAttempt({
+            ...requestBinding,
+            routeId: route.id,
+          });
+        } catch {
+          releaseConcurrency();
+          return jsonResponse(
+            503,
+            'EDGE_REQUEST_LEDGER_UNAVAILABLE',
+            'gateway could not start the provider attempt',
+            requestStateHeaders(id, 'received'),
+          );
+        }
         let routeAttempt: EdgeRouteAttempt | null;
         try {
           const candidate = circuitBreaker.acquire(route.id, startedAt);
@@ -808,15 +1064,29 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             throw new Error('circuit breaker returned an invalid route attempt');
           }
         } catch {
+          await requestLedger.markNotSent(requestBinding);
           releaseConcurrency();
           return jsonResponse(
             503,
             'EDGE_CIRCUIT_BREAKER_UNAVAILABLE',
             'gateway route health admission is unavailable',
-            { 'x-otto-edge-request-id': id },
+            requestStateHeaders(id, 'not_sent'),
           );
         }
-        if (!routeAttempt) continue;
+        if (!routeAttempt) {
+          await requestLedger.markNotSent(requestBinding);
+          if (index + 1 < routes.length) {
+            await requestLedger.admit({ ...requestBinding, reservedUnits });
+            continue;
+          }
+          releaseConcurrency();
+          return jsonResponse(
+            503,
+            'EDGE_UPSTREAM_UNAVAILABLE',
+            'no healthy provider route is available',
+            requestStateHeaders(id, 'not_sent'),
+          );
+        }
         let secret: string | null;
         try {
           secret = normalizeEdgeProviderSecret(
@@ -826,31 +1096,46 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           secret = null;
         }
         if (!secret) {
+          await requestLedger.markNotSent(requestBinding);
           runEdgeCompletionHook(() => routeAttempt.cancelled());
-          continue;
+          if (index + 1 < routes.length) {
+            await requestLedger.admit({ ...requestBinding, reservedUnits });
+            continue;
+          }
+          const unavailableAt = readEdgeClockAtOrAfter(now, startedAt);
+          recordOutcome(route.id, null, null, 'upstream_failed', unavailableAt);
+          releaseConcurrency();
+          return jsonResponse(
+            503,
+            'EDGE_UPSTREAM_UNAVAILABLE',
+            'provider credentials are unavailable',
+            requestStateHeaders(id, 'not_sent'),
+          );
         }
         lastRouteId = route.id;
         if (route.metering && !billingReservation) {
           if (!options.billingCoordinator) {
+            await requestLedger.markNotSent(requestBinding);
             runEdgeCompletionHook(() => routeAttempt.cancelled());
             releaseConcurrency();
             return jsonResponse(
               503,
               'EDGE_BILLING_UNAVAILABLE',
               'gateway billing coordinator is unavailable',
-              { 'x-otto-edge-request-id': id },
+              requestStateHeaders(id, 'not_sent'),
             );
           }
           try {
             const candidate = await options.billingCoordinator.reserve({
               ...billingIdentity(evidence),
-              reserveUnits: route.metering.reserveUnits,
+              reserveUnits: reservedUnits,
             });
             billingReservation = normalizeEdgeBillingReservation(candidate);
             if (!billingReservation) {
               throw new Error('billing coordinator returned an invalid reservation');
             }
           } catch (error) {
+            await requestLedger.markNotSent(requestBinding);
             runEdgeCompletionHook(() => routeAttempt.cancelled());
             releaseConcurrency();
             if (error instanceof EdgeBillingAdmissionError) {
@@ -859,7 +1144,9 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
                 error.code,
                 error.code === 'EDGE_CREDIT_REQUIRED'
                   ? 'insufficient credits for this request'
-                  : 'gateway billing coordinator is unavailable',
+                  : error.code === 'EDGE_REQUEST_REPLAYED'
+                    ? 'this logical request was already admitted'
+                    : 'gateway billing coordinator is unavailable',
                 { 'x-otto-edge-request-id': id },
               );
             }
@@ -890,27 +1177,134 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
             authorized.policy.limits.upstreamConnectTimeoutMs,
             request.signal,
           );
-        } catch {
+        } catch (error) {
           const failedAt = readEdgeClockAtOrAfter(now, startedAt);
           runEdgeCompletionHook(() => routeAttempt.failed(failedAt));
-          continue;
+          releaseConcurrency();
+          scheduleOutcome(options.outcomeSink, context, {
+            version: 2,
+            requestId: evidence.requestId,
+            tokenId: evidence.token.tokenId,
+            deploymentId: evidence.token.deploymentId,
+            organizationId: evidence.token.organizationId,
+            subjectId: evidence.token.subjectId,
+            endpoint: evidence.endpoint,
+            publicModel: evidence.publicModel,
+            routeId: route.id,
+            upstreamStatus: null,
+            providerRequestId: null,
+            outcome: 'upstream_failed',
+            durationMs: Math.max(0, failedAt - evidence.startedAt),
+            occurredAtMs: failedAt,
+            usage: null,
+          });
+          if (providerDefinitelyDidNotReceive(error)) {
+            await requestLedger.markNotSent(requestBinding);
+            if (billingReservation && options.billingCoordinator) {
+              await options.billingCoordinator.release({
+                ...billingIdentity(evidence),
+                reservation: billingReservation,
+                reason: 'no_usable_route',
+                occurredAtMs: failedAt,
+              });
+              billingReservation = null;
+            }
+            return jsonResponse(
+              502,
+              'EDGE_PROVIDER_NOT_REACHED',
+              'provider did not receive the request; retrying the same request ID is safe',
+              requestStateHeaders(id, 'not_sent'),
+            );
+          }
+          await requestLedger.markUnknownOutcome(requestBinding);
+          if (billingReservation && options.billingCoordinator) {
+            await options.billingCoordinator.markUncertain({
+              ...billingIdentity(evidence),
+              reservation: billingReservation,
+              routeId: route.id,
+              reason: 'provider_error',
+              occurredAtMs: failedAt,
+            });
+            billingReservation = null;
+          }
+          return jsonResponse(
+            502,
+            'EDGE_REQUEST_OUTCOME_UNKNOWN',
+            'provider receipt is unknown; automatic retry or provider switching is blocked to prevent double billing',
+            requestStateHeaders(id, 'unknown_outcome'),
+          );
         }
         const upstream = connection.response;
         lastStatus = upstream.status;
-        const hasFallback = index + 1 < routes.length;
-        const retryableUpstream = prepared.classifyError(upstream.status)?.retryable === true;
-        if (retryableUpstream) {
-          const failedAt = readEdgeClockAtOrAfter(now, startedAt);
-          runEdgeCompletionHook(() => routeAttempt.failed(failedAt));
+        const providerRequestId = normalizeEdgeUpstreamRequestId(
+          upstream.headers.get('x-request-id'),
+        );
+        if (providerRequestId) {
+          await requestLedger.recordProviderRequestId({
+            ...requestBinding,
+            providerRequestId,
+          });
         }
-        if (hasFallback && retryableUpstream) {
+        if (upstream.status === 408 || upstream.status >= 500) {
+          const failedAt = readEdgeClockAtOrAfter(now, startedAt);
+          await requestLedger.markUnknownOutcome(requestBinding);
+          runEdgeCompletionHook(() => routeAttempt.failed(failedAt));
+          releaseConcurrency();
           connection.controller.abort();
           try {
             await upstream.body?.cancel();
           } catch {
-            // The abort may have already errored the upstream response body.
+            // The upstream body may already be closed.
           }
-          continue;
+          if (billingReservation && options.billingCoordinator) {
+            await options.billingCoordinator.markUncertain({
+              ...billingIdentity(evidence),
+              reservation: billingReservation,
+              routeId: route.id,
+              reason: 'provider_error',
+              occurredAtMs: failedAt,
+            });
+            billingReservation = null;
+          }
+          recordOutcome(route.id, upstream.status, providerRequestId, 'upstream_failed', failedAt);
+          return jsonResponse(
+            502,
+            'EDGE_REQUEST_OUTCOME_UNKNOWN',
+            'provider returned an ambiguous failure; automatic retry or provider switching is blocked',
+            requestStateHeaders(id, 'unknown_outcome', providerRequestId),
+          );
+        }
+        if (!upstream.ok) {
+          const completedAt = readEdgeClockAtOrAfter(now, startedAt);
+          await requestLedger.complete({
+            ...requestBinding,
+            actualUsage: zeroUsage(),
+            ...(providerRequestId ? { providerRequestId } : {}),
+          });
+          runEdgeCompletionHook(() => routeAttempt.succeeded());
+          releaseConcurrency();
+          connection.controller.abort();
+          try {
+            await upstream.body?.cancel();
+          } catch {
+            // The upstream body may already be closed.
+          }
+          if (billingReservation && options.billingCoordinator) {
+            await options.billingCoordinator.release({
+              ...billingIdentity(evidence),
+              reservation: billingReservation,
+              reason: 'upstream_rejected',
+              occurredAtMs: completedAt,
+            });
+            billingReservation = null;
+          }
+          recordOutcome(route.id, upstream.status, providerRequestId, 'rejected', completedAt, zeroUsage());
+          return jsonResponse(
+            upstream.status,
+            'EDGE_UPSTREAM_REJECTED',
+            'provider rejected the request before model execution',
+            requestStateHeaders(id, 'completed', providerRequestId),
+          );
         }
         let body: ReadableStream<Uint8Array> | null;
         try {
@@ -926,9 +1320,16 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
               const completedAt = readEdgeClockAtOrAfter(now, evidence.startedAt);
               if (completion === 'client_cancelled') {
                 runEdgeCompletionHook(() => routeAttempt.cancelled());
-              } else if (completion !== 'completed' || retryableUpstream) {
+              } else if (completion !== 'completed') {
                 runEdgeCompletionHook(() => routeAttempt.failed(completedAt));
               } else runEdgeCompletionHook(() => routeAttempt.succeeded());
+              scheduleBackground(context, () => completion === 'completed'
+                ? requestLedger.complete({
+                    ...requestBinding,
+                    actualUsage: usage,
+                    ...(providerRequestId ? { providerRequestId } : {}),
+                  })
+                : requestLedger.markUnknownOutcome(requestBinding));
               scheduleOutcome(options.outcomeSink, context, {
                 version: 2,
                 requestId: evidence.requestId,
@@ -940,6 +1341,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
                 publicModel: evidence.publicModel,
                 routeId: route.id,
                 upstreamStatus: upstream.status,
+                providerRequestId,
                 outcome: completion === 'completed'
                   ? (upstream.ok ? 'succeeded' : 'upstream_failed')
                   : completion === 'client_cancelled'
@@ -999,6 +1401,7 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           );
         } catch {
           const failedAt = readEdgeClockAtOrAfter(now, startedAt);
+          await requestLedger.markUnknownOutcome(requestBinding);
           runEdgeCompletionHook(() => routeAttempt.failed(failedAt));
           releaseConcurrency();
           connection.controller.abort();
@@ -1007,20 +1410,48 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           } catch {
             // A malformed or locked upstream stream is treated as unavailable.
           }
-          continue;
+          if (billingReservation && options.billingCoordinator) {
+            await options.billingCoordinator.markUncertain({
+              ...billingIdentity(evidence),
+              reservation: billingReservation,
+              routeId: route.id,
+              reason: 'provider_error',
+              occurredAtMs: failedAt,
+            });
+            billingReservation = null;
+          }
+          recordOutcome(route.id, upstream.status, providerRequestId, 'upstream_failed', failedAt);
+          return jsonResponse(
+            502,
+            'EDGE_REQUEST_OUTCOME_UNKNOWN',
+            'upstream stream could not be established; automatic retry is blocked',
+            requestStateHeaders(id, 'unknown_outcome', providerRequestId),
+          );
         }
         try {
           return clientResponse(upstream, body, id, authorized.remaining);
         } catch {
           const failedAt = readEdgeClockAtOrAfter(now, startedAt);
+          await requestLedger.markUnknownOutcome(requestBinding);
           runEdgeCompletionHook(() => routeAttempt.failed(failedAt));
           releaseConcurrency();
           connection.controller.abort();
+          if (billingReservation && options.billingCoordinator) {
+            await options.billingCoordinator.markUncertain({
+              ...billingIdentity(evidence),
+              reservation: billingReservation,
+              routeId: route.id,
+              reason: 'provider_error',
+              occurredAtMs: failedAt,
+            });
+            billingReservation = null;
+          }
+          recordOutcome(route.id, upstream.status, providerRequestId, 'upstream_failed', failedAt);
           return jsonResponse(
             502,
-            'EDGE_UPSTREAM_UNAVAILABLE',
-            'upstream response is invalid',
-            { 'x-otto-edge-request-id': id },
+            'EDGE_REQUEST_OUTCOME_UNKNOWN',
+            'upstream response is invalid; automatic retry is blocked',
+            requestStateHeaders(id, 'unknown_outcome', providerRequestId),
           );
         }
       }

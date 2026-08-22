@@ -228,6 +228,7 @@ $env:OTTO_EDGE_KEYRING_FAILURE_RETRY_MS='5000'
 $env:OTTO_EDGE_BILLING_BACKEND='control'
 $env:OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE='D:\secure\edge-receipt-private.pem'
 $env:OTTO_EDGE_BILLING_JOURNAL_FILE='D:\state\edge-billing.ndjson'
+$env:OTTO_EDGE_REQUEST_LEDGER_FILE='D:\state\edge-request-ledger.ndjson'
 $env:OTTO_EDGE_BILLING_RETRY_INTERVAL_MS='10000'
 $env:OTTO_EDGE_OPERATIONS_TOKEN_FILE='D:\secure\edge-operations.token'
 $env:OTTO_EDGE_MAX_CONCURRENT_REQUESTS='256'
@@ -445,6 +446,25 @@ Node 单进程协调器使用独立 Ed25519 私钥生成 `ExecutionReceiptV2`，
 日志文件，必须替换为 PostgreSQL/专用队列上的单一有序聚合器，否则严格递增凭证序列
 会产生竞争。
 
+## 请求幂等账本与结果未知恢复
+
+Node 网关把 Otto 生成的全链路 `requestId` 写入本机只追加请求账本。账本记录租户绑定、
+请求摘要、预留额度、供应商线路、供应商请求编号，以及 `not_sent`、`received`、
+`executing`、`completed`、`unknown_outcome` 状态，不保存提示词、回复、模型密钥或完整
+客户正文。同一租户重复提交相同 `requestId` 时必须同时匹配请求摘要和预留额度；冲突
+会 fail-closed，已经完成或仍在执行的请求不会再次访问供应商。
+
+`OTTO_EDGE_REQUEST_LEDGER_FILE` 必须指向权限受控的本机持久卷，生产 Compose 默认使用
+`/var/lib/otto-edge/request-ledger.ndjson`。启动时会校验并重放完整日志：重启前仅处于
+`received` 的请求恢复为 `not_sent`，可以安全重试；已经进入 `executing` 但没有完成
+记录的请求恢复为 `unknown_outcome`，禁止自动切换供应商。只有用户明确确认“可能产生
+双重费用”后，才允许将同一请求改投另一条线路。
+
+账本不能放在 NFS/SMB 等共享文件系统，也不能由多个 Edge 进程共享同一文件。正式实例
+与升级 canary 必须使用彼此独立的本机卷；多实例部署应把该账本替换为支持原子条件更新
+和唯一约束的 PostgreSQL/专用幂等服务。账本缺失、截断、哈希链损坏或无法写入时，网关
+应拒绝启动或拒绝继续接单，不能降级为内存账本。
+
 ## 健康检查与受保护恢复
 
 `GET /healthz` 只表示进程仍存活，不读取策略、Redis、Control 或本地计费日志。
@@ -474,6 +494,9 @@ Service Worker 风格的 `fetch(request, context)` 入口。ESA 引导层必须�
 使 outcome、计费结算和释放任务注册到 `context.waitUntil`；禁止用未受运行时托管的
 fire-and-forget Promise 代替。该本地策略应由 ESA 部署配置独立构造和注入，不能直接
 复用 EdgeKV 中的签名策略路由列表。
+ESA 引导层还必须注入支持原子条件写的耐久 `requestLedger`；禁止退回单实例内存账本。
+普通 EdgeKV 只有最终一致性，不能作为跨节点幂等账本，生产环境应接入 PostgreSQL 或
+等价的线性一致性幂等服务。
 部署引导层负责构造 `EdgeKV` 以及绑定 ESA 的 Secret，业务核心不引用任何全局
 平台对象。
 

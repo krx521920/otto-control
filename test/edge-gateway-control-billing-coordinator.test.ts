@@ -548,7 +548,7 @@ describe('Control-backed Edge billing coordinator', () => {
     expect(journal).toContain('released');
   });
 
-  it('coalesces concurrent reservations and never reuses a finalized request ID', async () => {
+  it('rejects concurrent reservation replay and never reuses a finalized request ID', async () => {
     let holds = 0;
     let releaseBody: Record<string, unknown> | undefined;
     let release: (() => void) | undefined;
@@ -572,16 +572,14 @@ describe('Control-backed Edge billing coordinator', () => {
     );
     const request = identity('request_edge_coalesced');
     const first = coordinator.reserve({ ...request, reserveUnits: 100 });
-    const second = coordinator.reserve({ ...request, reserveUnits: 100 });
+    await expect(coordinator.reserve({ ...request, reserveUnits: 100 }))
+      .rejects.toMatchObject({ code: 'EDGE_REQUEST_REPLAYED', status: 409 });
     release!();
-    await expect(Promise.all([first, second])).resolves.toEqual([
-      { reservationId: HOLD_ONE },
-      { reservationId: HOLD_ONE },
-    ]);
-    expect(holds).toBe(1);
-    const reservation = await coordinator.reserve({ ...request, reserveUnits: 100 });
+    const reservation = await first;
     expect(reservation).toEqual({ reservationId: HOLD_ONE });
     expect(holds).toBe(1);
+    await expect(coordinator.reserve({ ...request, reserveUnits: 100 }))
+      .rejects.toMatchObject({ code: 'EDGE_REQUEST_REPLAYED', status: 409 });
     await coordinator.release({
       ...request, reservation, reason: 'zero_usage', occurredAtMs: NOW,
     });
@@ -593,7 +591,7 @@ describe('Control-backed Edge billing coordinator', () => {
       .rejects.toThrow('already finalized');
   });
 
-  it('restores an active reservation after restart without creating a second hold', async () => {
+  it('restores an active reservation after restart and rejects request replay', async () => {
     const receiptSigner = signer();
     const journal = join(directory, 'active-reservation.ndjson');
     const firstFetch = vi.fn<typeof fetch>(async () => response({ hold: { id: HOLD_ONE } }, 201));
@@ -612,7 +610,7 @@ describe('Control-backed Edge billing coordinator', () => {
       lastReceiptSequence: 0,
     });
     await expect(second.reserve({ ...request, reserveUnits: 100 }))
-      .resolves.toEqual({ reservationId: HOLD_ONE });
+      .rejects.toMatchObject({ code: 'EDGE_REQUEST_REPLAYED', status: 409 });
     expect(secondFetch).not.toHaveBeenCalled();
   });
 

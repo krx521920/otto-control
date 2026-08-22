@@ -45,6 +45,7 @@ import {
 import { createEdgeSignatureVerifier } from './protocol.js';
 import { normalizeEdgeProviderSecret } from './provider-secret.js';
 import { type EdgeRateLimiter, InMemoryEdgeRateLimiter } from './rate-limit.js';
+import { FileEdgeRequestLedger } from './request-ledger.js';
 import {
   createNodeRedisEdgeRateLimiter,
   type RedisEdgeClientLike,
@@ -129,6 +130,7 @@ export interface EdgeServerConfiguration {
   upstreamResponse: EdgeUpstreamResponseLimits;
   shutdownGraceMs: number;
   billing: EdgeBillingConfiguration;
+  requestLedgerFile: string;
   operationsTokenFile?: string;
 }
 
@@ -363,6 +365,7 @@ export function loadEdgeGatewayServerConfiguration(
       'OTTO_EDGE_SHUTDOWN_GRACE_MS', environment, 1_000, 300_000,
     ) ?? 30_000,
     billing: billingConfiguration(environment, Boolean(controlBaseUrl)),
+    requestLedgerFile: environment.OTTO_EDGE_REQUEST_LEDGER_FILE?.trim() || '/var/lib/otto-edge/request-ledger.ndjson',
     ...(environment.OTTO_EDGE_OPERATIONS_TOKEN_FILE?.trim()
       ? { operationsTokenFile: environment.OTTO_EDGE_OPERATIONS_TOKEN_FILE.trim() }
       : {}),
@@ -722,6 +725,9 @@ export async function startEdgeGatewayServer(): Promise<void> {
   const circuitBreaker = new InMemoryEdgeRouteCircuitBreaker(config.circuitBreaker);
   const lifecycle = new InMemoryEdgeGatewayLifecycle();
   const backgroundTasks = new InMemoryEdgeGatewayBackgroundTasks();
+  const requestLedger = await FileEdgeRequestLedger.create({
+    journalFile: config.requestLedgerFile,
+  });
   const gateway = createOttoEdgeGateway({
     policySource: configuredPolicySource,
     verifier,
@@ -733,6 +739,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
     circuitBreaker,
     lifecycle,
     billingCoordinator,
+    requestLedger,
     readinessProbe: createEdgeGatewayReadinessProbe({
       policySource: configuredPolicySource,
       rateLimiter,

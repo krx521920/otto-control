@@ -99,6 +99,7 @@ export interface EdgeGatewayOutcomeV2 {
   publicModel: string;
   routeId: string | null;
   upstreamStatus: number | null;
+  providerRequestId?: string | null;
   outcome:
     | 'succeeded'
     | 'rejected'

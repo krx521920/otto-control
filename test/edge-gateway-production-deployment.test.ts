@@ -21,8 +21,15 @@ describe('Edge Gateway production deployment', () => {
     expect(gateway).toContain('no-new-privileges:true');
     expect(gateway).toContain('max-size: ${OTTO_EDGE_LOG_MAX_SIZE:-20m}');
     expect(gateway).toContain('max-file: ${OTTO_EDGE_LOG_MAX_FILES:-5}');
+    expect(gateway).toContain(
+      'OTTO_EDGE_REQUEST_LEDGER_FILE: /var/lib/otto-edge/request-ledger.ndjson',
+    );
     expect(compose).toContain('profiles: [edge]');
     expect(compose).toContain('profiles: [edge-rollout]');
+    expect(compose).toContain('edge_gateway_state:/var/lib/otto-edge');
+    expect(compose).toContain('edge_gateway_canary_state:/var/lib/otto-edge');
+    expect(compose).toContain('  edge_gateway_state:');
+    expect(compose).toContain('  edge_gateway_canary_state:');
     expect(compose).not.toContain('"7791:7791"');
   });
 

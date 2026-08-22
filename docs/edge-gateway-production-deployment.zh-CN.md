@@ -14,6 +14,8 @@ Control、Federation 共用公网 Caddy，但使用独立进程、独立健康�
   unhealthy，不会降级为内存限流或无计费模式。
 - 模型供应商密钥使用 `${SECRET_BINDING}_FILE`，从只读
   `OTTO_EDGE_PROVIDER_SECRETS_DIR` 挂载；不得写入 `.env`、镜像或策略文件。
+- `/var/lib/otto-edge` 是 Edge 的本机持久状态卷，包含计费 journal 和请求幂等账本；
+  不能放在 NFS/SMB 上，也不能由正式实例和 canary 共享。
 
 ## 首次安装
 

@@ -510,6 +510,7 @@ describe('edge gateway server configuration', () => {
         maximumDurationMs: 15 * 60 * 1_000,
       },
       shutdownGraceMs: 30_000,
+      requestLedgerFile: '/var/lib/otto-edge/request-ledger.ndjson',
     });
   });
 
@@ -631,6 +632,7 @@ describe('edge gateway server configuration', () => {
       OTTO_EDGE_BILLING_RETRY_INTERVAL_MS: '5000',
       OTTO_EDGE_BILLING_NODE_ID: `edge_${'a'.repeat(32)}`,
       OTTO_EDGE_OPERATIONS_TOKEN_FILE: 'D:\\secure\\edge-operations.token',
+      OTTO_EDGE_REQUEST_LEDGER_FILE: 'D:\\state\\edge-request-ledger.ndjson',
     })).toMatchObject({
       billing: {
         type: 'control',
@@ -640,6 +642,7 @@ describe('edge gateway server configuration', () => {
         nodeId: `edge_${'a'.repeat(32)}`,
       },
       operationsTokenFile: 'D:\\secure\\edge-operations.token',
+      requestLedgerFile: 'D:\\state\\edge-request-ledger.ndjson',
     });
   });
 

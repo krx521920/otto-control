@@ -7,6 +7,7 @@ import { createAliyunEsaGateway } from '../src/edge-gateway/aliyun-esa.js';
 import { InMemoryEdgeConcurrencyLimiter } from '../src/edge-gateway/concurrency-limit.js';
 import { encodeEdgeAccessTokenEnvelope } from '../src/edge-gateway/protocol.js';
 import { InMemoryEdgeRateLimiter } from '../src/edge-gateway/rate-limit.js';
+import { MemoryEdgeRequestLedger } from '../src/edge-gateway/request-ledger.js';
 import { StaticEdgeUpstreamOriginPolicy } from '../src/edge-gateway/upstream-origin-policy.js';
 import { EdgeGatewayControlService } from '../src/modules/edge-gateway/service.js';
 
@@ -70,6 +71,7 @@ async function fixture(options: {
       providerSecret,
       rateLimiter: new InMemoryEdgeRateLimiter(),
       concurrencyLimiter: new InMemoryEdgeConcurrencyLimiter(),
+      requestLedger: new MemoryEdgeRequestLedger(),
       recordOutcome: options.recordOutcome
         ? async () => options.recordOutcome!()
         : undefined,
@@ -102,7 +104,7 @@ describe('Aliyun ESA gateway adapter', () => {
     await response.text();
 
     expect(response.status).toBe(200);
-    expect(waitUntil).toHaveBeenCalledOnce();
+    expect(waitUntil).toHaveBeenCalledTimes(2);
     complete();
     await Promise.all(waitUntil.mock.calls.map(([task]) => task));
   });
@@ -122,7 +124,7 @@ describe('Aliyun ESA gateway adapter', () => {
       ? await fixture({ policyValue: '' })
       : await fixture({ providerSecret: value });
     const response = await values.gateway.fetch(values.request);
-    expect(response.status).toBe(value === undefined ? 503 : 502);
+    expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ error: { code: expect.any(String) } });
   });
 });

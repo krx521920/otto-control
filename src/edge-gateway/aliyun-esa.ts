@@ -10,6 +10,7 @@ import {
 import { createEdgeSignatureVerifier } from './protocol.js';
 import type { EdgeRateLimiter } from './rate-limit.js';
 import type { EdgeRequestLimits } from './request-limits.js';
+import type { EdgeRequestLedger } from './request-ledger.js';
 import type { EdgeUpstreamResponseLimits } from './upstream-response-limits.js';
 import type { EdgeUpstreamOriginPolicy } from './upstream-origin-policy.js';
 
@@ -26,6 +27,7 @@ export interface AliyunEsaGatewayOptions {
   concurrencyLimiter: EdgeConcurrencyLimiter;
   circuitBreaker?: EdgeRouteCircuitBreaker;
   billingCoordinator?: EdgeBillingCoordinator;
+  requestLedger: EdgeRequestLedger;
   recordOutcome?(outcome: EdgeGatewayOutcomeV2): Promise<void>;
   fetch?: typeof fetch;
   now?: () => number;
@@ -67,6 +69,7 @@ export function createAliyunEsaGateway(options: AliyunEsaGatewayOptions): {
     concurrencyLimiter: options.concurrencyLimiter,
     circuitBreaker: options.circuitBreaker,
     billingCoordinator: options.billingCoordinator,
+    requestLedger: options.requestLedger,
     outcomeSink,
     fetch: options.fetch,
     now: options.now,
