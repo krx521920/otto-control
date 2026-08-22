@@ -1445,6 +1445,44 @@ const MIGRATIONS: Migration[] = [
        ON control_deployment_enrollments(status, expires_at)`,
     ],
   },
+  {
+    id: '033_enterprise_provisioning_commands',
+    statements: [
+      `ALTER TABLE control_deployment_enrollments
+       ADD COLUMN IF NOT EXISTS provisioning_ciphertext TEXT`,
+      `CREATE INDEX IF NOT EXISTS idx_control_deployment_enrollments_provisioning
+       ON control_deployment_enrollments(status, deployment_id)
+       WHERE provisioning_ciphertext IS NOT NULL`,
+    ],
+  },
+  {
+    id: '034_enterprise_provisioning_security',
+    statements: [
+      `INSERT INTO control_admin_permissions (id) VALUES ('enterprise.provision')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       VALUES ('super_admin', 'enterprise.provision')
+       ON CONFLICT DO NOTHING`,
+      `UPDATE control_deployment_enrollments
+       SET status = 'revoked',
+           token_hash = md5('legacy-revoked:' || id) || md5('legacy-token:' || id),
+           request_hash = NULL,
+           provisioning_ciphertext = NULL,
+           deployment_id = NULL,
+           machine_fingerprint = NULL,
+           claim_lease_id = NULL,
+           claim_lease_expires_at = NULL,
+           replay_expires_at = NULL,
+           app_version = NULL,
+           build_commit = NULL,
+           public_origin = NULL,
+           deployment_kind = NULL,
+           claimed_at = NULL,
+           updated_at = now()
+       WHERE provisioning_ciphertext IS NULL
+         AND status IN ('pending', 'claiming')`,
+    ],
+  },
 ];
 
 export const CONTROL_SCHEMA_MIGRATION_IDS = Object.freeze(

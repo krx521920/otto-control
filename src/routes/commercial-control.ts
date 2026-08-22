@@ -38,7 +38,8 @@ export async function registerCommercialControlRoutes(
     admin.post('/deployment-enrollments', {
       config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
     }, async (request, reply) => {
-      const auth = await authenticateAdmin(request, options, 'deployment.create');
+      const auth = await authenticateAdmin(request, options, 'enterprise.provision');
+      options.identity.requirePermission(auth.principal, 'deployment.create');
       options.identity.requirePermission(auth.principal, 'license.issue');
       const enrollment = await options.service.createDeploymentEnrollment(
         request.body,

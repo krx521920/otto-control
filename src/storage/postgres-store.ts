@@ -208,6 +208,7 @@ interface DeploymentEnrollmentRow {
   model_gateway_url: string | null;
   telemetry_endpoint: string | null;
   update_distribution_id: string | null;
+  provisioning_ciphertext: string | null;
   status: DeploymentEnrollmentRecord['status'];
   deployment_id: string | null;
   machine_fingerprint: string | null;
@@ -743,6 +744,7 @@ function deploymentEnrollmentFromRow(
     modelGatewayUrl: row.model_gateway_url,
     telemetryEndpoint: row.telemetry_endpoint,
     updateDistributionId: row.update_distribution_id,
+    provisioningCiphertext: row.provisioning_ciphertext,
     status: row.status,
     deploymentId: row.deployment_id,
     machineFingerprint: row.machine_fingerprint,
@@ -1527,6 +1529,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     modelGatewayUrl: string | null;
     telemetryEndpoint: string | null;
     updateDistributionId: string | null;
+    provisioningCiphertext: string | null;
     licenseId: string;
     expiresAt: Date;
   }): Promise<DeploymentEnrollmentRecord> {
@@ -1536,10 +1539,10 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
           (id, token_hash, customer_id, organization_id, deployment_name, plan,
            license_expires_at_ms, seat_limit, modules, telemetry_allowed,
            federation_gateway_url, model_gateway_url, telemetry_endpoint,
-           update_distribution_id, license_id, expires_at)
+           update_distribution_id, provisioning_ciphertext, license_id, expires_at)
          VALUES
           ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13,
-           $14, $15, $16)
+           $14, $15, $16, $17)
          RETURNING *`,
         [
           input.id,
@@ -1556,6 +1559,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
           input.modelGatewayUrl,
           input.telemetryEndpoint,
           input.updateDistributionId,
+          input.provisioningCiphertext,
           input.licenseId,
           input.expiresAt,
         ],
@@ -1589,8 +1593,31 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         [input.tokenHash],
       );
       const row = selected.rows[0];
-      if (!row || row.status === 'revoked' || row.expires_at <= input.now) {
+      if (!row) {
         await client.query('ROLLBACK');
+        return null;
+      }
+      if (row.status === 'revoked' || row.expires_at <= input.now) {
+        await client.query(
+          `UPDATE control_deployment_enrollments
+           SET status = CASE WHEN status = 'activated' THEN status ELSE 'revoked' END,
+               token_hash = md5('retired:' || id) || md5('retired-token:' || id),
+               request_hash = NULL,
+               provisioning_ciphertext = NULL,
+               deployment_id = NULL,
+               machine_fingerprint = NULL,
+               claim_lease_id = NULL,
+               claim_lease_expires_at = NULL,
+               replay_expires_at = NULL,
+               app_version = NULL,
+               build_commit = NULL,
+               public_origin = NULL,
+               deployment_kind = NULL,
+               updated_at = $2
+           WHERE id = $1`,
+          [row.id, input.now],
+        );
+        await client.query('COMMIT');
         return null;
       }
       const sameBinding = (
@@ -1604,8 +1631,29 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         return null;
       }
       if (row.status === 'activated') {
+        if (!row.replay_expires_at || row.replay_expires_at <= input.now) {
+          await client.query(
+            `UPDATE control_deployment_enrollments
+             SET token_hash = md5('retired:' || id) || md5('retired-token:' || id),
+                 request_hash = NULL,
+                 provisioning_ciphertext = NULL,
+                 deployment_id = NULL,
+                 machine_fingerprint = NULL,
+                 claim_lease_id = NULL,
+                 claim_lease_expires_at = NULL,
+                 replay_expires_at = NULL,
+                 app_version = NULL,
+                 build_commit = NULL,
+                 public_origin = NULL,
+                 deployment_kind = NULL,
+                 updated_at = $2
+             WHERE id = $1`,
+            [row.id, input.now],
+          );
+          await client.query('COMMIT');
+          return null;
+        }
         await client.query('COMMIT');
-        if (!row.replay_expires_at || row.replay_expires_at <= input.now) return null;
         return { state: 'activated', enrollment: deploymentEnrollmentFromRow(row) };
       }
       if (
@@ -1664,12 +1712,14 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     claimLeaseId: string;
     activatedAt: Date;
     replayExpiresAt: Date;
+    provisioningCiphertext: string | null;
   }): Promise<DeploymentEnrollmentRecord | null> {
     const result = await this.#pool.query<DeploymentEnrollmentRow>(
       `UPDATE control_deployment_enrollments
        SET status = 'activated',
            activated_at = $3,
            replay_expires_at = $4,
+           provisioning_ciphertext = $5,
            claim_lease_id = NULL,
            claim_lease_expires_at = NULL,
            updated_at = $3
@@ -1682,6 +1732,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         input.claimLeaseId,
         input.activatedAt,
         input.replayExpiresAt,
+        input.provisioningCiphertext,
       ],
     );
     return result.rows[0] ? deploymentEnrollmentFromRow(result.rows[0]) : null;
@@ -6190,6 +6241,10 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
          WHERE deployments.id = seats.deployment_id AND deployments.customer_id = $1`,
         [request.customer_id],
       );
+      const deploymentEnrollments = await client.query(
+        'DELETE FROM control_deployment_enrollments WHERE customer_id = $1',
+        [request.customer_id],
+      );
       await client.query(
         `UPDATE control_deployments
          SET organization_id = 'erased:' || md5($2 || ':org:' || id),
@@ -6283,8 +6338,10 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
           { dataClass: 'health_telemetry', disposition: 'deleted', records: telemetry.rowCount ?? 0,
             reason: 'health telemetry is not required after customer erasure', retainUntil: null },
           { dataClass: 'ephemeral_security_state', disposition: 'deleted',
-            records: nonceCount + (assignments.rowCount ?? 0) + (seats.rowCount ?? 0),
-            reason: 'nonces, update assignments and live seat state are no longer required', retainUntil: null },
+            records: nonceCount + (assignments.rowCount ?? 0) + (seats.rowCount ?? 0)
+              + (deploymentEnrollments.rowCount ?? 0),
+            reason: 'nonces, enrollment secrets, update assignments and live seat state are no longer required',
+            retainUntil: null },
           { dataClass: 'privacy_acceptance_identity', disposition: 'anonymized',
             records: acceptanceCount.rowCount ?? 0, reason: 'acceptance proof retained without accepter identity',
             retainUntil: input.auditRetainUntil.toISOString() },
@@ -6361,11 +6418,41 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
            )`,
         [input.exportPayloadBefore, input.now],
       );
+      const deploymentEnrollments = await client.query(
+        `UPDATE control_deployment_enrollments
+         SET status = CASE WHEN status IN ('pending', 'claiming') THEN 'revoked' ELSE status END,
+             token_hash = md5('retired:' || id) || md5('retired-token:' || id),
+             request_hash = NULL,
+             provisioning_ciphertext = NULL,
+             deployment_id = NULL,
+             machine_fingerprint = NULL,
+             claim_lease_id = NULL,
+             claim_lease_expires_at = NULL,
+             replay_expires_at = NULL,
+             app_version = NULL,
+             build_commit = NULL,
+             public_origin = NULL,
+             deployment_kind = NULL,
+             updated_at = $1
+         WHERE (
+           status = 'revoked'
+           OR expires_at <= $1
+           OR (status = 'activated' AND replay_expires_at IS NOT NULL AND replay_expires_at <= $1)
+         ) AND (
+           provisioning_ciphertext IS NOT NULL
+           OR request_hash IS NOT NULL
+           OR deployment_id IS NOT NULL
+           OR machine_fingerprint IS NOT NULL
+           OR public_origin IS NOT NULL
+         )`,
+        [input.now],
+      );
       await client.query('COMMIT');
       return {
         telemetryEventsDeleted: telemetry.rowCount ?? 0,
         expiredNoncesDeleted: nonces,
         expiredExportPayloadsRestricted: restricted.rowCount ?? 0,
+        deploymentEnrollmentsSanitized: deploymentEnrollments.rowCount ?? 0,
       };
     } catch (error) {
       await client.query('ROLLBACK');

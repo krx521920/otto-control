@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type {
   AuditEventInput,
   CommercialInventorySnapshot,
@@ -90,7 +92,7 @@ const role = (
 ): AdminRoleRecord => ({ id, name, permissions, system: true });
 
 const ALL_PERMISSIONS: AdminPermission[] = [
-  'commercial.read', 'customer.create', 'deployment.create', 'license.issue', 'license.read',
+  'commercial.read', 'customer.create', 'deployment.create', 'enterprise.provision', 'license.issue', 'license.read',
   'license.export',
   'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
   'signing_key.read', 'signing_key.manage', 'telemetry.read',
@@ -104,6 +106,31 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'audit.read', 'audit.export', 'audit.verify', 'audit.anchor.manage',
   'customer_delivery.read',
 ];
+
+function retireDeploymentEnrollment(
+  record: DeploymentEnrollmentRecord,
+  retiredAt: Date,
+): DeploymentEnrollmentRecord {
+  return {
+    ...record,
+    status: record.status === 'activated' ? 'activated' : 'revoked',
+    tokenHash: createHash('sha256')
+      .update('retired-deployment-enrollment:' + record.id)
+      .digest('hex'),
+    requestHash: null,
+    provisioningCiphertext: null,
+    deploymentId: null,
+    machineFingerprint: null,
+    claimLeaseId: null,
+    claimLeaseExpiresAt: null,
+    replayExpiresAt: null,
+    appVersion: null,
+    buildCommit: null,
+    publicOrigin: null,
+    deploymentKind: null,
+    updatedAt: retiredAt,
+  };
+}
 
 interface StoredTelemetryEvent extends OttoTelemetryEvent {
   deploymentId: string;
@@ -297,6 +324,7 @@ export class MemoryControlStore implements ControlStore {
     modelGatewayUrl: string | null;
     telemetryEndpoint: string | null;
     updateDistributionId: string | null;
+    provisioningCiphertext: string | null;
     licenseId: string;
     expiresAt: Date;
   }): Promise<DeploymentEnrollmentRecord> {
@@ -340,7 +368,14 @@ export class MemoryControlStore implements ControlStore {
   }): Promise<DeploymentEnrollmentReservation | null> {
     const record = [...this.deploymentEnrollments.values()]
       .find((candidate) => candidate.tokenHash === input.tokenHash);
-    if (!record || record.status === 'revoked' || record.expiresAt <= input.now) {
+    if (!record) {
+      return null;
+    }
+    if (record.status === 'revoked' || record.expiresAt <= input.now) {
+      this.deploymentEnrollments.set(
+        record.id,
+        retireDeploymentEnrollment(record, input.now),
+      );
       return null;
     }
     if (
@@ -354,7 +389,13 @@ export class MemoryControlStore implements ControlStore {
       return null;
     }
     if (record.status === 'activated') {
-      if (!record.replayExpiresAt || record.replayExpiresAt <= input.now) return null;
+      if (!record.replayExpiresAt || record.replayExpiresAt <= input.now) {
+        this.deploymentEnrollments.set(
+          record.id,
+          retireDeploymentEnrollment(record, input.now),
+        );
+        return null;
+      }
       return { state: 'activated', enrollment: structuredClone(record) };
     }
     if (
@@ -388,6 +429,7 @@ export class MemoryControlStore implements ControlStore {
     claimLeaseId: string;
     activatedAt: Date;
     replayExpiresAt: Date;
+    provisioningCiphertext: string | null;
   }): Promise<DeploymentEnrollmentRecord | null> {
     const record = this.deploymentEnrollments.get(input.enrollmentId);
     if (
@@ -403,6 +445,7 @@ export class MemoryControlStore implements ControlStore {
       claimLeaseId: null,
       claimLeaseExpiresAt: null,
       replayExpiresAt: input.replayExpiresAt,
+      provisioningCiphertext: input.provisioningCiphertext,
       activatedAt: input.activatedAt,
       updatedAt: input.activatedAt,
     };

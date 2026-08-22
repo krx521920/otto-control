@@ -129,6 +129,7 @@ export interface DeploymentEnrollmentRecord {
   modelGatewayUrl: string | null;
   telemetryEndpoint: string | null;
   updateDistributionId: string | null;
+  provisioningCiphertext: string | null;
   status: DeploymentEnrollmentStatus;
   deploymentId: string | null;
   machineFingerprint: string | null;
@@ -391,6 +392,7 @@ export interface ControlStore {
     modelGatewayUrl: string | null;
     telemetryEndpoint: string | null;
     updateDistributionId: string | null;
+    provisioningCiphertext: string | null;
     licenseId: string;
     expiresAt: Date;
   }): Promise<DeploymentEnrollmentRecord>;
@@ -412,6 +414,7 @@ export interface ControlStore {
     claimLeaseId: string;
     activatedAt: Date;
     replayExpiresAt: Date;
+    provisioningCiphertext: string | null;
   }): Promise<DeploymentEnrollmentRecord | null>;
   upsertEdgeGatewayPolicy(input: {
     deploymentId: string;

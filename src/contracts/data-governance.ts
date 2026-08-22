@@ -148,4 +148,5 @@ export interface RetentionRunResult {
   telemetryEventsDeleted: number;
   expiredNoncesDeleted: number;
   expiredExportPayloadsRestricted: number;
+  deploymentEnrollmentsSanitized: number;
 }

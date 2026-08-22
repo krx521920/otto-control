@@ -29,6 +29,14 @@ import {
   validatePlanModules,
 } from '../../contracts/commercial-package.js';
 import {
+  decryptEnterpriseProvisioningContainer,
+  encryptEnterpriseProvisioningContainer,
+  enterpriseProvisioningPayloadDigest,
+  signEnterpriseProvisioningCommand,
+  type EnterpriseProvisioningCommand,
+  type EnterpriseProvisioningPayload,
+} from '../../contracts/deployment-provisioning.js';
+import {
   secureTextMatches,
   signTelemetryRequest,
   telemetryIntegrityHash,
@@ -68,6 +76,9 @@ const DEPLOYMENT_ENROLLMENT_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEPLOYMENT_CLAIM_LEASE_MS = 30 * 1000;
 const DEPLOYMENT_CLAIM_REPLAY_MS = 15 * 60 * 1000;
 const DEPLOYMENT_KIND_PATTERN = /^[a-z0-9][a-z0-9_-]{1,63}$/u;
+const CEO_USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/u;
+const MAINLAND_PHONE_PATTERN = /^(?:\+86)?1[3-9]\d{9}$/u;
+const ORGANIZATION_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/u;
 const FORBIDDEN_TELEMETRY_KEYS = new Set([
   'message',
   'messages',
@@ -101,6 +112,30 @@ function requiredString(
   if (!value) throw invalidRequest(`${key} is required`);
   if (value.length > maxLength) throw invalidRequest(`${key} is too long`);
   return value;
+}
+
+const UNSAFE_DISPLAY_TEXT_PATTERN = /[\u0000-\u001f\u007f-\u009f\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\u3164\ufeff]/u;
+
+function requiredSafeDisplayText(
+  object: Record<string, unknown>,
+  key: string,
+  maxLength: number,
+): string {
+  const value = requiredString(object, key, maxLength);
+  if (UNSAFE_DISPLAY_TEXT_PATTERN.test(value)) {
+    throw invalidRequest(key + ' contains unsafe or invisible characters');
+  }
+  return value.normalize('NFC');
+}
+
+function optionalBoolean(
+  object: Record<string, unknown>,
+  key: string,
+  defaultValue: boolean,
+): boolean {
+  if (object[key] === undefined) return defaultValue;
+  if (typeof object[key] !== 'boolean') throw invalidRequest(key + ' must be a boolean');
+  return object[key];
 }
 
 function optionalString(
@@ -595,19 +630,58 @@ export class CommercialControlService {
     raw: unknown,
     actorId: string,
   ): Promise<{
-    enrollment: Omit<DeploymentEnrollmentRecord, 'tokenHash'>;
+    enrollment: Omit<DeploymentEnrollmentRecord, 'tokenHash' | 'provisioningCiphertext'>;
     bootstrapSecret: string;
   }> {
     const body = objectValue(raw);
+    const allowedKeys = new Set([
+      'customerId',
+      'organizationId',
+      'organizationName',
+      'organizationSlug',
+      'ceoUsername',
+      'ceoName',
+      'ceoPhone',
+      'defaultDepartmentName',
+      'deploymentName',
+      'plan',
+      'expiresAt',
+      'seatLimit',
+      'modules',
+      'validForHours',
+      'telemetryAllowed',
+      'federationGatewayUrl',
+      'modelGatewayUrl',
+      'telemetryEndpoint',
+      'updateDistributionId',
+    ]);
+    const unknownKey = Object.keys(body).find((key) => !allowedKeys.has(key));
+    if (unknownKey) throw invalidRequest('unexpected enrollment field: ' + unknownKey);
     const customerId = requiredString(body, 'customerId', 128);
     const organizationId = requiredString(body, 'organizationId', 128);
+    const organizationName = requiredSafeDisplayText(body, 'organizationName', 80);
+    const organizationSlug = optionalString(body, 'organizationSlug', 48)?.toLowerCase() ?? null;
+    const ceoUsername = requiredString(body, 'ceoUsername', 64);
+    const ceoName = requiredSafeDisplayText(body, 'ceoName', 80);
+    const ceoPhoneRaw = requiredString(body, 'ceoPhone', 32).replace(/[\s-]/gu, '');
+    const ceoPhone = ceoPhoneRaw.startsWith('+86') ? ceoPhoneRaw : '+86' + ceoPhoneRaw;
+    const defaultDepartmentName = requiredSafeDisplayText(body, 'defaultDepartmentName', 80);
     const deploymentName = requiredString(body, 'deploymentName', 160);
     const plan = requiredString(body, 'plan', 80);
     const expiresAt = requiredString(body, 'expiresAt', 64);
     const seatLimit = Number(body.seatLimit);
     if (!ID_PART_PATTERN.test(customerId)) throw invalidRequest('customerId is invalid');
-    if (!ID_PART_PATTERN.test(organizationId)) {
-      throw invalidRequest('organizationId is invalid');
+    if (!ID_PART_PATTERN.test(organizationId) || organizationId === 'org_default') {
+      throw invalidRequest('organizationId is invalid or reserved');
+    }
+    if (organizationSlug && !ORGANIZATION_SLUG_PATTERN.test(organizationSlug)) {
+      throw invalidRequest('organizationSlug is invalid');
+    }
+    if (!CEO_USERNAME_PATTERN.test(ceoUsername)) {
+      throw invalidRequest('ceoUsername is invalid');
+    }
+    if (!MAINLAND_PHONE_PATTERN.test(ceoPhone)) {
+      throw invalidRequest('ceoPhone must be a mainland China mobile number');
     }
     const customer = await this.#store.getCustomer(customerId);
     if (!customer) throw notFound('customer does not exist');
@@ -675,8 +749,28 @@ export class CommercialControlService {
       throw invalidRequest('updateDistributionId is invalid');
     }
     const bootstrapSecret = randomBytes(32).toString('base64url');
+    const enrollmentId = prefixedId('enroll');
+    const provisioningPayload: EnterpriseProvisioningPayload = {
+      organization: {
+        id: organizationId,
+        name: organizationName,
+        ...(organizationSlug ? { slug: organizationSlug } : {}),
+      },
+      ceo: {
+        username: ceoUsername,
+        name: ceoName,
+        phone: ceoPhone,
+      },
+      defaultDepartmentName,
+      modules,
+    };
+    const provisioningCiphertext = encryptEnterpriseProvisioningContainer(
+      bootstrapSecret,
+      enrollmentId,
+      { version: 1, payload: provisioningPayload, command: null },
+    );
     const record = await this.#store.createDeploymentEnrollment({
-      id: prefixedId('enroll'),
+      id: enrollmentId,
       tokenHash: bootstrapTokenHash(bootstrapSecret),
       customerId,
       organizationId,
@@ -685,11 +779,12 @@ export class CommercialControlService {
       licenseExpiresAtMs,
       seatLimit,
       modules,
-      telemetryAllowed: body.telemetryAllowed !== false,
+      telemetryAllowed: optionalBoolean(body, 'telemetryAllowed', true),
       federationGatewayUrl,
       modelGatewayUrl,
       telemetryEndpoint,
       updateDistributionId,
+      provisioningCiphertext,
       licenseId: prefixedId('lic'),
       expiresAt: new Date(now + enrollmentTtlMs),
     });
@@ -709,8 +804,12 @@ export class CommercialControlService {
     });
     const enrollment = structuredClone(record) as Partial<DeploymentEnrollmentRecord>;
     delete enrollment.tokenHash;
+    delete enrollment.provisioningCiphertext;
     return {
-      enrollment: enrollment as Omit<DeploymentEnrollmentRecord, 'tokenHash'>,
+      enrollment: enrollment as Omit<
+        DeploymentEnrollmentRecord,
+        'tokenHash' | 'provisioningCiphertext'
+      >,
       bootstrapSecret,
     };
   }
@@ -733,6 +832,7 @@ export class CommercialControlService {
     modelGatewayUrl: string | null;
     telemetryEndpoint: string | null;
     updateDistributionId: string | null;
+    provisioningCommand: EnterpriseProvisioningCommand;
   }> {
     if (Buffer.byteLength(bootstrapSecret, 'utf8') < 32) {
       throw unauthorized('deployment enrollment is invalid or unavailable');
@@ -805,8 +905,44 @@ export class CommercialControlService {
       throw conflict('customer is unavailable or suspended');
     }
     let envelope: OttoSignedLicenseEnvelope;
+    let provisioningCommand: EnterpriseProvisioningCommand;
+    const provisioning = enrollment.provisioningCiphertext
+      ? decryptEnterpriseProvisioningContainer(
+          bootstrapSecret,
+          enrollment.id,
+          enrollment.provisioningCiphertext,
+        )
+      : null;
+    if (!provisioning) {
+      throw unauthorized('deployment enrollment is invalid or unavailable');
+    }
     if (reservation.state === 'activated') {
+      const deployment = await this.#store.getDeployment(deploymentId);
+      if (
+        !deployment
+        || deployment.status !== 'active'
+        || deployment.customerId !== enrollment.customerId
+        || deployment.organizationId !== enrollment.organizationId
+        || deployment.machineFingerprint !== machineFingerprint
+      ) {
+        throw unauthorized('deployment enrollment binding is no longer active');
+      }
+      const license = await this.#store.getLicense(enrollment.licenseId);
+      if (
+        !license
+        || license.revokedAtMs !== null
+        || license.expiresAtMs <= now
+        || license.deploymentId !== deploymentId
+        || license.organizationId !== enrollment.organizationId
+        || license.machineFingerprint !== machineFingerprint
+      ) {
+        throw unauthorized('deployment enrollment License is no longer active');
+      }
       envelope = await this.getLicenseEnvelope(enrollment.licenseId);
+      if (!provisioning.command) {
+        throw unauthorized('deployment enrollment is invalid or unavailable');
+      }
+      provisioningCommand = provisioning.command;
     } else {
       const existing = await this.#store.getDeployment(deploymentId);
       if (existing) {
@@ -847,11 +983,31 @@ export class CommercialControlService {
           offline: false,
           telemetryAllowed: enrollment.telemetryAllowed,
         }, `deployment-enrollment:${enrollment.id}`, enrollment.licenseId);
+      const issuedAt = new Date(now).toISOString();
+      const commandExpiresAt = new Date(now + DEPLOYMENT_CLAIM_REPLAY_MS).toISOString();
+      provisioningCommand = await signEnterpriseProvisioningCommand(this.#signer, {
+        commandId: prefixedId('cmd'),
+        deploymentId,
+        type: 'enterprise.initiate',
+        schemaVersion: 1,
+        sequence: 1,
+        issuedAt,
+        expiresAt: commandExpiresAt,
+        idempotencyKey: 'bootstrap-enterprise:' + enrollment.id,
+        payloadDigest: enterpriseProvisioningPayloadDigest(provisioning.payload),
+        payload: provisioning.payload,
+      });
+      const completedCiphertext = encryptEnterpriseProvisioningContainer(
+        bootstrapSecret,
+        enrollment.id,
+        { ...provisioning, command: provisioningCommand },
+      );
       const completed = await this.#store.completeDeploymentEnrollmentClaim({
         enrollmentId: enrollment.id,
         claimLeaseId,
         activatedAt: new Date(now),
         replayExpiresAt: new Date(now + DEPLOYMENT_CLAIM_REPLAY_MS),
+        provisioningCiphertext: completedCiphertext,
       });
       if (!completed) {
         throw conflict('deployment enrollment activation lease was lost; retry shortly');
@@ -887,6 +1043,7 @@ export class CommercialControlService {
       modelGatewayUrl: enrollment.modelGatewayUrl,
       telemetryEndpoint: enrollment.telemetryEndpoint,
       updateDistributionId: enrollment.updateDistributionId,
+      provisioningCommand,
     };
   }
   async #changeLicense(

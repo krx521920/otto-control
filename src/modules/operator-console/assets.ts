@@ -192,6 +192,12 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
       <div class="form-grid">
         <label>所属客户 ID<input id="enroll-deployment-customer" list="customer-options" maxlength="128" required></label>
         <label>企业 ID<input id="enroll-deployment-organization" maxlength="128" required></label>
+        <label>企业名称<input id="enroll-organization-name" maxlength="80" autocomplete="organization" required></label>
+        <label>企业标识（可选）<input id="enroll-organization-slug" maxlength="48" placeholder="例如 beikong-hongchuang"></label>
+        <label>默认部门<input id="enroll-default-department" maxlength="80" value="管理层" required></label>
+        <label>CEO 登录名<input id="enroll-ceo-username" maxlength="64" autocomplete="username" required></label>
+        <label>CEO 姓名<input id="enroll-ceo-name" maxlength="80" autocomplete="name" required></label>
+        <label>CEO 手机号<input id="enroll-ceo-phone" maxlength="14" inputmode="tel" autocomplete="tel" placeholder="13800138000" required></label>
         <label>部署名称<input id="enroll-deployment-name" maxlength="160" required></label>
         <label>版本方案<select id="enroll-deployment-plan"><option value="basic">基础版</option><option value="enterprise" selected>企业版</option><option value="park">产业园版</option><option value="government">政企版</option></select></label>
         <label>License 到期日期<input id="enroll-deployment-expiry" type="date" required></label>
@@ -212,7 +218,7 @@ export const OPERATOR_CONSOLE_HTML = `<!doctype html>
 
   <dialog id="deployment-enrollment-result-dialog" class="action-dialog wide">
     <div class="dialog-heading"><div><p class="section-label">ONE-TIME SERVER ENROLLMENT</p><h2>服务器接入凭证已生成</h2></div><button class="icon-close" data-close="deployment-enrollment-result-dialog" type="button" aria-label="关闭">×</button></div>
-    <p class="sensitive-note">口令关闭后立即从页面内存清除，Control 只保存 SHA-256 摘要。请交给计算巢或安装机的受限 Secret 文件，不要放入聊天、日志、命令历史或 .env。</p>
+    <p class="sensitive-note">口令关闭后立即从页面内存清除，Control 只保存口令 SHA-256 摘要和由该口令派生密钥加密的企业初始化资料。请交给计算巢或安装机的受限 Secret 文件，不要放入聊天、日志、命令历史或 .env。</p>
     <dl class="issued-summary deployment-enrollment-summary">
       <span>认领 ID</span><strong id="deployment-enrollment-result-id">-</strong>
       <span>客户 / 企业</span><strong id="deployment-enrollment-result-tenant">-</strong>

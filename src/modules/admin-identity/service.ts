@@ -184,6 +184,7 @@ export class AdminIdentityService {
     input: { username: string; displayName: string; password: string; roleIds: string[] },
   ): Promise<AdminEnrollmentResult> {
     this.requirePermission(actor, 'identity.manage');
+    await this.#assertRoleAssignmentAllowed(actor, input.roleIds);
     return this.#createAccount(actor.accountId, input);
   }
 
@@ -366,6 +367,12 @@ export class AdminIdentityService {
     if (!roles.length) throw invalidRequest('at least one role is required');
     const account = await this.#store.getAdminAccountById(accountId);
     if (!account) throw notFound('administrator account not found');
+    const existing = (await this.#store.listAdminAccounts()).find(
+      (entry) => entry.id === accountId,
+    );
+    if (!existing) throw notFound('administrator account not found');
+    this.#assertSuperAdminTargetAllowed(principal, existing.roles);
+    await this.#assertRoleAssignmentAllowed(principal, roles);
     await this.#protectLastSuperAdmin(accountId, roles, account.status);
     const updated = await this.#store.replaceAdminAccountRoles(accountId, roles);
     if (!updated) throw notFound('administrator account not found');
@@ -386,7 +393,11 @@ export class AdminIdentityService {
     }
     const account = await this.#store.getAdminAccountById(accountId);
     if (!account) throw notFound('administrator account not found');
-    const existing = (await this.#store.listAdminAccounts()).find((entry) => entry.id === accountId)!;
+    const existing = (await this.#store.listAdminAccounts()).find(
+      (entry) => entry.id === accountId,
+    );
+    if (!existing) throw notFound('administrator account not found');
+    this.#assertSuperAdminTargetAllowed(principal, existing.roles);
     await this.#protectLastSuperAdmin(accountId, existing.roles, status);
     const now = new Date(this.#now());
     const updated = await this.#store.setAdminAccountStatus(accountId, status, now);
@@ -394,6 +405,42 @@ export class AdminIdentityService {
     if (status === 'disabled') await this.#store.revokeAdminAccountSessions(accountId, now);
     await this.#audit(principal.accountId, 'admin.status.change', 'admin_account', accountId, { status });
     return accountView({ ...updated, roles: existing.roles });
+  }
+
+  async #assertRoleAssignmentAllowed(
+    principal: AdminPrincipal,
+    roleIds: string[],
+  ): Promise<void> {
+    const requested = [...new Set(roleIds.map((roleId) => roleId.trim()))];
+    const available = new Map(
+      (await this.#store.listAdminRoles()).map((role) => [role.id, role] as const),
+    );
+    const unknownRole = requested.find((roleId) => !available.has(roleId));
+    if (unknownRole) throw invalidRequest('admin role does not exist');
+    if (!principal.roles.includes('super_admin') && requested.includes('super_admin')) {
+      throw forbidden('Only a super administrator may grant the super_admin role');
+    }
+    const principalPermissions = new Set(principal.permissions);
+    const excessPermission = requested
+      .flatMap((roleId) => available.get(roleId)!.permissions)
+      .find((permission) => !principalPermissions.has(permission));
+    if (excessPermission) {
+      throw forbidden(
+        'Cannot grant permission not held by the acting administrator: ' + excessPermission,
+      );
+    }
+  }
+
+  #assertSuperAdminTargetAllowed(
+    principal: AdminPrincipal,
+    targetRoles: string[],
+  ): void {
+    if (
+      targetRoles.includes('super_admin')
+      && !principal.roles.includes('super_admin')
+    ) {
+      throw forbidden('Only a super administrator may modify a super administrator');
+    }
   }
 
   async #protectLastSuperAdmin(

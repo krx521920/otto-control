@@ -124,6 +124,7 @@ postgresDescribe('PostgreSQL commercial control integration', () => {
         telemetryEventsDeleted: 0,
         expiredNoncesDeleted: 0,
         expiredExportPayloadsRestricted: 0,
+        deploymentEnrollmentsSanitized: 0,
       });
       const billingPolicyColumn = await pool.query<{
         column_name: string;

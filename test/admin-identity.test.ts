@@ -74,6 +74,74 @@ describe('administrator identity service', () => {
     })).rejects.toThrow('temporarily locked');
   });
 
+  it('prevents administrators from granting roles beyond their own authority', async () => {
+    const fixture = await enrolledSuperAdmin();
+    const securityEnrollment = await fixture.identity.createAccount(fixture.session.principal, {
+      username: 'security.admin',
+      displayName: 'Security Admin',
+      password: PASSWORD,
+      roleIds: ['security_admin'],
+    });
+    const securitySession = await fixture.identity.confirmEnrollment({
+      accountId: securityEnrollment.account.id,
+      enrollmentToken: securityEnrollment.enrollmentToken,
+      totpCode: generateTotpCode(securityEnrollment.mfaSecret, fixture.now()),
+    });
+
+    await expect(fixture.identity.createAccount(securitySession.principal, {
+      username: 'forged.super',
+      displayName: 'Forged Super Admin',
+      password: PASSWORD,
+      roleIds: ['super_admin'],
+    })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(fixture.identity.createAccount(securitySession.principal, {
+      username: 'forged.license',
+      displayName: 'Forged License Admin',
+      password: PASSWORD,
+      roleIds: ['license_admin'],
+    })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    const securityPeer = await fixture.identity.createAccount(
+      securitySession.principal,
+      {
+        username: 'security.peer',
+        displayName: 'Security Peer',
+        password: PASSWORD,
+        roleIds: ['security_admin'],
+      },
+    );
+    expect(securityPeer.account.roles).toEqual(['security_admin']);
+    await expect(fixture.identity.replaceRoles(
+      securitySession.principal,
+      securityPeer.account.id,
+      ['license_admin'],
+    )).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    const secondSuperEnrollment = await fixture.identity.createAccount(
+      fixture.session.principal,
+      {
+        username: 'second.super',
+        displayName: 'Second Super Admin',
+        password: PASSWORD,
+        roleIds: ['super_admin'],
+      },
+    );
+    await fixture.identity.confirmEnrollment({
+      accountId: secondSuperEnrollment.account.id,
+      enrollmentToken: secondSuperEnrollment.enrollmentToken,
+      totpCode: generateTotpCode(secondSuperEnrollment.mfaSecret, fixture.now()),
+    });
+    await expect(fixture.identity.replaceRoles(
+      securitySession.principal,
+      secondSuperEnrollment.account.id,
+      ['security_admin'],
+    )).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(fixture.identity.setAccountStatus(
+      securitySession.principal,
+      secondSuperEnrollment.account.id,
+      'disabled',
+    )).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
   it('enforces RBAC, last-super-admin protection and dual-control approvals', async () => {
     const fixture = await enrolledSuperAdmin();
     const securityEnrollment = await fixture.identity.createAccount(fixture.session.principal, {

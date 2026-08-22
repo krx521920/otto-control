@@ -85,6 +85,12 @@ byId('deployment-enrollment-form').addEventListener('submit', async (event) => {
       body: JSON.stringify({
         customerId: byId('enroll-deployment-customer').value.trim(),
         organizationId: byId('enroll-deployment-organization').value.trim(),
+        organizationName: byId('enroll-organization-name').value.trim(),
+        organizationSlug: optionalTrimmedValue('enroll-organization-slug'),
+        ceoUsername: byId('enroll-ceo-username').value.trim(),
+        ceoName: byId('enroll-ceo-name').value.trim(),
+        ceoPhone: byId('enroll-ceo-phone').value.trim(),
+        defaultDepartmentName: byId('enroll-default-department').value.trim(),
         deploymentName: byId('enroll-deployment-name').value.trim(),
         plan: byId('enroll-deployment-plan').value,
         expiresAt: new Date(expiry + 'T23:59:59.999Z').toISOString(),

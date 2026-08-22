@@ -4,6 +4,7 @@ const PERMISSION_LABELS = {
   'commercial.read': '查看商业概览',
   'customer.create': '创建客户',
   'deployment.create': '登记部署',
+  'enterprise.provision': '初始化企业与 CEO',
   'license.issue': '签发 License',
   'license.read': '查看 License',
   'license.export': '导出 License',

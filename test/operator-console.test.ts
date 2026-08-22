@@ -96,10 +96,17 @@ describe('operator console assets', () => {
     expect(page.body).toContain('id="create-deployment-enrollment-button"');
     expect(page.body).toContain('id="deployment-enrollment-dialog"');
     expect(page.body).toContain('id="deployment-enrollment-result-secret"');
+    expect(page.body).toContain('id="enroll-organization-name"');
+    expect(page.body).toContain('id="enroll-ceo-username"');
+    expect(page.body).toContain('id="enroll-ceo-phone"');
     expect(page.body).toContain('口令关闭后立即从页面内存清除');
+    expect(script.body).toContain("hasPermission('enterprise.provision')");
     expect(script.body).toContain("hasPermission('deployment.create')");
     expect(script.body).toContain("hasPermission('license.issue')");
     expect(script.body).toContain("'/v1/admin/deployment-enrollments'");
+    expect(script.body).toContain("organizationName: byId('enroll-organization-name')");
+    expect(script.body).toContain("ceoUsername: byId('enroll-ceo-username')");
+    expect(script.body).toContain("ceoPhone: byId('enroll-ceo-phone')");
     expect(script.body).toContain('activeDeploymentEnrollment = null');
     expect(script.body).toContain("addEventListener('close', clearDeploymentEnrollmentResult)");
     expect(script.body).not.toContain('localStorage');
