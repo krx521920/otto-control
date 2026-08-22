@@ -636,6 +636,7 @@ describe('edge gateway server configuration', () => {
         type: 'control',
         receiptPrivateKeyFile: 'D:\\secure\\receipt-private.pem',
         journalFile: 'D:\\state\\edge-billing.ndjson',
+        requestJournalFile: 'D:\\state\\edge-billing.ndjson.requests',
         retryIntervalMs: 5000,
         nodeId: `edge_${'a'.repeat(32)}`,
       },

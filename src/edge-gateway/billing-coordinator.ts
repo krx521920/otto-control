@@ -20,6 +20,7 @@ export interface EdgeBillingRequestIdentity {
 
 export interface EdgeBillingReservationRequest extends EdgeBillingRequestIdentity {
   reserveUnits: number;
+  recoveringNotSentRequest?: boolean;
 }
 
 export interface EdgeBillingSettlementRequest extends EdgeBillingRequestIdentity {
@@ -84,11 +85,12 @@ export interface EdgeBillingCoordinator {
 
 export type EdgeBillingAdmissionCode =
   | 'EDGE_CREDIT_REQUIRED'
+  | 'EDGE_REQUEST_REPLAYED'
   | 'EDGE_BILLING_UNAVAILABLE';
 
 export class EdgeBillingAdmissionError extends Error {
   constructor(
-    readonly status: 402 | 503,
+    readonly status: 402 | 409 | 503,
     readonly code: EdgeBillingAdmissionCode,
     message: string,
   ) {

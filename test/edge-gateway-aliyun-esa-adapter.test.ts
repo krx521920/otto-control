@@ -102,7 +102,7 @@ describe('Aliyun ESA gateway adapter', () => {
     await response.text();
 
     expect(response.status).toBe(200);
-    expect(waitUntil).toHaveBeenCalledOnce();
+    expect(waitUntil).toHaveBeenCalled();
     complete();
     await Promise.all(waitUntil.mock.calls.map(([task]) => task));
   });

@@ -165,12 +165,16 @@ function stableId(prefix: string, value: string): string {
   return `${prefix}${createHash('sha256').update(value).digest('hex').slice(0, 32)}`;
 }
 
-function reservationId(value: unknown): string {
-  const id = (value as { hold?: { id?: unknown } } | null)?.hold?.id;
+function reservationResult(value: unknown): { id: string; replayed: boolean } {
+  const body = value as { hold?: { id?: unknown }; replayed?: unknown } | null;
+  const id = body?.hold?.id;
   if (typeof id !== 'string' || !HOLD_ID.test(id)) {
     throw new Error('Control hold response is invalid');
   }
-  return id;
+  if (body?.replayed !== undefined && typeof body.replayed !== 'boolean') {
+    throw new Error('Control hold response is invalid');
+  }
+  return { id, replayed: body?.replayed === true };
 }
 
 function assertIdentity(
@@ -351,10 +355,26 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
     assertIdentity(this.#binding, request);
     if (!validUnits(request.reserveUnits)) throw new Error('Edge billing reserve units are invalid');
     const existing = this.#reservations.get(request.requestId);
-    if (existing?.status === 'active') return { reservationId: existing.reservationId };
-    if (existing) throw new Error('Edge billing request ID was already finalized');
+    if (existing) {
+      if (request.recoveringNotSentRequest && existing.status === 'active') {
+        return { reservationId: existing.reservationId };
+      }
+      throw new EdgeBillingAdmissionError(
+        409,
+        'EDGE_REQUEST_REPLAYED',
+        existing.status === 'active'
+          ? 'Edge billing request is already in progress'
+          : 'Edge billing request was already finalized',
+      );
+    }
     const active = this.#reserving.get(request.requestId);
-    if (active) return active;
+    if (active) {
+      throw new EdgeBillingAdmissionError(
+        409,
+        'EDGE_REQUEST_REPLAYED',
+        'Edge billing request is already being admitted',
+      );
+    }
     const task = this.#createReservation(request);
     this.#reserving.set(request.requestId, task);
     try {
@@ -496,7 +516,15 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
       }
       throw new EdgeBillingAdmissionError(503, 'EDGE_BILLING_UNAVAILABLE', 'Control unavailable');
     }
-    const id = reservationId(response);
+    const reservation = reservationResult(response);
+    if (reservation.replayed && !request.recoveringNotSentRequest) {
+      throw new EdgeBillingAdmissionError(
+        409,
+        'EDGE_REQUEST_REPLAYED',
+        'Control has already admitted this logical request',
+      );
+    }
+    const id = reservation.id;
     await this.#append({ type: 'reserved', requestId: request.requestId, reservationId: id });
     this.#reservations.set(request.requestId, { reservationId: id, status: 'active' });
     return { reservationId: id };
@@ -603,19 +631,19 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
         redirect: 'error',
         signal: controller.signal,
       });
+      let parsed: unknown = null;
+      try {
+        parsed = await readEdgeControlResponseJson(response);
+      } catch {
+        throw new Error('Control billing response is invalid');
+      }
+      if (!response.ok) {
+        throw new ControlBillingRequestError(response.status, responseErrorCode(parsed));
+      }
+      return parsed;
     } finally {
       clearTimeout(timeout);
     }
-    let parsed: unknown = null;
-    try {
-      parsed = await readEdgeControlResponseJson(response);
-    } catch {
-      throw new Error('Control billing response is invalid');
-    }
-    if (!response.ok) {
-      throw new ControlBillingRequestError(response.status, responseErrorCode(parsed));
-    }
-    return parsed;
   }
 
   async #loadJournal(): Promise<void> {

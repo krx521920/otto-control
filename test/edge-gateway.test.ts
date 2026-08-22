@@ -127,6 +127,14 @@ async function fixture(overrides: {
       overrides.allowedUpstreamOrigins
         ?? [...new Set(routes.map((route) => new URL(route.upstreamUrl).origin))],
     );
+  let requestSequence = 0;
+  const nextRequestId = () => {
+    requestSequence += 1;
+    return requestSequence === 1
+      ? 'edge_request_fixture'
+      : `edge_request_fixture_${requestSequence}`;
+  };
+  const metered = routes.some((route) => route.metering !== undefined);
   const gateway = createOttoEdgeGateway({
     policySource: { load: async () => policy },
     verifier: createEdgeSignatureVerifier({ [signer.keyId]: signer.publicKeyPem }),
@@ -145,7 +153,7 @@ async function fixture(overrides: {
     upstreamOriginPolicy,
     fetch: overrides.fetch ?? (vi.fn(async () => new Response('{}')) as typeof fetch),
     now: overrides.now ?? (() => NOW),
-    requestId: overrides.requestId ?? (() => 'edge_request_fixture'),
+    requestId: overrides.requestId ?? nextRequestId,
   });
   const authorization = `Bearer ${encodeEdgeAccessTokenEnvelope(access)}`;
   const request = (body: unknown, init: RequestInit = {}) => new Request(
@@ -156,6 +164,7 @@ async function fixture(overrides: {
       headers: {
         authorization,
         'content-type': 'application/json',
+        ...(metered ? { 'idempotency-key': nextRequestId() } : {}),
         ...Object.fromEntries(new Headers(init.headers)),
       },
       body: JSON.stringify(body),
@@ -359,7 +368,10 @@ describe('otto edge gateway', () => {
       model: 'otto-fast', messages: [],
     }));
 
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED' },
+    });
     expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
     expect(circuitBreaker.snapshot().openRoutes).toBe(1);
     expect(values.outcomes).toEqual([
@@ -413,7 +425,7 @@ describe('otto edge gateway', () => {
     await expect(response.text()).resolves.toBe('{}');
     expect(release).toHaveBeenCalledOnce();
     expect(succeeded).toHaveBeenCalledOnce();
-    expect(waitUntil).toHaveBeenCalledOnce();
+    expect(waitUntil).toHaveBeenCalledTimes(2);
     expect(values.outcomes).toEqual([
       expect.objectContaining({ outcome: 'succeeded' }),
     ]);
@@ -495,7 +507,7 @@ describe('otto edge gateway', () => {
         model: 'otto-fast', messages: [],
       }));
 
-      expect(response.status).toBe(502);
+      expect(response.status).toBe(completion === 'failed' ? 409 : 502);
       expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
       expect(completion === 'failed' ? failed : cancelled).toHaveBeenCalledOnce();
       expect(values.outcomes).toEqual([
@@ -521,7 +533,7 @@ describe('otto edge gateway', () => {
     expect(response.status).toBe(200);
     await expect(response.text()).resolves.toBe('{}');
     expect(record).toHaveBeenCalledOnce();
-    expect(waitUntil).not.toHaveBeenCalled();
+    expect(waitUntil).toHaveBeenCalledOnce();
     expect(concurrencyLimiter.snapshot().activeRequests).toBe(0);
   });
 
@@ -951,7 +963,50 @@ describe('otto edge gateway', () => {
     expect(await failed.text()).not.toContain('private billing endpoint');
   });
 
-  it('releases a reservation when no provider was reached', async () => {
+  it('recovers a pre-provider billing failure without creating a second logical hold', async () => {
+    const meteredRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 2_000 },
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({
+        choices: [],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+      { headers: { 'content-type': 'application/json' } },
+    ));
+    const billing = billingCoordinatorFixture();
+    billing.reserve
+      .mockRejectedValueOnce(new EdgeBillingAdmissionError(
+        503, 'EDGE_BILLING_UNAVAILABLE', 'Control response was interrupted',
+      ))
+      .mockResolvedValueOnce({ reservationId: 'hold_edge_request_fixture' });
+    const values = await fixture({
+      routes: [meteredRoute],
+      fetch: fetchMock,
+      billingCoordinator: billing.coordinator,
+    });
+    const body = { model: 'otto-fast', messages: [] };
+    const requestInit = { headers: { 'idempotency-key': 'edge_request_recovery' } };
+
+    const first = await values.gateway.fetch(values.request(body, requestInit));
+    expect(first.status).toBe(503);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const recovered = await values.gateway.fetch(values.request(body, requestInit));
+    expect(recovered.status).toBe(200);
+    await recovered.arrayBuffer();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(billing.reserve).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      recoveringNotSentRequest: false,
+    }));
+    expect(billing.reserve).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      recoveringNotSentRequest: true,
+    }));
+    expect(billing.settle).toHaveBeenCalledOnce();
+  });
+
+  it('marks a reservation uncertain when provider delivery cannot be proven', async () => {
     const meteredRoute: EdgeModelRouteV1 = {
       ...primaryRoute,
       metering: { type: 'openai_tokens', reserveUnits: 2_000 },
@@ -965,11 +1020,15 @@ describe('otto edge gateway', () => {
       limits: { ...limits, maxRouteAttempts: 1 },
     });
     const failure = await failed.gateway.fetch(failed.request({ model: 'otto-fast', messages: [] }));
-    expect(failure.status).toBe(502);
-    await Promise.resolve();
-    expect(failedBilling.release).toHaveBeenCalledWith(expect.objectContaining({
-      reason: 'no_usable_route',
+    expect(failure.status).toBe(409);
+    await expect(failure.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED' },
+    });
+    expect(failedBilling.markUncertain).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'provider_error',
+      routeId: 'route_primary',
     }));
+    expect(failedBilling.release).not.toHaveBeenCalled();
   });
 
   it('aborts an idle upstream stream and records a content-free timeout outcome', async () => {
@@ -1236,7 +1295,10 @@ describe('otto edge gateway', () => {
       model: 'otto-fast', messages: [],
     }));
 
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED' },
+    });
     expect((providerSignal as AbortSignal | null)?.aborted).toBe(true);
     expect(values.outcomes).toEqual([
       expect.objectContaining({ outcome: 'upstream_failed', upstreamStatus: null }),
@@ -1768,13 +1830,31 @@ describe('otto edge gateway', () => {
       }));
       expect(rejectedOverride.status).toBe(400);
       expect(rejectedOverride.headers.get('x-otto-edge-request-id'))
-        .toBe('edge_request_fixture');
+        .toMatch(/^edge_request_fixture(?:_\d+)?$/);
     }
     expect(fetchMock).not.toHaveBeenCalled();
+
+    const requestId = 'edge_failover_503';
+    const firstAttempt = await values.gateway.fetch(values.request({
+      model: 'otto-fast',
+      messages: [],
+    }, { headers: { 'idempotency-key': requestId } }));
+    expect(firstAttempt.status).toBe(409);
+    await expect(firstAttempt.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED' },
+    });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://provider-a.test/v1/chat/completions',
+    ]);
 
     const response = await values.gateway.fetch(values.request({
       model: 'otto-fast',
       messages: [],
+    }, {
+      headers: {
+        'idempotency-key': requestId,
+        'x-otto-provider-switch-confirmation': requestId,
+      },
     }));
     expect(response.status).toBe(200);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
@@ -1796,9 +1876,23 @@ describe('otto edge gateway', () => {
           PROVIDER_B_API_KEY: 'secondary-secret',
         },
       });
-      expect((await retryable.gateway.fetch(retryable.request({
+      const retryableRequestId = `edge_failover_${retryableStatus}`;
+      const firstRetryable = await retryable.gateway.fetch(retryable.request({
         model: 'otto-fast', messages: [],
-      }))).status).toBe(200);
+      }, { headers: { 'idempotency-key': retryableRequestId } }));
+      expect(firstRetryable.status).toBe(409);
+      await expect(firstRetryable.json()).resolves.toMatchObject({
+        error: { code: 'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED' },
+      });
+      const confirmed = await retryable.gateway.fetch(retryable.request({
+        model: 'otto-fast', messages: [],
+      }, {
+        headers: {
+          'idempotency-key': retryableRequestId,
+          'x-otto-provider-switch-confirmation': retryableRequestId,
+        },
+      }));
+      expect(confirmed.status).toBe(200);
       expect(retryableFetch).toHaveBeenCalledTimes(2);
     }
 
@@ -1854,22 +1948,34 @@ describe('otto edge gateway', () => {
       now: () => current,
       secretResolver: { get: secretGet },
     });
-    const send = async () => {
+    let requestSequence = 0;
+    const send = async (requestId = `edge_breaker_${++requestSequence}`, confirm = false) => {
       const response = await values.gateway.fetch(values.request({
         model: 'otto-fast', messages: [],
+      }, {
+        headers: {
+          'idempotency-key': requestId,
+          ...(confirm ? { 'x-otto-provider-switch-confirmation': requestId } : {}),
+        },
       }));
       await response.text();
       return response;
     };
 
-    expect((await send()).status).toBe(200);
+    const firstRequestId = 'edge_breaker_first';
+    expect((await send(firstRequestId)).status).toBe(409);
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
       primaryRoute.upstreamUrl,
-      fallbackRoute.upstreamUrl,
     ]);
     expect(secretGet.mock.calls.filter(([binding]) => binding === 'PROVIDER_A_API_KEY'))
       .toHaveLength(1);
     expect(breaker.snapshot().openRoutes).toBe(1);
+
+    expect((await send(firstRequestId, true)).status).toBe(200);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      primaryRoute.upstreamUrl,
+      fallbackRoute.upstreamUrl,
+    ]);
 
     expect((await send()).status).toBe(200);
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
@@ -1972,8 +2078,23 @@ describe('otto edge gateway', () => {
         PROVIDER_B_API_KEY: 'secondary-secret',
       },
     });
+    const requestId = 'edge_network_exception';
+    const uncertain = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }, { headers: { 'idempotency-key': requestId } }));
+    expect(uncertain.status).toBe(409);
+    await expect(uncertain.json()).resolves.toMatchObject({
+      error: { code: 'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED' },
+    });
+    expect(networkFetch).toHaveBeenCalledOnce();
+
     const recovered = await values.gateway.fetch(values.request({
       model: 'otto-fast', messages: [],
+    }, {
+      headers: {
+        'idempotency-key': requestId,
+        'x-otto-provider-switch-confirmation': requestId,
+      },
     }));
     expect(recovered.status).toBe(200);
     expect(networkFetch).toHaveBeenCalledTimes(2);
@@ -2200,7 +2321,7 @@ describe('otto edge gateway', () => {
     expect(upstreamHeaders.get('accept')).toBe('application/json');
     expect(upstreamHeaders.get('cookie')).toBeNull();
     expect(normalized.headers.get('cache-control')).toBe('no-store');
-    expect(normalized.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    expect(normalized.headers.get('x-otto-edge-request-id')).toMatch(/^edge_request_fixture(?:_\d+)?$/);
     expect(normalized.headers.get('x-ratelimit-remaining')).toBe('7');
     expect(values.outcomes.at(-1)?.durationMs).toBe(0);
   });
@@ -2222,13 +2343,13 @@ describe('otto edge gateway', () => {
     });
     const response = await values.gateway.fetch(values.request({ model: publicModel, messages: [] }));
     expect(response.status).toBe(200);
-    expect(response.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    expect(response.headers.get('x-otto-edge-request-id')).toMatch(/^edge_request_fixture(?:_\d+)?$/);
     await expect(response.text()).resolves.toBe('{}');
     expect(values.outcomes.at(-1)?.durationMs).toBe(125);
 
     const rejected = await values.gateway.fetch(values.request({ model: 7, messages: [] }));
     expect(rejected.status).toBe(400);
-    expect(rejected.headers.get('x-otto-edge-request-id')).toBe('edge_request_fixture');
+    expect(rejected.headers.get('x-otto-edge-request-id')).toMatch(/^edge_request_fixture(?:_\d+)?$/);
   });
 
   it('keeps endpoint selection and equal-priority failover deterministic', async () => {

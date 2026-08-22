@@ -192,6 +192,56 @@ describe('Control-backed Edge billing coordinator', () => {
     }
   });
 
+  it('rejects a replayed Control hold before provider execution can continue', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/v1/billing/holds') {
+        return response({ hold: { id: HOLD_ONE }, replayed: true });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const coordinator = await create(
+      fetchMock,
+      signer(),
+      join(directory, 'replayed-hold.ndjson'),
+      { bootstrapReceiptKey: false },
+    );
+
+    await expect(coordinator.reserve({
+      ...identity('request_edge_replayed_hold'),
+      reserveUnits: 100,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'EDGE_REQUEST_REPLAYED',
+    });
+    expect(coordinator.operationalStatus().activeReservations).toBe(0);
+  });
+
+  it('adopts a replayed Control hold only for ledger-proven not-sent recovery', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/v1/billing/holds') {
+        return response({ hold: { id: HOLD_ONE }, replayed: true });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const coordinator = await create(
+      fetchMock,
+      signer(),
+      join(directory, 'recovered-hold.ndjson'),
+      { bootstrapReceiptKey: false },
+    );
+    const request = {
+      ...identity('request_edge_recovered_hold'),
+      reserveUnits: 100,
+      recoveringNotSentRequest: true,
+    };
+
+    await expect(coordinator.reserve(request)).resolves.toEqual({ reservationId: HOLD_ONE });
+    await expect(coordinator.reserve(request)).resolves.toEqual({ reservationId: HOLD_ONE });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(coordinator.operationalStatus().activeReservations).toBe(1);
+  });
   it('submits node-bound receipts through the ordered Control aggregation endpoint', async () => {
     const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
@@ -548,7 +598,7 @@ describe('Control-backed Edge billing coordinator', () => {
     expect(journal).toContain('released');
   });
 
-  it('coalesces concurrent reservations and never reuses a finalized request ID', async () => {
+  it('rejects concurrent reservations and never reuses a finalized request ID', async () => {
     let holds = 0;
     let releaseBody: Record<string, unknown> | undefined;
     let release: (() => void) | undefined;
@@ -573,15 +623,16 @@ describe('Control-backed Edge billing coordinator', () => {
     const request = identity('request_edge_coalesced');
     const first = coordinator.reserve({ ...request, reserveUnits: 100 });
     const second = coordinator.reserve({ ...request, reserveUnits: 100 });
+    await expect(second).rejects.toMatchObject({
+      status: 409,
+      code: 'EDGE_REQUEST_REPLAYED',
+    });
     release!();
-    await expect(Promise.all([first, second])).resolves.toEqual([
-      { reservationId: HOLD_ONE },
-      { reservationId: HOLD_ONE },
-    ]);
-    expect(holds).toBe(1);
-    const reservation = await coordinator.reserve({ ...request, reserveUnits: 100 });
+    const reservation = await first;
     expect(reservation).toEqual({ reservationId: HOLD_ONE });
     expect(holds).toBe(1);
+    await expect(coordinator.reserve({ ...request, reserveUnits: 100 }))
+      .rejects.toMatchObject({ status: 409, code: 'EDGE_REQUEST_REPLAYED' });
     await coordinator.release({
       ...request, reservation, reason: 'zero_usage', occurredAtMs: NOW,
     });
@@ -612,7 +663,7 @@ describe('Control-backed Edge billing coordinator', () => {
       lastReceiptSequence: 0,
     });
     await expect(second.reserve({ ...request, reserveUnits: 100 }))
-      .resolves.toEqual({ reservationId: HOLD_ONE });
+      .rejects.toMatchObject({ status: 409, code: 'EDGE_REQUEST_REPLAYED' });
     expect(secondFetch).not.toHaveBeenCalled();
   });
 
@@ -1020,6 +1071,45 @@ describe('Control-backed Edge billing coordinator', () => {
       );
       const pending = coordinator.reserve({
         ...identity('request_edge_timeout'), reserveUnits: 100,
+      });
+      const rejection = expect(pending).rejects.toMatchObject({
+        status: 503,
+        code: 'EDGE_BILLING_UNAVAILABLE',
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      await rejection;
+      expect(signal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the Control deadline active while the response body is stalled', async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {
+        signal = init?.signal ?? undefined;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            signal?.addEventListener(
+              'abort',
+              () => controller.error(signal?.reason),
+              { once: true },
+            );
+          },
+        });
+        return new Response(body, {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      const coordinator = await create(
+        fetchMock, signer(), join(directory, 'body-timeout.ndjson'),
+        { bootstrapReceiptKey: false, requestTimeoutMs: 500 },
+      );
+      const pending = coordinator.reserve({
+        ...identity('request_edge_body_timeout'), reserveUnits: 100,
       });
       const rejection = expect(pending).rejects.toMatchObject({
         status: 503,

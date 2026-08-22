@@ -57,6 +57,7 @@ import {
   type EdgeRequestLimits,
   loadEdgeRequestLimits,
 } from './request-limits.js';
+import { FileEdgeRequestLedger } from './request-ledger.js';
 import {
   type EdgeUpstreamResponseLimits,
   loadEdgeUpstreamResponseLimits,
@@ -104,6 +105,7 @@ type EdgeBillingConfiguration =
       type: 'control';
       receiptPrivateKeyFile: string;
       journalFile: string;
+      requestJournalFile: string;
       nodeId?: string;
       retryIntervalMs?: number;
     };
@@ -249,12 +251,15 @@ function billingConfiguration(
   if (nodeId && !/^edge_[a-f0-9]{32}$/u.test(nodeId)) {
     throw new Error('OTTO_EDGE_BILLING_NODE_ID must be edge_ followed by 32 lowercase hex characters');
   }
+  const journalFile = requiredEnvironment('OTTO_EDGE_BILLING_JOURNAL_FILE', environment);
   return {
     type: 'control',
     receiptPrivateKeyFile: requiredEnvironment(
       'OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE', environment,
     ),
-    journalFile: requiredEnvironment('OTTO_EDGE_BILLING_JOURNAL_FILE', environment),
+    journalFile,
+    requestJournalFile: environment.OTTO_EDGE_REQUEST_JOURNAL_FILE?.trim()
+      || `${journalFile}.requests`,
     nodeId,
     retryIntervalMs: optionalInteger(
       'OTTO_EDGE_BILLING_RETRY_INTERVAL_MS', environment, 1_000, 60 * 60 * 1000,
@@ -708,6 +713,11 @@ export async function startEdgeGatewayServer(): Promise<void> {
       nodeId: config.billing.nodeId,
     });
   }
+  const requestLedger = config.billing.type === 'control'
+    ? await FileEdgeRequestLedger.create({
+        journalFile: config.billing.requestJournalFile,
+      })
+    : undefined;
   const operationsToken = config.operationsTokenFile
     ? await loadEdgeOperationsToken(config.operationsTokenFile)
     : undefined;
@@ -733,6 +743,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
     circuitBreaker,
     lifecycle,
     billingCoordinator,
+    requestLedger,
     readinessProbe: createEdgeGatewayReadinessProbe({
       policySource: configuredPolicySource,
       rateLimiter,
