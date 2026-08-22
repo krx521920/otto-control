@@ -78,6 +78,12 @@ function configureWriteActions() {
     ['issue-license-button', 'license.issue'],
   ];
   actions.forEach(([id, permission]) => byId(id).classList.toggle('hidden', !hasPermission(permission)));
+  const enrollmentButton = byId('create-deployment-enrollment-button');
+  const canProvisionEnterprise = hasPermission('enterprise.provision')
+    && hasPermission('deployment.create')
+    && hasPermission('license.issue');
+  enrollmentButton.disabled = !canProvisionEnterprise;
+  enrollmentButton.classList.toggle('hidden', !canProvisionEnterprise);
 }
 function replaceOptions(id, records, label) {
   const list = byId(id);

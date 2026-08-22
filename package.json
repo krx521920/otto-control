@@ -9,12 +9,21 @@
   },
   "scripts": {
     "bootstrap:production": "node scripts/bootstrap-production.mjs",
+    "bootstrap:edge": "node scripts/bootstrap-edge-production.mjs",
+    "accept:edge:runtime-failures": "node scripts/drill-edge-runtime-failures.mjs",
+    "accept:edge:key-revocation": "node scripts/drill-edge-key-revocation.mjs",
+    "accept:edge:load": "node scripts/edge-gateway-acceptance.mjs",
+    "accept:esa:keyring-revocation": "node scripts/drill-esa-keyring-revocation.mjs",
+    "preflight:esa:iac": "node scripts/preflight-aliyun-esa-iac.mjs",
+    "reconcile:edge:billing": "node scripts/reconcile-edge-billing.mjs",
+    "check:edge:assurance": "node scripts/check-edge-release-assurance.mjs",
     "preflight:deployment": "node scripts/preflight-deployment.mjs",
     "backup:production": "sh deploy/backup-postgres.sh",
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run lint && npm run typecheck && npm run check:scripts && npm test && npm run build",
-    "check:scripts": "node --check scripts/smoke-federation.mjs",
+    "check:scripts": "node --check scripts/smoke-federation.mjs && node --check scripts/bootstrap-edge-production.mjs && node --check scripts/edge-fault-provider.mjs && node --check scripts/drill-edge-runtime-failures.mjs && node --check scripts/drill-edge-key-revocation.mjs && node --check scripts/drill-esa-keyring-revocation.mjs && node --check scripts/edge-gateway-acceptance.mjs && node --check scripts/edge-live-evidence.mjs && node --check scripts/preflight-aliyun-esa-iac.mjs && node --check scripts/reconcile-edge-billing.mjs && node --check scripts/check-edge-release-assurance.mjs",
     "dev": "tsx watch src/server.ts",
+    "dev:edge": "tsx watch src/edge-gateway/server.ts",
     "dev:federation": "tsx watch src/federation-server.ts",
     "drill:restore:production": "sh deploy/drill-restore-postgres.sh",
     "drill:failover:production": "sh deploy/drill-postgres-failover.sh --confirm=FAILOVER_OTTO_CONTROL",
@@ -28,11 +37,18 @@
     "drill:audit:object-lock": "node scripts/drill-object-lock.mjs",
     "lint": "eslint .",
     "start": "node dist/server.js",
+    "start:edge": "node dist/edge-gateway/server.js",
     "start:federation": "node dist/federation-server.js",
     "restore:production": "sh deploy/restore-postgres.sh",
+    "upgrade:edge:production": "sh deploy/upgrade-edge-gateway.sh",
+    "rollback:edge:production": "sh deploy/rollback-edge-gateway.sh",
     "backup:pitr:production": "sh deploy/backup-pitr-postgres.sh diff",
     "attest:release": "node scripts/attest-release-artifact.mjs",
     "test": "vitest run",
+    "test:edge": "vitest run edge-gateway edge-live-evidence edge-release-assurance",
+    "test:mutation": "stryker run",
+    "test:mutation:dry": "stryker run --dryRunOnly",
+    "test:property": "vitest run test/edge-gateway-properties.test.ts",
     "test:postgres": "vitest run test/postgres-integration.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -56,16 +72,23 @@
     "@smithy/credential-provider-imds": "^4.4.16",
     "fastify": "^5.8.5",
     "pg": "^8.16.3",
-    "prom-client": "^15.1.3"
+    "prom-client": "^15.1.3",
+    "redis": "4.7.1"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "^9.6.1",
+    "@stryker-mutator/vitest-runner": "^9.6.1",
     "@types/node": "^26.1.0",
     "@types/pg": "^8.15.5",
     "eslint": "^10.8.0",
+    "fast-check": "^4.9.0",
     "globals": "^17.8.0",
     "tsx": "^4.20.3",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.65.0",
     "vitest": "^3.2.7"
+  },
+  "overrides": {
+    "qs": "6.15.3"
   }
 }

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type {
   AuditEventInput,
   CommercialInventorySnapshot,
@@ -9,6 +11,9 @@ import type {
   CustomerRecord,
   DeploymentUpdateAssignmentRecord,
   DeploymentRecord,
+  DeploymentEnrollmentRecord,
+  DeploymentEnrollmentReservation,
+  EdgeGatewayPolicyRecord,
   LicenseLifecycleEventRecord,
   LicenseRecord,
   LicenseSeatUsageRecord,
@@ -46,7 +51,11 @@ import type {
   CreditMutationResult,
   CreditStatement,
   CreditTransactionRecord,
+  EdgeBillingAggregationEventRecord,
+  EdgeBillingAggregationStatus,
+  EdgeBillingNodeRecord,
   ExecutionReceiptKeyRecord,
+  ExecutionReceiptHoldMutationResult,
   ExecutionReceiptMutationResult,
   ExecutionReceiptRecord,
   OttoBillingModule,
@@ -74,7 +83,7 @@ import type {
   AuditWitnessReceiptRecord,
 } from '../../src/contracts/audit-witness.js';
 import { AUDIT_GENESIS_HASH, auditEventHash } from '../../src/audit-chain.js';
-import { conflict } from '../../src/errors.js';
+import { conflict, creditRequired } from '../../src/errors.js';
 
 const role = (
   id: string,
@@ -83,7 +92,7 @@ const role = (
 ): AdminRoleRecord => ({ id, name, permissions, system: true });
 
 const ALL_PERMISSIONS: AdminPermission[] = [
-  'commercial.read', 'customer.create', 'deployment.create', 'license.issue', 'license.read',
+  'commercial.read', 'customer.create', 'deployment.create', 'enterprise.provision', 'license.issue', 'license.read',
   'license.export',
   'license.revoke', 'license.manage', 'license.transfer', 'license.usage.read',
   'signing_key.read', 'signing_key.manage', 'telemetry.read',
@@ -93,9 +102,35 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'update_release.publish', 'identity.read', 'identity.manage', 'approval.request',
   'approval.read', 'approval.decide',
   'billing.read', 'billing.topup', 'billing.manage', 'billing.refund',
+  'edge_gateway.read', 'edge_gateway.manage',
   'audit.read', 'audit.export', 'audit.verify', 'audit.anchor.manage',
   'customer_delivery.read',
 ];
+
+function retireDeploymentEnrollment(
+  record: DeploymentEnrollmentRecord,
+  retiredAt: Date,
+): DeploymentEnrollmentRecord {
+  return {
+    ...record,
+    status: record.status === 'activated' ? 'activated' : 'revoked',
+    tokenHash: createHash('sha256')
+      .update('retired-deployment-enrollment:' + record.id)
+      .digest('hex'),
+    requestHash: null,
+    provisioningCiphertext: null,
+    deploymentId: null,
+    machineFingerprint: null,
+    claimLeaseId: null,
+    claimLeaseExpiresAt: null,
+    replayExpiresAt: null,
+    appVersion: null,
+    buildCommit: null,
+    publicOrigin: null,
+    deploymentKind: null,
+    updatedAt: retiredAt,
+  };
+}
 
 interface StoredTelemetryEvent extends OttoTelemetryEvent {
   deploymentId: string;
@@ -106,6 +141,9 @@ interface StoredTelemetryEvent extends OttoTelemetryEvent {
 export class MemoryControlStore implements ControlStore {
   readonly customers = new Map<string, CustomerRecord>();
   readonly deployments = new Map<string, DeploymentRecord>();
+  readonly deploymentEnrollments = new Map<string, DeploymentEnrollmentRecord>();
+  readonly edgeGatewayPolicies = new Map<string, EdgeGatewayPolicyRecord>();
+  readonly edgeGatewayNonces = new Map<string, number>();
   readonly licenses = new Map<string, LicenseRecord>();
   readonly licenseLifecycleEvents: LicenseLifecycleEventRecord[] = [];
   readonly licenseSeatUsage = new Map<string, LicenseSeatUsageRecord>();
@@ -135,6 +173,8 @@ export class MemoryControlStore implements ControlStore {
   readonly executionReceiptKeys = new Map<string, ExecutionReceiptKeyRecord>();
   readonly executionReceipts = new Map<string, ExecutionReceiptRecord>();
   readonly executionReceiptSequences = new Map<string, number>();
+  readonly edgeBillingNodes = new Map<string, EdgeBillingNodeRecord>();
+  readonly edgeBillingEvents = new Map<string, EdgeBillingAggregationEventRecord>();
   readonly alertDeliveries = new Map<string, AlertDeliveryRecord>();
   readonly auditAnchors = new Map<string, AuditAnchorRecord>();
   readonly auditWitnessReceipts: AuditWitnessReceiptRecord[] = [];
@@ -183,6 +223,10 @@ export class MemoryControlStore implements ControlStore {
     };
     this.customers.set(customer.id, customer);
     return customer;
+  }
+
+  async getCustomer(id: string): Promise<CustomerRecord | null> {
+    return this.customers.get(id) ?? null;
   }
 
   async getCommercialInventory(input: {
@@ -263,6 +307,188 @@ export class MemoryControlStore implements ControlStore {
 
   async getDeployment(id: string): Promise<DeploymentRecord | null> {
     return this.deployments.get(id) ?? null;
+  }
+
+  async createDeploymentEnrollment(input: {
+    id: string;
+    tokenHash: string;
+    customerId: string;
+    organizationId: string;
+    deploymentName: string;
+    plan: string;
+    licenseExpiresAtMs: number;
+    seatLimit: number;
+    modules: DeploymentEnrollmentRecord['modules'];
+    telemetryAllowed: boolean;
+    federationGatewayUrl: string | null;
+    modelGatewayUrl: string | null;
+    telemetryEndpoint: string | null;
+    updateDistributionId: string | null;
+    provisioningCiphertext: string | null;
+    licenseId: string;
+    expiresAt: Date;
+  }): Promise<DeploymentEnrollmentRecord> {
+    if (!this.customers.has(input.customerId)) throw new Error('customer does not exist');
+    const now = new Date();
+    const record: DeploymentEnrollmentRecord = {
+      ...input,
+      requestHash: null,
+      modules: [...input.modules],
+      status: 'pending',
+      deploymentId: null,
+      machineFingerprint: null,
+      claimLeaseId: null,
+      claimLeaseExpiresAt: null,
+      replayExpiresAt: null,
+      appVersion: null,
+      buildCommit: null,
+      publicOrigin: null,
+      deploymentKind: null,
+      claimedAt: null,
+      activatedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.deploymentEnrollments.set(record.id, record);
+    return structuredClone(record);
+  }
+
+  async reserveDeploymentEnrollmentClaim(input: {
+    tokenHash: string;
+    requestHash: string;
+    deploymentId: string;
+    machineFingerprint: string;
+    claimLeaseId: string;
+    claimLeaseExpiresAt: Date;
+    appVersion: string;
+    buildCommit: string;
+    publicOrigin: string | null;
+    deploymentKind: string;
+    now: Date;
+  }): Promise<DeploymentEnrollmentReservation | null> {
+    const record = [...this.deploymentEnrollments.values()]
+      .find((candidate) => candidate.tokenHash === input.tokenHash);
+    if (!record) {
+      return null;
+    }
+    if (record.status === 'revoked' || record.expiresAt <= input.now) {
+      this.deploymentEnrollments.set(
+        record.id,
+        retireDeploymentEnrollment(record, input.now),
+      );
+      return null;
+    }
+    if (
+      (record.requestHash !== null && record.requestHash !== input.requestHash)
+      || (record.deploymentId !== null && record.deploymentId !== input.deploymentId)
+      || (
+        record.machineFingerprint !== null
+        && record.machineFingerprint !== input.machineFingerprint
+      )
+    ) {
+      return null;
+    }
+    if (record.status === 'activated') {
+      if (!record.replayExpiresAt || record.replayExpiresAt <= input.now) {
+        this.deploymentEnrollments.set(
+          record.id,
+          retireDeploymentEnrollment(record, input.now),
+        );
+        return null;
+      }
+      return { state: 'activated', enrollment: structuredClone(record) };
+    }
+    if (
+      record.status === 'claiming'
+      && record.claimLeaseExpiresAt
+      && record.claimLeaseExpiresAt > input.now
+    ) {
+      return { state: 'in_progress', enrollment: structuredClone(record) };
+    }
+    const updated: DeploymentEnrollmentRecord = {
+      ...record,
+      status: 'claiming',
+      requestHash: input.requestHash,
+      deploymentId: input.deploymentId,
+      machineFingerprint: input.machineFingerprint,
+      claimLeaseId: input.claimLeaseId,
+      claimLeaseExpiresAt: input.claimLeaseExpiresAt,
+      appVersion: input.appVersion,
+      buildCommit: input.buildCommit,
+      publicOrigin: input.publicOrigin,
+      deploymentKind: input.deploymentKind,
+      claimedAt: record.claimedAt ?? input.now,
+      updatedAt: input.now,
+    };
+    this.deploymentEnrollments.set(updated.id, updated);
+    return { state: 'reserved', enrollment: structuredClone(updated) };
+  }
+
+  async completeDeploymentEnrollmentClaim(input: {
+    enrollmentId: string;
+    claimLeaseId: string;
+    activatedAt: Date;
+    replayExpiresAt: Date;
+    provisioningCiphertext: string | null;
+  }): Promise<DeploymentEnrollmentRecord | null> {
+    const record = this.deploymentEnrollments.get(input.enrollmentId);
+    if (
+      !record
+      || record.status !== 'claiming'
+      || record.claimLeaseId !== input.claimLeaseId
+    ) {
+      return null;
+    }
+    const updated: DeploymentEnrollmentRecord = {
+      ...record,
+      status: 'activated',
+      claimLeaseId: null,
+      claimLeaseExpiresAt: null,
+      replayExpiresAt: input.replayExpiresAt,
+      provisioningCiphertext: input.provisioningCiphertext,
+      activatedAt: input.activatedAt,
+      updatedAt: input.activatedAt,
+    };
+    this.deploymentEnrollments.set(updated.id, updated);
+    return structuredClone(updated);
+  }
+  async upsertEdgeGatewayPolicy(
+    input: Omit<EdgeGatewayPolicyRecord, 'createdAt' | 'updatedAt'> & { changedAt: Date },
+  ): Promise<EdgeGatewayPolicyRecord> {
+    const existing = this.edgeGatewayPolicies.get(input.deploymentId);
+    const record: EdgeGatewayPolicyRecord = {
+      deploymentId: input.deploymentId,
+      organizationId: input.organizationId,
+      policyVersion: input.policyVersion,
+      routes: structuredClone(input.routes),
+      limits: structuredClone(input.limits),
+      status: input.status,
+      updatedBy: input.updatedBy,
+      createdAt: existing?.createdAt ?? input.changedAt,
+      updatedAt: input.changedAt,
+    };
+    this.edgeGatewayPolicies.set(input.deploymentId, record);
+    return structuredClone(record);
+  }
+
+  async getEdgeGatewayPolicy(deploymentId: string): Promise<EdgeGatewayPolicyRecord | null> {
+    const record = this.edgeGatewayPolicies.get(deploymentId);
+    return record ? structuredClone(record) : null;
+  }
+
+  async consumeEdgeGatewayNonce(input: {
+    deploymentId: string;
+    nonce: string;
+    nowMs: number;
+    expiresAtMs: number;
+  }): Promise<boolean> {
+    for (const [key, expiresAtMs] of this.edgeGatewayNonces) {
+      if (expiresAtMs < input.nowMs) this.edgeGatewayNonces.delete(key);
+    }
+    const key = `${input.deploymentId}\0${input.nonce}`;
+    if (this.edgeGatewayNonces.has(key)) return false;
+    this.edgeGatewayNonces.set(key, input.expiresAtMs);
+    return true;
   }
 
   async createLicense(input: CreateLicenseRecordInput): Promise<LicenseRecord> {
@@ -1307,7 +1533,9 @@ export class MemoryControlStore implements ControlStore {
         replayed: true,
       };
     }
-    if (current.availableBalance < input.amount) throw conflict('insufficient available credits');
+    if (current.availableBalance < input.amount) {
+      throw creditRequired('insufficient available credits');
+    }
     const account = this.#updateCreditAccount(current, {
       availableBalance: current.availableBalance - input.amount,
       frozenBalance: current.frozenBalance + input.amount,
@@ -1641,6 +1869,7 @@ export class MemoryControlStore implements ControlStore {
     envelope: SignedExecutionReceiptV2;
     metadata: Record<string, unknown>;
     receivedAt: Date;
+    edgeNodeId?: string;
   }): Promise<ExecutionReceiptMutationResult> {
     const evidence = input.envelope.receipt;
     const current = this.#creditAccount(input.customerId, evidence.organizationId, true)!;
@@ -1665,6 +1894,7 @@ export class MemoryControlStore implements ControlStore {
         signature: replay.signature,
       };
       if (replay.customerId !== input.customerId
+        || (replay.edgeNodeId ?? null) !== (input.edgeNodeId ?? null)
         || JSON.stringify(replayEvidence) !== JSON.stringify(input.envelope)) {
         throw conflict('execution receipt id was already used for different evidence');
       }
@@ -1674,7 +1904,15 @@ export class MemoryControlStore implements ControlStore {
     }
     const key = await this.getExecutionReceiptKey(evidence.deploymentId, input.envelope.signingKeyId);
     if (!key || key.status !== 'active') throw conflict('execution receipt signing key is inactive');
-    const expectedSequence = (this.executionReceiptSequences.get(evidence.deploymentId) ?? 0) + 1;
+    const node = input.edgeNodeId ? this.edgeBillingNodes.get(input.edgeNodeId) : null;
+    if (input.edgeNodeId && (!node || node.status !== 'active'
+      || node.deploymentId !== evidence.deploymentId
+      || node.organizationId !== evidence.organizationId
+      || node.signingKeyId !== input.envelope.signingKeyId)) {
+      throw conflict('edge billing node binding is inactive');
+    }
+    const expectedSequence = (node?.lastSequence
+      ?? this.executionReceiptSequences.get(evidence.deploymentId) ?? 0) + 1;
     if (evidence.sequence !== expectedSequence) {
       throw conflict(`execution receipt sequence must be ${expectedSequence}`);
     }
@@ -1710,6 +1948,7 @@ export class MemoryControlStore implements ControlStore {
     const receipt: ExecutionReceiptRecord = {
       ...evidence,
       customerId: input.customerId,
+      edgeNodeId: input.edgeNodeId ?? null,
       signingKeyId: input.envelope.signingKeyId,
       signature: input.envelope.signature,
       transactionId: input.transactionId,
@@ -1718,8 +1957,146 @@ export class MemoryControlStore implements ControlStore {
     };
     this.creditTransactions.set(transaction.id, transaction);
     this.executionReceipts.set(receipt.receiptId, receipt);
-    this.executionReceiptSequences.set(receipt.deploymentId, receipt.sequence);
+    if (node) {
+      this.edgeBillingNodes.set(node.nodeId, {
+        ...node, lastSequence: receipt.sequence, lastSeenAt: input.receivedAt,
+        updatedAt: input.receivedAt,
+      });
+    } else this.executionReceiptSequences.set(receipt.deploymentId, receipt.sequence);
     return { account, transaction, receipt, replayed: false };
+  }
+
+  async settleCreditHoldWithExecutionReceipt(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    amount: number;
+    envelope: SignedExecutionReceiptV2;
+    metadata: Record<string, unknown>;
+    receivedAt: Date;
+    edgeNodeId?: string;
+  }): Promise<ExecutionReceiptHoldMutationResult | null> {
+    const evidence = input.envelope.receipt;
+    const hold = this.creditHolds.get(input.holdId);
+    if (!hold || hold.customerId !== input.customerId) return null;
+    const current = this.#creditAccount(input.customerId, hold.organizationId);
+    if (!current) return null;
+    const replay = this.executionReceipts.get(evidence.receiptId);
+    if (replay) {
+      const replayEvidence = {
+        receipt: {
+          version: replay.version,
+          receiptId: replay.receiptId,
+          deploymentId: replay.deploymentId,
+          organizationId: replay.organizationId,
+          taskId: replay.taskId,
+          moduleId: replay.moduleId,
+          units: replay.units,
+          model: replay.model,
+          issuedAtMs: replay.issuedAtMs,
+          expiresAtMs: replay.expiresAtMs,
+          sequence: replay.sequence,
+          policyVersion: replay.policyVersion,
+        },
+        signingKeyId: replay.signingKeyId,
+        signature: replay.signature,
+      };
+      const transaction = this.creditTransactions.get(replay.transactionId);
+      if (replay.customerId !== input.customerId
+        || (replay.edgeNodeId ?? null) !== (input.edgeNodeId ?? null)
+        || JSON.stringify(replayEvidence) !== JSON.stringify(input.envelope)
+        || !transaction || transaction.type !== 'capture'
+        || transaction.metadata.holdId !== input.holdId) {
+        throw conflict('execution receipt id was already used for different evidence');
+      }
+      return { account: current, hold, transaction, receipt: replay, replayed: true };
+    }
+    if (hold.status !== 'active') throw conflict('credit hold is no longer active');
+    if (hold.expiresAt.getTime() <= input.receivedAt.getTime()) {
+      throw conflict('credit hold has expired');
+    }
+    if (hold.deploymentId !== evidence.deploymentId
+      || hold.organizationId !== evidence.organizationId
+      || hold.module !== evidence.moduleId) {
+      throw conflict('execution receipt does not match the credit hold');
+    }
+    const key = await this.getExecutionReceiptKey(evidence.deploymentId, input.envelope.signingKeyId);
+    if (!key || key.status !== 'active') throw conflict('execution receipt signing key is inactive');
+    const node = input.edgeNodeId ? this.edgeBillingNodes.get(input.edgeNodeId) : null;
+    if (input.edgeNodeId && (!node || node.status !== 'active'
+      || node.deploymentId !== evidence.deploymentId
+      || node.organizationId !== evidence.organizationId
+      || node.signingKeyId !== input.envelope.signingKeyId)) {
+      throw conflict('edge billing node binding is inactive');
+    }
+    const expectedSequence = (node?.lastSequence
+      ?? this.executionReceiptSequences.get(evidence.deploymentId) ?? 0) + 1;
+    if (evidence.sequence !== expectedSequence) {
+      throw conflict(`execution receipt sequence must be ${expectedSequence}`);
+    }
+    if ([...this.executionReceipts.values()].some((record) => (
+      record.deploymentId === evidence.deploymentId && record.taskId === evidence.taskId
+    ))) throw conflict('task already has a billed execution receipt');
+    const availableDelta = hold.amount - input.amount;
+    if (current.availableBalance + availableDelta < 0) {
+      throw conflict('insufficient available credits for settlement');
+    }
+    const account = this.#updateCreditAccount(current, {
+      availableBalance: current.availableBalance + availableDelta,
+      frozenBalance: current.frozenBalance - hold.amount,
+      totalConsumed: current.totalConsumed + input.amount,
+    }, input.receivedAt);
+    const updatedHold: CreditHoldRecord = {
+      ...hold,
+      status: 'captured',
+      updatedAt: input.receivedAt,
+    };
+    const metadata = {
+      ...input.metadata,
+      holdId: input.holdId,
+      executionReceiptId: evidence.receiptId,
+      receiptVerificationStatus: 'verified',
+    };
+    const transaction: CreditTransactionRecord = {
+      id: input.transactionId,
+      customerId: input.customerId,
+      organizationId: evidence.organizationId,
+      deploymentId: evidence.deploymentId,
+      module: evidence.moduleId,
+      type: 'capture',
+      availableDelta,
+      frozenDelta: -hold.amount,
+      billedAmount: input.amount,
+      availableAfter: account.availableBalance,
+      frozenAfter: account.frozenBalance,
+      idempotencyKey: `receipt:${evidence.receiptId}`,
+      referenceId: evidence.taskId,
+      relatedTransactionId: null,
+      description: 'Verified signed execution receipt settled against hold',
+      metadata,
+      occurredAt: new Date(evidence.issuedAtMs),
+      createdAt: input.receivedAt,
+    };
+    const receipt: ExecutionReceiptRecord = {
+      ...evidence,
+      customerId: input.customerId,
+      edgeNodeId: input.edgeNodeId ?? null,
+      signingKeyId: input.envelope.signingKeyId,
+      signature: input.envelope.signature,
+      transactionId: input.transactionId,
+      verificationStatus: 'verified',
+      receivedAt: input.receivedAt,
+    };
+    this.creditHolds.set(updatedHold.id, updatedHold);
+    this.creditTransactions.set(transaction.id, transaction);
+    this.executionReceipts.set(receipt.receiptId, receipt);
+    if (node) {
+      this.edgeBillingNodes.set(node.nodeId, {
+        ...node, lastSequence: receipt.sequence, lastSeenAt: input.receivedAt,
+        updatedAt: input.receivedAt,
+      });
+    } else this.executionReceiptSequences.set(receipt.deploymentId, receipt.sequence);
+    return { account, hold: updatedHold, transaction, receipt, replayed: false };
   }
 
   async getExecutionReceipt(receiptId: string): Promise<ExecutionReceiptRecord | null> {
@@ -1746,6 +2123,188 @@ export class MemoryControlStore implements ControlStore {
       ))
       .sort((left, right) => right.receivedAt.getTime() - left.receivedAt.getTime())
       .slice(0, input.limit);
+  }
+
+  async registerEdgeBillingNode(input: {
+    nodeId: string; deploymentId: string; organizationId: string;
+    signingKeyId: string; createdAt: Date;
+  }): Promise<EdgeBillingNodeRecord> {
+    const existing = this.edgeBillingNodes.get(input.nodeId);
+    if (existing) {
+      if (existing.deploymentId !== input.deploymentId
+        || existing.organizationId !== input.organizationId
+        || existing.signingKeyId !== input.signingKeyId) {
+        throw conflict('edge billing node id is already bound to another identity');
+      }
+      return existing;
+    }
+    if ([...this.edgeBillingNodes.values()].some((node) => (
+      node.deploymentId === input.deploymentId && node.signingKeyId === input.signingKeyId
+    ))) throw conflict('edge billing signing key is already bound');
+    const key = this.executionReceiptKeys.get(`${input.deploymentId}\0${input.signingKeyId}`);
+    if (!key) throw conflict('edge billing node key is not registered');
+    const node: EdgeBillingNodeRecord = {
+      ...input,
+      status: 'active',
+      lastSequence: 0,
+      lastSeenAt: null,
+      revokedAt: null,
+      updatedAt: input.createdAt,
+    };
+    this.edgeBillingNodes.set(node.nodeId, node);
+    return node;
+  }
+
+  async revokeEdgeBillingNode(input: {
+    nodeId: string; deploymentId: string; revokedAt: Date;
+  }): Promise<EdgeBillingNodeRecord | null> {
+    const node = this.edgeBillingNodes.get(input.nodeId);
+    if (!node || node.deploymentId !== input.deploymentId) return null;
+    const updated: EdgeBillingNodeRecord = {
+      ...node, status: 'revoked', revokedAt: input.revokedAt, updatedAt: input.revokedAt,
+    };
+    this.edgeBillingNodes.set(node.nodeId, updated);
+    return updated;
+  }
+
+  async getEdgeBillingNode(nodeId: string): Promise<EdgeBillingNodeRecord | null> {
+    return this.edgeBillingNodes.get(nodeId) ?? null;
+  }
+
+  async listEdgeBillingNodes(deploymentId: string): Promise<EdgeBillingNodeRecord[]> {
+    return [...this.edgeBillingNodes.values()]
+      .filter((node) => node.deploymentId === deploymentId)
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+  }
+
+  async enqueueEdgeBillingEvent(input: {
+    eventId: string; nodeId: string; nodeSequence: number; customerId: string;
+    deploymentId: string; organizationId: string; holdId: string | null;
+    envelope: SignedExecutionReceiptV2; payloadSha256: string; receivedAt: Date;
+  }): Promise<{ event: EdgeBillingAggregationEventRecord; replayed: boolean }> {
+    const existing = this.edgeBillingEvents.get(input.eventId);
+    if (existing) {
+      if (existing.payloadSha256 !== input.payloadSha256) {
+        throw conflict('edge billing event id was already used for different evidence');
+      }
+      return { event: existing, replayed: true };
+    }
+    const node = this.edgeBillingNodes.get(input.nodeId);
+    if (!node || node.status !== 'active' || node.deploymentId !== input.deploymentId
+      || node.organizationId !== input.organizationId
+      || node.signingKeyId !== input.envelope.signingKeyId) {
+      throw conflict('edge billing node binding is inactive');
+    }
+    if (input.nodeSequence <= node.lastSequence) {
+      throw conflict('edge billing event sequence was already finalized');
+    }
+    if ([...this.edgeBillingEvents.values()].some((event) => (
+      (event.nodeId === input.nodeId && event.nodeSequence === input.nodeSequence)
+      || event.envelope.receipt.receiptId === input.envelope.receipt.receiptId
+    ))) throw conflict('edge billing event was already submitted');
+    const event: EdgeBillingAggregationEventRecord = {
+      ...input,
+      state: 'pending',
+      attempts: 0,
+      nextAttemptAt: input.receivedAt,
+      lastErrorCode: null,
+      reconciledAt: null,
+      updatedAt: input.receivedAt,
+    };
+    this.edgeBillingEvents.set(event.eventId, event);
+    return { event, replayed: false };
+  }
+
+  async listReadyEdgeBillingEvents(input: {
+    now: Date; limit: number; nodeId?: string;
+  }): Promise<EdgeBillingAggregationEventRecord[]> {
+    return [...this.edgeBillingEvents.values()].filter((event) => {
+      const node = this.edgeBillingNodes.get(event.nodeId);
+      return Boolean(node && node.status === 'active'
+        && (!input.nodeId || event.nodeId === input.nodeId)
+        && (event.state === 'pending' || event.state === 'retrying')
+        && event.nextAttemptAt <= input.now
+        && (event.nodeSequence === node.lastSequence + 1
+          || (event.nodeSequence <= node.lastSequence
+            && this.executionReceipts.get(event.envelope.receipt.receiptId)?.edgeNodeId
+              === event.nodeId)));
+    }).sort((left, right) => left.nodeSequence - right.nodeSequence
+      || left.receivedAt.getTime() - right.receivedAt.getTime())
+      .slice(0, input.limit);
+  }
+
+  async markEdgeBillingEventReconciled(input: {
+    eventId: string; reconciledAt: Date;
+  }): Promise<EdgeBillingAggregationEventRecord | null> {
+    const event = this.edgeBillingEvents.get(input.eventId);
+    if (!event) return null;
+    const updated: EdgeBillingAggregationEventRecord = {
+      ...event, state: 'reconciled', reconciledAt: input.reconciledAt,
+      lastErrorCode: null, updatedAt: input.reconciledAt,
+    };
+    this.edgeBillingEvents.set(event.eventId, updated);
+    return updated;
+  }
+
+  async markEdgeBillingEventFailed(input: {
+    eventId: string; errorCode: string; nextAttemptAt: Date;
+    deadLetter: boolean; updatedAt: Date;
+  }): Promise<EdgeBillingAggregationEventRecord | null> {
+    const event = this.edgeBillingEvents.get(input.eventId);
+    if (!event || event.state === 'reconciled') return event ?? null;
+    const updated: EdgeBillingAggregationEventRecord = {
+      ...event, attempts: event.attempts + 1,
+      state: input.deadLetter ? 'dead_letter' : 'retrying',
+      lastErrorCode: input.errorCode, nextAttemptAt: input.nextAttemptAt,
+      updatedAt: input.updatedAt,
+    };
+    this.edgeBillingEvents.set(event.eventId, updated);
+    return updated;
+  }
+
+  async retryEdgeBillingDeadLetters(input: { now: Date; limit: number }): Promise<number> {
+    const events = [...this.edgeBillingEvents.values()]
+      .filter((event) => event.state === 'dead_letter')
+      .sort((left, right) => left.receivedAt.getTime() - right.receivedAt.getTime())
+      .slice(0, input.limit);
+    for (const event of events) {
+      this.edgeBillingEvents.set(event.eventId, {
+        ...event,
+        state: 'retrying',
+        attempts: 0,
+        nextAttemptAt: input.now,
+        lastErrorCode: null,
+        updatedAt: input.now,
+      });
+    }
+    return events.length;
+  }
+
+  async getEdgeBillingAggregationStatus(
+    deploymentId?: string,
+  ): Promise<EdgeBillingAggregationStatus> {
+    const nodes = [...this.edgeBillingNodes.values()]
+      .filter((node) => !deploymentId || node.deploymentId === deploymentId);
+    const nodeIds = new Set(nodes.map((node) => node.nodeId));
+    const events = [...this.edgeBillingEvents.values()].filter((event) => nodeIds.has(event.nodeId));
+    const pendingEvents = events.filter((event) => (
+      event.state === 'pending' || event.state === 'retrying'
+    ));
+    return {
+      nodes: nodes.length,
+      activeNodes: nodes.filter((node) => node.status === 'active').length,
+      revokedNodes: nodes.filter((node) => node.status === 'revoked').length,
+      pending: events.filter((event) => event.state === 'pending').length,
+      retrying: events.filter((event) => event.state === 'retrying').length,
+      deadLetter: events.filter((event) => event.state === 'dead_letter').length,
+      reconciled: events.filter((event) => event.state === 'reconciled').length,
+      sequenceGaps: nodes.filter((node) => pendingEvents.some((event) => (
+        event.nodeId === node.nodeId && event.nodeSequence > node.lastSequence + 1
+      ))).length,
+      oldestPendingAt: pendingEvents.length
+        ? new Date(Math.min(...pendingEvents.map((event) => event.receivedAt.getTime())))
+        : null,
+    };
   }
 
   async refundCredits(input: {

@@ -21,6 +21,14 @@ export const OPERATOR_CONSOLE_APPROVAL_ACTIONS = Object.freeze({
     label: '吊销执行收据公钥',
     permission: 'billing.manage',
   },
+  'billing.edge_node.register': {
+    label: '登记边缘计费节点',
+    permission: 'billing.manage',
+  },
+  'billing.edge_node.revoke': {
+    label: '撤销边缘计费节点',
+    permission: 'billing.manage',
+  },
   'customer_erasure.execute': {
     label: '执行客户数据注销',
     permission: 'customer_erasure.manage',
@@ -169,6 +177,7 @@ function approvalExecutionRequest(approval) {
         keyId: encodeURIComponent(approval.targetId.slice(receiptKeySeparator + 1)),
       }
     : null;
+  const edgeNodeTarget = receiptKeyTarget;
   const definitions = {
     'license.revoke': { path: '/v1/admin/licenses/' + id + '/revoke', method: 'POST' },
     'license.transfer_machine': { path: '/v1/admin/licenses/' + id + '/transfer-machine', method: 'POST', body: request },
@@ -184,6 +193,8 @@ function approvalExecutionRequest(approval) {
     'billing.refund': { path: '/v1/admin/billing/customers/' + id + '/refunds', method: 'POST', body: request },
     'billing.execution_receipt_key.register': { path: '/v1/admin/deployments/' + id + '/execution-receipt-keys', method: 'POST', body: request },
     'billing.execution_receipt_key.revoke': receiptKeyTarget ? { path: '/v1/admin/deployments/' + receiptKeyTarget.deploymentId + '/execution-receipt-keys/' + receiptKeyTarget.keyId + '/revoke', method: 'POST' } : null,
+    'billing.edge_node.register': { path: '/v1/admin/deployments/' + id + '/edge-billing-nodes', method: 'POST', body: request },
+    'billing.edge_node.revoke': edgeNodeTarget ? { path: '/v1/admin/deployments/' + edgeNodeTarget.deploymentId + '/edge-billing-nodes/' + edgeNodeTarget.keyId + '/revoke', method: 'POST' } : null,
     'customer_erasure.execute': { path: '/v1/admin/data-governance/erasure-requests/' + id + '/execute', method: 'POST', body: request },
     'legal_hold.create': { path: '/v1/admin/data-governance/legal-holds', method: 'POST', body: request },
     'legal_hold.release': { path: '/v1/admin/data-governance/legal-holds/' + id + '/release', method: 'POST', body: request },

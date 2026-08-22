@@ -40,6 +40,67 @@ export async function registerBillingRoutes(
       },
     );
 
+    admin.get<{ Params: { deploymentId: string } }>(
+      '/deployments/:deploymentId/edge-billing-nodes',
+      async (request) => {
+        await authenticateAdmin(request, options, 'billing.read');
+        return { nodes: await options.service.edgeBillingNodes(request.params.deploymentId) };
+      },
+    );
+
+    admin.post<{ Params: { deploymentId: string } }>(
+      '/deployments/:deploymentId/edge-billing-nodes',
+      async (request, reply) => {
+        const auth = await authenticateAdmin(request, options, 'billing.manage');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'billing.edge_node.register',
+          targetType: 'deployment',
+          targetId: request.params.deploymentId,
+          request: request.body ?? {},
+        });
+        const node = await options.service.registerEdgeBillingNode(
+          request.params.deploymentId, request.body, auth.actorId,
+        );
+        return reply.code(201).send({ node });
+      },
+    );
+
+    admin.post<{ Params: { deploymentId: string; nodeId: string } }>(
+      '/deployments/:deploymentId/edge-billing-nodes/:nodeId/revoke',
+      async (request) => {
+        const auth = await authenticateAdmin(request, options, 'billing.manage');
+        await consumeRouteApproval(request, options.identity, auth.principal, {
+          operation: 'billing.edge_node.revoke',
+          targetType: 'edge_billing_node',
+          targetId: `${request.params.deploymentId}:${request.params.nodeId}`,
+          request: {},
+        });
+        return { node: await options.service.revokeEdgeBillingNode(
+          request.params.deploymentId, request.params.nodeId, auth.actorId,
+        ) };
+      },
+    );
+
+    admin.get<{ Querystring: { deploymentId?: string } }>(
+      '/billing/edge-aggregation/status',
+      async (request) => {
+        await authenticateAdmin(request, options, 'billing.read');
+        return {
+          aggregation: await options.service.edgeBillingAggregationStatus(
+            request.query.deploymentId,
+          ),
+        };
+      },
+    );
+
+    admin.post<{ Body: { limit?: number } }>(
+      '/billing/edge-aggregation/retry',
+      async (request) => {
+        await authenticateAdmin(request, options, 'billing.manage');
+        return options.service.retryEdgeBillingDeadLetters(request.body?.limit ?? 100);
+      },
+    );
+
     admin.post<{ Params: { deploymentId: string } }>(
       '/deployments/:deploymentId/execution-receipt-keys',
       async (request, reply) => {
@@ -217,6 +278,16 @@ export async function registerBillingRoutes(
     return reply.code(result.replayed ? 200 : 201).send(result);
   });
 
+  app.post('/v1/billing/edge-events', {
+    config: { rateLimit: { max: 1_200, timeWindow: '1 minute', ban: 20 } },
+  }, async (request, reply) => {
+    const result = await options.service.submitEdgeBillingEvent(
+      request.body,
+      bearerToken(request),
+    );
+    return reply.code(result.replayed ? 200 : 202).send(result);
+  });
+
   app.post('/v1/billing/execution-receipt-keys/bootstrap', {
     config: { rateLimit: { max: 30, timeWindow: '1 minute', ban: 20 } },
   }, async (request, reply) => {
@@ -251,5 +322,20 @@ export async function registerBillingRoutes(
       request.body,
       bearerToken(request),
     ),
+  );
+
+  app.post<{ Params: { holdId: string } }>(
+    '/v1/billing/holds/:holdId/execution-receipts',
+    {
+      config: { rateLimit: { max: 600, timeWindow: '1 minute', ban: 20 } },
+    },
+    async (request, reply) => {
+      const result = await options.service.settleHoldWithExecutionReceipt(
+        request.params.holdId,
+        request.body,
+        bearerToken(request),
+      );
+      return reply.code(result.replayed ? 200 : 201).send(result);
+    },
   );
 }

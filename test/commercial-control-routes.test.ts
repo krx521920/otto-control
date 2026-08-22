@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync, verify } from 'node:crypto';
 
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -75,17 +75,19 @@ const config: Readonly<ControlConfig> = {
 
 describe('commercial control HTTP routes', () => {
   let app: FastifyInstance;
+  let store: MemoryControlStore;
   let activeKeyId: string;
   let standbyKeyId: string;
   let adminSessionToken: string;
   let securitySessionToken: string;
   let auditorSessionToken: string;
+  let licenseAdminSessionToken: string;
   let auditService: AuditService;
   let receiptSigner: LocalEd25519Signer;
 
   beforeEach(async () => {
     const keys = generateKeyPairSync('ed25519');
-    const store = new MemoryControlStore();
+    store = new MemoryControlStore();
     const signer = new LocalEd25519Signer(
       keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
     );
@@ -140,6 +142,17 @@ describe('commercial control HTTP routes', () => {
       accountId: auditorEnrollment.account.id,
       enrollmentToken: auditorEnrollment.enrollmentToken,
       totpCode: generateTotpCode(auditorEnrollment.mfaSecret),
+    })).token;
+    const licenseAdminEnrollment = await identity.createAccount(adminSession.principal, {
+      username: 'license.admin',
+      displayName: 'License Admin',
+      password: 'SecureControl2026',
+      roleIds: ['license_admin'],
+    });
+    licenseAdminSessionToken = (await identity.confirmEnrollment({
+      accountId: licenseAdminEnrollment.account.id,
+      enrollmentToken: licenseAdminEnrollment.enrollmentToken,
+      totpCode: generateTotpCode(licenseAdminEnrollment.mfaSecret),
     })).token;
     const service = new CommercialControlService({
       store,
@@ -287,6 +300,7 @@ describe('commercial control HTTP routes', () => {
       'prometheus_metrics',
       'service_level_objectives',
       'customer_deployment',
+      'private_deployment_enrollment',
       'license_authority',
       'signing_key_rotation',
       'lease_revocation',
@@ -306,6 +320,7 @@ describe('commercial control HTTP routes', () => {
       'credit_billing',
       'billing_statement_export',
       'signed_execution_receipts_v2',
+      'multi_edge_billing_aggregation',
     ]);
 
     const backupStatus = await app.inject({
@@ -1209,5 +1224,232 @@ describe('commercial control HTTP routes', () => {
       releasePaused: true,
       artifact: { state: 'revoked' },
     });
+  });
+  it('activates a private deployment once and only replays the exact claim', async () => {
+    const authorization = { authorization: `Bearer ${adminSessionToken}` };
+    const customerResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/customers',
+      headers: authorization,
+      payload: { name: 'Private Deployment Customer' },
+    });
+    expect(customerResponse.statusCode).toBe(201);
+    const customerId = customerResponse.json().customer.id as string;
+
+    const reservedOrganization = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/deployment-enrollments',
+      headers: authorization,
+      payload: {
+        customerId,
+        organizationId: 'org_default',
+        organizationName: 'Reserved Enterprise',
+        ceoUsername: 'reserved.ceo',
+        ceoName: 'Reserved CEO',
+        ceoPhone: '13800138000',
+        defaultDepartmentName: 'Management',
+        deploymentName: 'Reserved deployment',
+        plan: 'enterprise',
+        expiresAt: '2030-01-01T00:00:00.000Z',
+        seatLimit: 10,
+      },
+    });
+    expect(reservedOrganization.statusCode).toBe(400);
+
+    const enrollmentPayload = {
+      customerId,
+      organizationId: 'org_private_bootstrap',
+      organizationName: 'Private Enterprise',
+      organizationSlug: 'private-enterprise',
+      ceoUsername: 'private.ceo',
+      ceoName: 'Private CEO',
+      ceoPhone: '13800138000',
+      defaultDepartmentName: 'Management',
+      deploymentName: 'Private deployment',
+      plan: 'enterprise',
+      expiresAt: '2030-01-01T00:00:00.000Z',
+      seatLimit: 80,
+      validForHours: 1,
+      federationGatewayUrl: 'https://federation.otto.test',
+      modelGatewayUrl: 'https://models.otto.test',
+      updateDistributionId: 'stable',
+    };
+    const licenseAdminDenied = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/deployment-enrollments',
+      headers: { authorization: `Bearer ${licenseAdminSessionToken}` },
+      payload: enrollmentPayload,
+    });
+    expect(licenseAdminDenied.statusCode).toBe(403);
+
+    const invalidTelemetry = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/deployment-enrollments',
+      headers: authorization,
+      payload: { ...enrollmentPayload, telemetryAllowed: 'false' },
+    });
+    expect(invalidTelemetry.statusCode).toBe(400);
+
+    const unsafeDisplayName = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/deployment-enrollments',
+      headers: authorization,
+      payload: { ...enrollmentPayload, organizationName: 'Private​Enterprise' },
+    });
+    expect(unsafeDisplayName.statusCode).toBe(400);
+
+    const enrollmentResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/deployment-enrollments',
+      headers: authorization,
+      payload: enrollmentPayload,
+    });
+    expect(enrollmentResponse.statusCode).toBe(201);
+    const bootstrapSecret = enrollmentResponse.json().bootstrapSecret as string;
+    expect(bootstrapSecret.length).toBeGreaterThanOrEqual(43);
+    expect(enrollmentResponse.json().enrollment.tokenHash).toBeUndefined();
+    expect(enrollmentResponse.json().enrollment.provisioningCiphertext).toBeUndefined();
+
+    const claim = {
+      version: 1,
+      deploymentId: 'dep_privatebootstrap001',
+      machineFingerprint: 'd'.repeat(64),
+      appVersion: '1.10.2',
+      buildCommit: '92ac6bbf',
+      publicOrigin: 'https://private.customer.test',
+      deploymentKind: 'self-hosted',
+    };
+    const activated = await app.inject({
+      method: 'POST',
+      url: '/v1/deployment-enrollments/claim',
+      headers: { authorization: `Bearer ${bootstrapSecret}` },
+      payload: claim,
+    });
+    expect(activated.statusCode).toBe(200);
+    expect(activated.json()).toMatchObject({
+      status: 'activated',
+      licenseEnvelope: {
+        license: {
+          deploymentId: claim.deploymentId,
+          organizationId: 'org_private_bootstrap',
+          machineFingerprint: claim.machineFingerprint,
+          seatLimit: 80,
+        },
+        signingKeyId: activeKeyId,
+      },
+      capabilities: {
+        telemetry: true,
+        federation: true,
+        updates: true,
+        modelGateway: true,
+        storage: true,
+      },
+      federationGatewayUrl: 'https://federation.otto.test/',
+      modelGatewayUrl: 'https://models.otto.test/',
+      updateDistributionId: 'stable',
+    });
+    const activatedBody = activated.json();
+    expect(activatedBody.licenseEnvelope.signature).toMatch(/^ed25519:/u);
+    expect(activatedBody.provisioningCommand).toMatchObject({
+      deploymentId: claim.deploymentId,
+      type: 'enterprise.initiate',
+      schemaVersion: 1,
+      idempotencyKey: expect.stringMatching(/^bootstrap-enterprise:enroll_/u),
+      payload: {
+        organization: {
+          id: 'org_private_bootstrap',
+          name: 'Private Enterprise',
+          slug: 'private-enterprise',
+        },
+        ceo: {
+          username: 'private.ceo',
+          name: 'Private CEO',
+          phone: '+8613800138000',
+        },
+        defaultDepartmentName: 'Management',
+      },
+      signingKeyId: activeKeyId,
+      signature: expect.stringMatching(/^ed25519:/u),
+    });
+    const {
+      signingKeyId: provisioningSigningKeyId,
+      signature: provisioningSignature,
+      ...provisioningBody
+    } = activatedBody.provisioningCommand;
+    expect(provisioningSigningKeyId).toBe(activeKeyId);
+    expect(
+      verify(
+        null,
+        Buffer.from(canonicalJson({ envelope: provisioningBody }), 'utf8'),
+        receiptSigner.publicKey,
+        Buffer.from(provisioningSignature.slice('ed25519:'.length), 'base64url'),
+      ),
+    ).toBe(true);
+    const licenseId = activatedBody.licenseEnvelope.license.id as string;
+
+    const replayed = await app.inject({
+      method: 'POST',
+      url: '/v1/deployment-enrollments/claim',
+      headers: { authorization: `Bearer ${bootstrapSecret}` },
+      payload: claim,
+    });
+    expect(replayed.statusCode).toBe(200);
+    expect(replayed.json()).toMatchObject({
+      status: 'already_activated',
+      licenseEnvelope: { license: { id: licenseId } },
+    });
+    expect(replayed.json().provisioningCommand).toEqual(
+      activatedBody.provisioningCommand,
+    );
+
+    const changedBinding = await app.inject({
+      method: 'POST',
+      url: '/v1/deployment-enrollments/claim',
+      headers: { authorization: `Bearer ${bootstrapSecret}` },
+      payload: { ...claim, publicOrigin: 'https://other.customer.test' },
+    });
+    expect(changedBinding.statusCode).toBe(401);
+
+    const injectedCommercialTerms = await app.inject({
+      method: 'POST',
+      url: '/v1/deployment-enrollments/claim',
+      headers: { authorization: `Bearer ${bootstrapSecret}` },
+      payload: { ...claim, plan: 'government' },
+    });
+    expect(injectedCommercialTerms.statusCode).toBe(400);
+
+    const replayClaim = () => app.inject({
+      method: 'POST',
+      url: '/v1/deployment-enrollments/claim',
+      headers: { authorization: 'Bearer ' + bootstrapSecret },
+      payload: claim,
+    });
+    const deploymentRecord = store.deployments.get(claim.deploymentId)!;
+    deploymentRecord.status = 'suspended';
+    expect((await replayClaim()).statusCode).toBe(401);
+    deploymentRecord.status = 'active';
+
+    const originalDeploymentOrganizationId = deploymentRecord.organizationId;
+    deploymentRecord.organizationId = 'org_changed_after_activation';
+    expect((await replayClaim()).statusCode).toBe(401);
+    deploymentRecord.organizationId = originalDeploymentOrganizationId;
+
+    const licenseRecord = store.licenses.get(licenseId)!;
+    const originalLicenseOrganizationId = licenseRecord.organizationId;
+    licenseRecord.organizationId = 'org_changed_after_activation';
+    expect((await replayClaim()).statusCode).toBe(401);
+    licenseRecord.organizationId = originalLicenseOrganizationId;
+
+    const originalLicenseExpiry = licenseRecord.expiresAtMs;
+    licenseRecord.expiresAtMs = 0;
+    expect((await replayClaim()).statusCode).toBe(401);
+    licenseRecord.expiresAtMs = originalLicenseExpiry;
+
+    licenseRecord.revokedAtMs = Date.now();
+    expect((await replayClaim()).statusCode).toBe(401);
+    licenseRecord.revokedAtMs = null;
+
+    store.licenses.delete(licenseId);
+    expect((await replayClaim()).statusCode).toBe(401);
   });
 });

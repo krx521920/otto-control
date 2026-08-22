@@ -134,6 +134,97 @@ a deployment-signed short-lived download URL. Production bootstrap reuses the
 configured artifact-store credentials with an isolated attachment prefix; a
 dedicated least-privilege IAM identity is recommended for larger deployments.
 
+## Edge model gateway
+
+The first independently deployable Otto Edge Gateway implementation lives in
+this repository while remaining outside the Control request process:
+
+```bash
+npm run dev:edge
+# production Node adapter: npm run start:edge
+```
+
+It validates short-lived Control-signed tokens and policies locally, pins model
+provider routes, requires every signed route to also match an independently
+managed exact HTTPS-origin and credential-binding allowlist before reading
+provider secrets, and rejects empty, non-ASCII, control-character, or oversized
+provider credentials before constructing an HTTP header or opening an upstream
+connection. It enforces
+request/rate bounds, performs bounded failover, and
+streams provider responses without sending prompts or conversation context to
+Control. Model API requests must use an exact endpoint path; query strings and
+fragments are rejected instead of being silently ignored or forwarded. The Node
+adapter uses a fixed internal origin and rejects ambiguous,
+absolute, non-canonical, malformed-percent, non-ASCII, or oversized request targets
+before policy or provider access; an untrusted Host header cannot select its
+routing origin. Upstream headers are rebuilt from a fixed minimum set; client
+cookies and provider-looking headers are never copied, while `Accept` is derived
+from the validated `stream` flag. Provider response metadata is normalized too:
+unknown media types become `application/octet-stream` with `nosniff`, and only
+bounded visible request IDs are exposed. The `stream` field is accepted only as
+a boolean so provider behavior, response parsing, and billing cannot disagree.
+Liveness and readiness do not depend on the business clock or request-ID generator;
+business IDs are normalized to a bounded safe alphabet and invalid generators fail
+closed before policy, secret, billing, or provider access. After admission, a failed,
+invalid, or backward-moving clock is clamped to the verified request start so cleanup,
+circuit state, outcome evidence, and billing finalization still complete consistently.
+Completion hooks are isolated and concurrency release is idempotent, so a faulty limiter,
+circuit adapter, outcome sink, or edge-runtime task registrar cannot strand a response stream.
+Runtime adapter results are validated and capability methods are snapshotted: malformed
+concurrency leases, circuit attempts, billing reservations, or rate-limit decisions fail
+closed before secrets, provider traffic, or untracked/unlimited execution can proceed.
+It also holds a global and per-subject concurrency slot
+for the complete lifetime of every upstream response stream, preventing slow
+clients from exhausting sockets, memory, or provider credit while remaining
+inside a per-minute request limit. Explicit inbound header, request, keep-alive,
+total-connection, header-count, and requests-per-socket bounds also reject slow
+or oversized HTTP connections before they become unbounded process resources.
+Repeated transport, retryable HTTP, and stream failures open a bounded per-route
+circuit; requests use a signed fallback route
+during cooldown, then exactly one half-open probe decides whether to restore the
+primary. Open routes are rejected before resolving provider credentials, avoiding
+needless KMS or Vault calls during cooldown; a missing probe credential releases
+the half-open lease for a later retry. A separate local request-body hard cap defaults to 4 MiB and cannot be
+expanded by signed Control policy, limiting memory and provider-cost exposure.
+Signed policy also bounds upstream stream-idle time, and downstream
+disconnects cancel provider work instead of continuing to consume tokens. A
+separate local hard cap aborts responses that exceed 64 MiB or 15 minutes even
+when a provider continuously sends data and never triggers the idle timeout;
+metered requests remain explicitly uncertain instead of being undercharged. A
+signed policy may use fallback routes only when every route for the same endpoint
+and public model has an identical metering profile and reservation size; mixed
+metered/unmetered or differently priced fallbacks are rejected before activation.
+A standard Web Service Worker adapter is provided for Alibaba Cloud
+ESA. The Node adapter can also authenticate to Control, coalesce policy refreshes,
+verify tenant-bound signatures before caching, and fail closed when the last
+signed policy expires. It consumes Control's signed public keyring with two-phase
+standby activation, bounded revocation polling, rollback protection, and a
+bootstrap trust-root requirement. A Redis Lua adapter enforces atomic cross-replica
+limits, HMAC-obscured subject keys, bounded abuse strikes, temporary bans, and
+fail-closed behavior without falling back to process memory. In single-server
+mode, metered routes reserve credits before provider access, extract only bounded
+OpenAI-compatible usage, and atomically settle an Ed25519 receipt against the
+hold. Pending settlement state is kept in a hash-chained, fsynced local journal
+and replayed after restart. Liveness and readiness are separate, and an optional
+file-backed operations token protects aggregate billing status and idempotent
+queue retry endpoints without allowing receipt, sequence, or amount mutation.
+SIGTERM and SIGINT initiate bounded graceful draining: readiness fails first,
+new model work is rejected, and active response streams receive a configurable
+completion window before remaining connections are forcibly closed.
+Multi-instance deployments require a shared ordered
+aggregator instead of sharing this file over NFS/SMB. See
+[`docs/otto-edge-gateway.zh-CN.md`](docs/otto-edge-gateway.zh-CN.md) for
+the trust boundary, configuration, and remaining production gates.
+For the single-server production Compose profile, TLS Redis, file-backed
+secrets, health checks, and staged upgrade/rollback procedure, see
+[`docs/edge-gateway-production-deployment.zh-CN.md`](docs/edge-gateway-production-deployment.zh-CN.md).
+
+Control persists deployment-scoped Edge policies in PostgreSQL and exposes
+authenticated policy-resolution and short-lived token-issuance APIs. They
+validate the online License/deployment/organization/fingerprint binding, reject
+replay with persisted nonces, apply enforced-billing admission, and never accept
+prompt or conversation content.
+
 ## Managed release artifact distribution
 
 Production releases can use a fail-closed upload and delivery pipeline instead
@@ -851,6 +942,11 @@ settles the actual amount and immediately releases any remainder; explicit
 release and automatic expiry both return unused credits. Direct usage calls and
 every hold mutation require an enterprise-scoped idempotency key. Reusing that key
 with different parameters fails with `409` instead of silently changing money.
+`POST /v1/billing/holds/:holdId/execution-receipts` performs signature verification,
+actual capture, unused-credit release, receipt persistence, and sequence advance in
+one transaction so the Edge Gateway does not double charge by combining a hold
+with direct receipt consumption. Insufficient hold balance is reported as HTTP
+402 `CREDIT_REQUIRED` rather than inferred from mutable error text.
 
 Administrators can query an enterprise account by passing `organizationId` to
 `/v1/admin/billing/customers/:customerId/account`; top-ups must also include the

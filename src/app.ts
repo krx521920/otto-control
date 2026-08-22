@@ -20,6 +20,7 @@ import { registerAuditAnchorRoutes } from './routes/audit-anchor.js';
 import { registerAuditWitnessRoutes } from './routes/audit-witness.js';
 import { registerDataGovernanceRoutes } from './routes/data-governance.js';
 import { registerCommercialDeliveryRoutes } from './routes/commercial-delivery.js';
+import { registerEdgeGatewayRoutes } from './routes/edge-gateway.js';
 import { ControlMetrics } from './observability/metrics.js';
 import { traceLogContext } from './observability/tracing.js';
 
@@ -132,6 +133,7 @@ export async function buildControlApp(
   if (commercialControl) {
     capabilities.push(
       'customer_deployment',
+      'private_deployment_enrollment',
       'license_authority',
       'signing_key_rotation',
       'lease_revocation',
@@ -215,9 +217,21 @@ export async function buildControlApp(
         'credit_billing',
         'billing_statement_export',
         'signed_execution_receipts_v2',
+        'multi_edge_billing_aggregation',
       );
       await registerBillingRoutes(app, {
         service: commercialControl.billing,
+        identity: commercialControl.identity,
+      });
+    }
+    if (commercialControl.edgeGateway) {
+      capabilities.push(
+        'edge_gateway_control_plane',
+        'edge_gateway_signed_policy',
+        'edge_gateway_short_lived_access_tokens',
+      );
+      await registerEdgeGatewayRoutes(app, {
+        service: commercialControl.edgeGateway,
         identity: commercialControl.identity,
       });
     }
@@ -229,6 +243,9 @@ export async function buildControlApp(
       });
     }
     app.addHook('onReady', async () => {
+      commercialControl.billing?.start((error) => {
+        app.log.error({ err: error }, 'edge billing aggregation retry failed');
+      });
       commercialControl.alerts.start((error) => {
         app.log.error({ err: error }, 'alert delivery poll failed');
       });
@@ -243,6 +260,7 @@ export async function buildControlApp(
       });
     });
     app.addHook('onClose', async () => {
+      commercialControl.billing?.close();
       commercialControl.dataGovernance?.close();
       try {
         await Promise.all([

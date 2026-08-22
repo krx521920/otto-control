@@ -288,11 +288,14 @@ function main() {
     && process.env.CI === 'true';
   const publicUrl = requiredPublicUrl();
   const federationUrl = federationPublicUrl(publicUrl);
+  const edgeUrl = new URL(`https://edge.${publicUrl.hostname}`);
   if (publicUrl.hostname === federationUrl.hostname) {
     throw new Error('Control and Federation must use different public hostnames');
   }
   if (environmentName === 'production'
-    && (reservedHostname(publicUrl.hostname) || reservedHostname(federationUrl.hostname))) {
+    && (reservedHostname(publicUrl.hostname)
+      || reservedHostname(federationUrl.hostname)
+      || reservedHostname(edgeUrl.hostname))) {
     throw new Error('production deployments cannot use localhost or reserved example/test domains');
   }
   if (environmentName === 'production' && kmsKeyArns.length === 0 && !allowLocalSigningForTest) {
@@ -338,9 +341,17 @@ function main() {
     ? 'attestations'
     : 'attestations-staging';
   const backupDirectoryName = environmentName === 'production' ? 'backups' : 'backups-staging';
+  const edgeConfigDirectoryName = environmentName === 'production'
+    ? 'edge-config'
+    : 'edge-config-staging';
+  const edgeProviderSecretDirectoryName = environmentName === 'production'
+    ? 'edge-provider-secrets'
+    : 'edge-provider-secrets-staging';
   const secretDirectory = resolve(root, secretDirectoryName);
   const signingDirectory = resolve(root, signingDirectoryName);
   const attestationDirectory = resolve(root, attestationDirectoryName);
+  const edgeConfigDirectory = resolve(root, edgeConfigDirectoryName);
+  const edgeProviderSecretDirectory = resolve(root, edgeProviderSecretDirectoryName);
   const targets = [
     resolve(root, environmentFileName),
     resolve(signingDirectory, 'control_signer_keyring.json'),
@@ -384,6 +395,8 @@ function main() {
   mkdirSync(secretDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(signingDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(attestationDirectory, { recursive: true, mode: 0o700 });
+  mkdirSync(edgeConfigDirectory, { recursive: true, mode: 0o700 });
+  mkdirSync(edgeProviderSecretDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(resolve(root, backupDirectoryName), { recursive: true, mode: 0o700 });
   const backupReportDirectory = resolve(root, backupDirectoryName, 'reports');
   mkdirSync(backupReportDirectory, { recursive: true, mode: 0o755 });
@@ -480,6 +493,13 @@ function main() {
     `OTTO_CONTROL_SIGNING_DIR=./${signingDirectoryName}`,
     `OTTO_CONTROL_ATTESTATION_DIR=./${attestationDirectoryName}`,
     `OTTO_CONTROL_BACKUP_DIR=./${backupDirectoryName}`,
+    `OTTO_EDGE_CONFIG_DIR=./${edgeConfigDirectoryName}`,
+    `OTTO_EDGE_PROVIDER_SECRETS_DIR=./${edgeProviderSecretDirectoryName}`,
+    'OTTO_EDGE_ENABLED=false',
+    'OTTO_EDGE_IMAGE=otto-control-edge:local',
+    'OTTO_EDGE_REDIS_IMAGE=redis:7.4-alpine',
+    'OTTO_EDGE_LOG_MAX_SIZE=20m',
+    'OTTO_EDGE_LOG_MAX_FILES=5',
     'OTTO_CONTROL_VERSION=0.34.0',
     `ACME_EMAIL=${acmeEmail || `operations@${publicUrl.hostname}`}`,
     `ACME_CA=${environmentName === 'production'
@@ -492,6 +512,7 @@ function main() {
     `CONTROL_PUBLIC_BASE_URL=${publicUrl.origin}`,
     `CONTROL_DOMAIN=${publicUrl.hostname}`,
     `FEDERATION_DOMAIN=${federationUrl.hostname}`,
+    `EDGE_DOMAIN=${edgeUrl.hostname}`,
     `FEDERATION_PUBLIC_BASE_URL=${federationUrl.origin}`,
     'FEDERATION_HOST=0.0.0.0',
     'FEDERATION_PORT=7790',

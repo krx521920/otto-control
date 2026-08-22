@@ -47,9 +47,12 @@ describe('operator console assets', () => {
     expect(response.body).toContain("'deployment.create'");
     expect(response.body).toContain("'license.issue'");
     expect(response.body).toContain('hasPermission(permission)');
+    expect(response.body).toContain('查看边缘网关');
+    expect(response.body).toContain('管理边缘网关');
     expect(response.body).toContain('syncOfflineLicenseControls()');
     expect(response.body).toContain("request('/v1/admin/customers', { method: 'POST'");
     expect(response.body).toContain("request('/v1/admin/deployments', { method: 'POST'");
+    expect(response.body).toContain("request('/v1/admin/deployment-enrollments', {");
     expect(response.body).toContain("request('/v1/admin/licenses', { method: 'POST'");
     expect(response.body).toContain("/delivery-package.json");
     expect(response.body).toContain("renderCommercialPlanCatalog");
@@ -81,6 +84,32 @@ describe('operator console assets', () => {
     expect(response.body).toContain('approval.request || {}');
     expect(response.body).toContain('URL.createObjectURL(blob)');
     expect(response.body).toContain('otto-license-');
+    expect(response.body).toContain('otto-deployment-bootstrap-');
+    expect(response.body).toContain('clearDeploymentEnrollmentResult');
+  });
+
+  it('offers a one-time private deployment enrollment without persisting its secret', async () => {
+    const [page, script] = await Promise.all([
+      app.inject({ method: 'GET', url: '/admin' }),
+      app.inject({ method: 'GET', url: '/admin/assets/app.js' }),
+    ]);
+    expect(page.body).toContain('id="create-deployment-enrollment-button"');
+    expect(page.body).toContain('id="deployment-enrollment-dialog"');
+    expect(page.body).toContain('id="deployment-enrollment-result-secret"');
+    expect(page.body).toContain('id="enroll-organization-name"');
+    expect(page.body).toContain('id="enroll-ceo-username"');
+    expect(page.body).toContain('id="enroll-ceo-phone"');
+    expect(page.body).toContain('口令关闭后立即从页面内存清除');
+    expect(script.body).toContain("hasPermission('enterprise.provision')");
+    expect(script.body).toContain("hasPermission('deployment.create')");
+    expect(script.body).toContain("hasPermission('license.issue')");
+    expect(script.body).toContain("'/v1/admin/deployment-enrollments'");
+    expect(script.body).toContain("organizationName: byId('enroll-organization-name')");
+    expect(script.body).toContain("ceoUsername: byId('enroll-ceo-username')");
+    expect(script.body).toContain("ceoPhone: byId('enroll-ceo-phone')");
+    expect(script.body).toContain('activeDeploymentEnrollment = null');
+    expect(script.body).toContain("addEventListener('close', clearDeploymentEnrollmentResult)");
+    expect(script.body).not.toContain('localStorage');
   });
 
   it('renders RBAC account management and one-time MFA enrollment without exposing tokens', async () => {

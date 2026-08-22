@@ -60,6 +60,15 @@ describe('PostgreSQL migrations', () => {
       statement.includes('CREATE TABLE IF NOT EXISTS control_execution_receipt_keys')
     ))).toBe(true);
     expect(statements.some((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_edge_billing_nodes')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
+      statement.includes('CREATE TABLE IF NOT EXISTS control_edge_billing_events')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
+      statement.includes('idx_control_execution_receipts_source_sequence')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
       statement.includes('ALTER TABLE control_data_governance_requests')
       && statement.includes('ADD COLUMN IF NOT EXISTS due_at')
     ))).toBe(true);
@@ -100,6 +109,21 @@ describe('PostgreSQL migrations', () => {
     ))).toBe(true);
     expect(statements.some((statement) => (
       statement.includes('CREATE TABLE IF NOT EXISTS control_audit_witness_evidence')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
+      statement.includes('ADD COLUMN IF NOT EXISTS provisioning_ciphertext')
+    ))).toBe(true);
+    expect(statements.some((statement) => (
+      statement.includes("VALUES ('enterprise.provision')")
+    ))).toBe(true);
+    const enterpriseProvisioningGrant = statements.find((statement) => (
+      statement.includes("VALUES ('super_admin', 'enterprise.provision')")
+    ));
+    expect(enterpriseProvisioningGrant).toBeDefined();
+    expect(statements.some((statement) => (
+      statement.includes("status IN ('pending', 'claiming')")
+      && statement.includes('provisioning_ciphertext IS NULL')
+      && statement.includes("status = 'revoked'")
     ))).toBe(true);
   });
 

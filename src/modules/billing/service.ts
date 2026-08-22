@@ -1,18 +1,32 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type {
   CreditHoldMutationResult,
   CreditMutationResult,
   CreditStatement,
   CreditTransactionRecord,
+  ExecutionReceiptHoldMutationResult,
   ExecutionReceiptMutationResult,
   ExecutionReceiptRecord,
+  EdgeBillingAggregationEventRecord,
   OttoBillingModule,
 } from '../../contracts/billing.js';
 import { isOttoBillingModule } from '../../contracts/billing.js';
-import { conflict, invalidRequest, notFound, unauthorized } from '../../errors.js';
-import type { ControlStore, LicenseRecord } from '../../storage/control-store.js';
+import {
+  ControlPlaneError,
+  conflict,
+  creditHoldUnavailable,
+  invalidRequest,
+  notFound,
+  unauthorized,
+} from '../../errors.js';
+import { canonicalJson } from '../../crypto/signed-envelope.js';
+import type { ControlStore } from '../../storage/control-store.js';
 import type { ControlTokenIssuer } from '../commercial-control/token-issuer.js';
+import {
+  authenticateOnlineDeployment,
+  type AuthenticatedOnlineDeployment,
+} from '../commercial-control/deployment-authentication.js';
 import {
   normalizeExecutionReceiptEnvelope,
   normalizeExecutionReceiptKeyBootstrap,
@@ -21,18 +35,19 @@ import {
 } from './execution-receipt.js';
 
 const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,159}$/u;
-const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_CREDITS = 9_000_000_000_000_000;
 const MAX_UNITS = 9_000_000_000_000;
 const MAX_RECEIPT_KEY_LIFETIME_MS = 400 * 24 * 60 * 60 * 1000;
 const RECEIPT_REQUEST_FIELDS = new Set(['licenseId', 'machineFingerprint', 'envelope']);
-
-interface AuthenticatedDeployment {
-  customerId: string;
-  license: LicenseRecord;
-  organizationId: string;
-  deploymentId: string;
-}
+const EDGE_NODE_ID = /^edge_[a-f0-9]{32}$/u;
+const EDGE_EVENT_ID = /^edgeevt_[a-f0-9]{32}$/u;
+const HOLD_ID = /^hold_[a-f0-9]{32}$/u;
+const EDGE_EVENT_FIELDS = new Set([
+  'eventId', 'nodeId', 'nodeSequence', 'holdId', 'licenseId', 'deploymentId',
+  'organizationId', 'machineFingerprint', 'envelope',
+]);
+const MAX_EDGE_AGGREGATION_ATTEMPTS = 8;
+const EDGE_RETRY_INTERVAL_MS = 10_000;
 
 function objectValue(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -130,12 +145,190 @@ export class BillingService {
   readonly #tokens: ControlTokenIssuer;
   readonly #now: () => number;
   readonly #allowLegacyUsageReports: boolean;
+  #edgeRetryTimer?: ReturnType<typeof setInterval>;
 
   constructor(options: BillingServiceOptions) {
     this.#store = options.store;
     this.#tokens = options.tokenIssuer;
     this.#now = options.now ?? Date.now;
     this.#allowLegacyUsageReports = options.allowLegacyUsageReports ?? true;
+  }
+
+  start(onError: (error: unknown) => void = () => undefined): void {
+    if (this.#edgeRetryTimer) return;
+    this.#edgeRetryTimer = setInterval(() => {
+      void this.reconcileEdgeBillingEvents(100).catch(onError);
+    }, EDGE_RETRY_INTERVAL_MS);
+    this.#edgeRetryTimer.unref?.();
+  }
+
+  close(): void {
+    if (this.#edgeRetryTimer) clearInterval(this.#edgeRetryTimer);
+    this.#edgeRetryTimer = undefined;
+  }
+
+  async registerEdgeBillingNode(deploymentId: string, raw: unknown, actorId: string) {
+    const body = objectValue(raw);
+    exactFields(body, new Set(['nodeId', 'signingKeyId']), 'edge billing node');
+    const nodeId = requiredString(body, 'nodeId');
+    const signingKeyId = requiredString(body, 'signingKeyId').toLowerCase();
+    if (!EDGE_NODE_ID.test(nodeId) || !/^[a-f0-9]{16}$/u.test(signingKeyId)) {
+      throw invalidRequest('edge billing node identity is invalid');
+    }
+    const deployment = await this.#store.getDeployment(deploymentId);
+    if (!deployment) throw notFound('deployment not found');
+    const key = await this.#store.getExecutionReceiptKey(deploymentId, signingKeyId);
+    if (!key || key.status !== 'active') {
+      throw conflict('edge billing node requires an active dedicated receipt key');
+    }
+    const existing = await this.#store.getEdgeBillingNode(nodeId);
+    const node = await this.#store.registerEdgeBillingNode({
+      nodeId,
+      deploymentId,
+      organizationId: deployment.organizationId,
+      signingKeyId,
+      createdAt: new Date(this.#now()),
+    });
+    if (!existing) {
+      await this.#store.appendAuditEvent({
+        actorId,
+        action: 'billing.edge_node.registered',
+        targetType: 'edge_billing_node',
+        targetId: nodeId,
+        detail: { deploymentId, organizationId: node.organizationId, signingKeyId },
+      });
+    }
+    return node;
+  }
+
+  async revokeEdgeBillingNode(deploymentId: string, nodeId: string, actorId: string) {
+    if (!EDGE_NODE_ID.test(nodeId)) throw invalidRequest('edge billing node id is invalid');
+    const existing = await this.#store.getEdgeBillingNode(nodeId);
+    if (!existing || existing.deploymentId !== deploymentId) {
+      throw notFound('edge billing node not found');
+    }
+    const node = await this.#store.revokeEdgeBillingNode({
+      nodeId, deploymentId, revokedAt: new Date(this.#now()),
+    });
+    if (!node) throw notFound('edge billing node not found');
+    if (existing.status === 'active') {
+      await this.#store.appendAuditEvent({
+        actorId,
+        action: 'billing.edge_node.revoked',
+        targetType: 'edge_billing_node',
+        targetId: nodeId,
+        detail: { deploymentId, signingKeyId: node.signingKeyId },
+      });
+    }
+    return node;
+  }
+
+  async edgeBillingNodes(deploymentId: string) {
+    return this.#store.listEdgeBillingNodes(deploymentId);
+  }
+
+  async submitEdgeBillingEvent(raw: unknown, bearerToken: string) {
+    const body = objectValue(raw);
+    exactFields(body, EDGE_EVENT_FIELDS, 'edge billing event');
+    const eventId = requiredString(body, 'eventId');
+    const nodeId = requiredString(body, 'nodeId');
+    const nodeSequence = positiveInteger(body.nodeSequence, 'nodeSequence', Number.MAX_SAFE_INTEGER);
+    const holdIdValue = body.holdId === undefined || body.holdId === null
+      ? null
+      : requiredString(body, 'holdId');
+    if (!EDGE_EVENT_ID.test(eventId) || !EDGE_NODE_ID.test(nodeId)
+      || (holdIdValue && !HOLD_ID.test(holdIdValue))) {
+      throw invalidRequest('edge billing event identity is invalid');
+    }
+    const now = this.#now();
+    const envelope = normalizeExecutionReceiptEnvelope(body.envelope, now);
+    if (envelope.receipt.sequence !== nodeSequence) {
+      throw invalidRequest('nodeSequence must equal the signed receipt sequence');
+    }
+    const authenticated = await this.#authenticateDeployment({
+      licenseId: body.licenseId,
+      deploymentId: body.deploymentId,
+      organizationId: body.organizationId,
+      machineFingerprint: body.machineFingerprint,
+    }, bearerToken, true);
+    if (envelope.receipt.deploymentId !== authenticated.deploymentId
+      || envelope.receipt.organizationId !== authenticated.organizationId) {
+      throw unauthorized('edge billing receipt does not belong to this tenant');
+    }
+    const node = await this.#store.getEdgeBillingNode(nodeId);
+    if (!node || node.status !== 'active'
+      || node.deploymentId !== authenticated.deploymentId
+      || node.organizationId !== authenticated.organizationId
+      || node.signingKeyId !== envelope.signingKeyId) {
+      throw unauthorized('edge billing node is not active for this tenant');
+    }
+    const key = await this.#store.getExecutionReceiptKey(node.deploymentId, node.signingKeyId);
+    if (!key) throw unauthorized('edge billing node signing key is unknown');
+    verifyExecutionReceipt(envelope, key);
+    const evidence = { eventId, nodeId, nodeSequence, holdId: holdIdValue, envelope };
+    const result = await this.#store.enqueueEdgeBillingEvent({
+      ...evidence,
+      customerId: authenticated.customerId,
+      deploymentId: authenticated.deploymentId,
+      organizationId: authenticated.organizationId,
+      payloadSha256: createHash('sha256').update(canonicalJson(evidence)).digest('hex'),
+      receivedAt: new Date(now),
+    });
+    await this.reconcileEdgeBillingEvents(100, nodeId);
+    return {
+      event: this.#eventWithoutEnvelope(result.event),
+      replayed: result.replayed,
+      aggregation: await this.#store.getEdgeBillingAggregationStatus(node.deploymentId),
+    };
+  }
+
+  async reconcileEdgeBillingEvents(limit = 100, nodeId?: string): Promise<number> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw invalidRequest('edge billing retry limit is invalid');
+    }
+    let reconciled = 0;
+    for (let index = 0; index < limit; index += 1) {
+      const ready = await this.#store.listReadyEdgeBillingEvents({
+        now: new Date(this.#now()), limit: 1, nodeId,
+      });
+      const event = ready[0];
+      if (!event) break;
+      try {
+        await this.#reconcileEdgeBillingEvent(event);
+        await this.#store.markEdgeBillingEventReconciled({
+          eventId: event.eventId, reconciledAt: new Date(this.#now()),
+        });
+        reconciled += 1;
+      } catch (error) {
+        const attempts = event.attempts + 1;
+        const now = this.#now();
+        const errorCode = error instanceof ControlPlaneError ? error.code : 'AGGREGATION_FAILED';
+        await this.#store.markEdgeBillingEventFailed({
+          eventId: event.eventId,
+          errorCode,
+          deadLetter: attempts >= MAX_EDGE_AGGREGATION_ATTEMPTS,
+          nextAttemptAt: new Date(now + Math.min(300_000, 1000 * (2 ** attempts))),
+          updatedAt: new Date(now),
+        });
+        break;
+      }
+    }
+    return reconciled;
+  }
+
+  async retryEdgeBillingDeadLetters(limit = 100) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw invalidRequest('edge billing retry limit is invalid');
+    }
+    const requeued = await this.#store.retryEdgeBillingDeadLetters({
+      now: new Date(this.#now()), limit,
+    });
+    const reconciled = await this.reconcileEdgeBillingEvents(limit);
+    return { requeued, reconciled };
+  }
+
+  async edgeBillingAggregationStatus(deploymentId?: string) {
+    return this.#store.getEdgeBillingAggregationStatus(deploymentId);
   }
 
   async account(customerId: string, organizationId: string) {
@@ -270,12 +463,21 @@ export class BillingService {
     });
     if (!key) throw notFound('execution receipt key not found');
     if (existing.status === 'active') {
+      const boundNodes = (await this.#store.listEdgeBillingNodes(deploymentId))
+        .filter((node) => node.signingKeyId === normalizedKeyId && node.status === 'active');
+      for (const node of boundNodes) {
+        await this.#store.revokeEdgeBillingNode({
+          nodeId: node.nodeId,
+          deploymentId,
+          revokedAt: new Date(this.#now()),
+        });
+      }
       await this.#store.appendAuditEvent({
         actorId,
         action: 'billing.execution_receipt_key.revoked',
         targetType: 'deployment',
         targetId: deploymentId,
-        detail: { keyId: key.keyId },
+        detail: { keyId: key.keyId, revokedEdgeNodeIds: boundNodes.map((node) => node.nodeId) },
       });
     }
     return key;
@@ -521,6 +723,88 @@ export class BillingService {
     return result;
   }
 
+  async settleHoldWithExecutionReceipt(
+    id: string,
+    raw: unknown,
+    bearerToken: string,
+  ): Promise<ExecutionReceiptHoldMutationResult> {
+    const body = objectValue(raw);
+    exactFields(body, RECEIPT_REQUEST_FIELDS, 'execution receipt settlement request');
+    const now = this.#now();
+    const envelope = normalizeExecutionReceiptEnvelope(body.envelope, now);
+    const authenticated = await this.#authenticateDeployment({
+      licenseId: body.licenseId,
+      machineFingerprint: body.machineFingerprint,
+      deploymentId: envelope.receipt.deploymentId,
+      organizationId: envelope.receipt.organizationId,
+    }, bearerToken, true);
+    await this.#releaseExpiredHolds(authenticated.customerId);
+    const hold = await this.#store.getCreditHold(id);
+    if (!hold || hold.customerId !== authenticated.customerId) {
+      throw notFound('credit hold not found');
+    }
+    if (hold.status === 'released' || hold.status === 'expired') {
+      throw creditHoldUnavailable('credit hold is no longer active');
+    }
+    if (hold.deploymentId !== authenticated.deploymentId
+      || hold.organizationId !== authenticated.organizationId) {
+      throw unauthorized('credit hold does not belong to this deployment');
+    }
+    if (hold.module !== envelope.receipt.moduleId) {
+      throw conflict('execution receipt module does not match credit hold');
+    }
+    const key = await this.#store.getExecutionReceiptKey(
+      authenticated.deploymentId,
+      envelope.signingKeyId,
+    );
+    if (!key) throw unauthorized('execution receipt signing key is unknown');
+    verifyExecutionReceipt(envelope, key);
+    const amount = await this.#price(
+      authenticated.customerId,
+      envelope.receipt.moduleId,
+      envelope.receipt.units,
+    );
+    const result = await this.#store.settleCreditHoldWithExecutionReceipt({
+      transactionId: transactionId(),
+      holdId: id,
+      customerId: authenticated.customerId,
+      amount,
+      envelope,
+      metadata: {
+        evidenceTrust: 'deployment_signed_receipt_v2',
+        executionReceiptId: envelope.receipt.receiptId,
+        receiptVerificationStatus: 'verified',
+        signingKeyId: envelope.signingKeyId,
+        sequence: envelope.receipt.sequence,
+        policyVersion: envelope.receipt.policyVersion,
+        units: envelope.receipt.units,
+        model: envelope.receipt.model,
+      },
+      receivedAt: new Date(now),
+    });
+    if (!result) throw notFound('credit hold not found');
+    if (!result.replayed) {
+      await this.#store.appendAuditEvent({
+        actorId: `deployment:${authenticated.deploymentId}`,
+        action: 'billing.execution_receipt.hold_settled',
+        targetType: 'execution_receipt',
+        targetId: result.receipt.receiptId,
+        detail: {
+          customerId: authenticated.customerId,
+          organizationId: authenticated.organizationId,
+          deploymentId: authenticated.deploymentId,
+          holdId: result.hold.id,
+          taskId: result.receipt.taskId,
+          module: result.receipt.moduleId,
+          units: result.receipt.units,
+          sequence: result.receipt.sequence,
+          transactionId: result.transaction.id,
+        },
+      });
+    }
+    return result;
+  }
+
   async transactions(customerId: string, raw: Record<string, unknown>) {
     const { from, to } = parseRange(raw.from, raw.to);
     const organizationId = raw.organizationId === undefined
@@ -581,6 +865,90 @@ export class BillingService {
     return `\uFEFF${[header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`;
   }
 
+  async #reconcileEdgeBillingEvent(event: EdgeBillingAggregationEventRecord): Promise<void> {
+    const node = await this.#store.getEdgeBillingNode(event.nodeId);
+    if (!node || node.status !== 'active' || node.deploymentId !== event.deploymentId
+      || node.organizationId !== event.organizationId
+      || node.signingKeyId !== event.envelope.signingKeyId) {
+      throw conflict('edge billing node binding is inactive');
+    }
+    const key = await this.#store.getExecutionReceiptKey(node.deploymentId, node.signingKeyId);
+    if (!key) throw conflict('edge billing node signing key is unknown');
+    verifyExecutionReceipt(event.envelope, key);
+    const amount = await this.#price(
+      event.customerId,
+      event.envelope.receipt.moduleId,
+      event.envelope.receipt.units,
+    );
+    const common = {
+      transactionId: transactionId(),
+      customerId: event.customerId,
+      amount,
+      envelope: event.envelope,
+      metadata: {
+        evidenceTrust: 'edge_node_signed_receipt_v2',
+        edgeNodeId: event.nodeId,
+        edgeEventId: event.eventId,
+        nodeSequence: event.nodeSequence,
+        executionReceiptId: event.envelope.receipt.receiptId,
+        receiptVerificationStatus: 'verified',
+        signingKeyId: event.envelope.signingKeyId,
+        policyVersion: event.envelope.receipt.policyVersion,
+        units: event.envelope.receipt.units,
+        model: event.envelope.receipt.model,
+      },
+      receivedAt: event.receivedAt,
+      edgeNodeId: event.nodeId,
+    };
+    let result;
+    if (event.holdId) {
+      await this.#releaseExpiredHolds(event.customerId);
+      const hold = await this.#store.getCreditHold(event.holdId);
+      if (hold && hold.status === 'active' && (
+        hold.customerId !== event.customerId
+        || hold.deploymentId !== event.deploymentId
+        || hold.organizationId !== event.organizationId
+        || hold.module !== event.envelope.receipt.moduleId
+      )) throw conflict('edge billing event does not match its credit hold');
+      try {
+        result = hold?.status === 'active'
+          ? await this.#store.settleCreditHoldWithExecutionReceipt({
+              ...common,
+              holdId: event.holdId,
+            })
+          : await this.#store.ingestExecutionReceipt(common);
+      } catch (error) {
+        const current = await this.#store.getCreditHold(event.holdId);
+        if (!(error instanceof ControlPlaneError) || current?.status === 'active') throw error;
+        result = await this.#store.ingestExecutionReceipt(common);
+      }
+      if (!result) result = await this.#store.ingestExecutionReceipt(common);
+    } else {
+      result = await this.#store.ingestExecutionReceipt(common);
+    }
+    if (!result.replayed) {
+      await this.#store.appendAuditEvent({
+        actorId: `edge-node:${event.nodeId}`,
+        action: 'billing.edge_event.reconciled',
+        targetType: 'edge_billing_event',
+        targetId: event.eventId,
+        detail: {
+          deploymentId: event.deploymentId,
+          organizationId: event.organizationId,
+          nodeSequence: event.nodeSequence,
+          receiptId: result.receipt.receiptId,
+          transactionId: result.transaction.id,
+        },
+      });
+    }
+  }
+
+  #eventWithoutEnvelope(event: EdgeBillingAggregationEventRecord) {
+    const { envelope: _envelope, ...safe } = event;
+    void _envelope;
+    return safe;
+  }
+
   async #price(customerId: string, module: OttoBillingModule, units: number): Promise<number> {
     const rate = await this.#store.getBillingRate(customerId, module);
     if (!rate) throw conflict(`billing rate is not configured for ${module}`);
@@ -619,35 +987,19 @@ export class BillingService {
     body: Record<string, unknown>,
     bearerToken: string,
     allowDeploymentOrganization = false,
-  ): Promise<AuthenticatedDeployment> {
+  ): Promise<AuthenticatedOnlineDeployment> {
     const licenseId = requiredString(body, 'licenseId');
     const deploymentId = requiredString(body, 'deploymentId');
     const organizationId = requiredString(body, 'organizationId');
-    if (!ID_PATTERN.test(organizationId)) throw invalidRequest('organizationId is invalid');
     const machineFingerprint = requiredString(body, 'machineFingerprint', 64).toLowerCase();
-    if (!FINGERPRINT_PATTERN.test(machineFingerprint)) {
-      throw invalidRequest('machineFingerprint is invalid');
-    }
-    const license = await this.#store.getLicense(licenseId);
-    if (!license) throw unauthorized('License is invalid');
-    if (license.offline) throw unauthorized('offline License cannot use online billing');
-    if (license.revokedAtMs !== null || this.#now() >= license.expiresAtMs + license.gracePeriodMs) {
-      throw unauthorized('License is revoked or expired');
-    }
-    if (
-      license.deploymentId !== deploymentId ||
-      (!allowDeploymentOrganization && license.organizationId !== organizationId) ||
-      license.machineFingerprint !== machineFingerprint
-    ) throw unauthorized('billing request binding is invalid');
-    const expected = this.#tokens.issue({
-      purpose: 'lease',
-      licenseId,
-      deploymentId,
-      version: license.tokenVersion,
+    return authenticateOnlineDeployment({
+      store: this.#store,
+      tokens: this.#tokens,
+      binding: { licenseId, deploymentId, organizationId, machineFingerprint },
+      bearerToken,
+      nowMs: this.#now(),
+      purpose: 'billing',
+      allowDeploymentOrganization,
     });
-    if (!this.#tokens.matches(bearerToken, expected)) throw unauthorized('billing token is invalid');
-    const deployment = await this.#store.getDeployment(deploymentId);
-    if (!deployment || deployment.status !== 'active') throw unauthorized('deployment is inactive');
-    return { customerId: deployment.customerId, license, organizationId, deploymentId };
   }
 }

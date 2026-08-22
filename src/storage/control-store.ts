@@ -31,8 +31,12 @@ import type {
   CreditStatement,
   CreditTransactionRecord,
   ExecutionReceiptKeyRecord,
+  ExecutionReceiptHoldMutationResult,
   ExecutionReceiptMutationResult,
   ExecutionReceiptRecord,
+  EdgeBillingAggregationEventRecord,
+  EdgeBillingAggregationStatus,
+  EdgeBillingNodeRecord,
   SignedExecutionReceiptV2,
   OttoBillingModule,
 } from '../contracts/billing.js';
@@ -57,6 +61,10 @@ import type {
   AuditWitnessEvidenceStatus,
   AuditWitnessReceiptRecord,
 } from '../contracts/audit-witness.js';
+import type {
+  EdgeGatewayLimitsV1,
+  EdgeModelRouteV1,
+} from '../contracts/edge-gateway.js';
 
 export type RecordStatus = 'active' | 'suspended';
 
@@ -99,6 +107,59 @@ export interface DeploymentRecord {
   machineFingerprint: string;
   name: string;
   status: RecordStatus;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type DeploymentEnrollmentStatus = 'pending' | 'claiming' | 'activated' | 'revoked';
+
+export interface DeploymentEnrollmentRecord {
+  id: string;
+  tokenHash: string;
+  requestHash: string | null;
+  customerId: string;
+  organizationId: string;
+  deploymentName: string;
+  plan: string;
+  licenseExpiresAtMs: number;
+  seatLimit: number;
+  modules: OttoLicenseCapability[];
+  telemetryAllowed: boolean;
+  federationGatewayUrl: string | null;
+  modelGatewayUrl: string | null;
+  telemetryEndpoint: string | null;
+  updateDistributionId: string | null;
+  provisioningCiphertext: string | null;
+  status: DeploymentEnrollmentStatus;
+  deploymentId: string | null;
+  machineFingerprint: string | null;
+  licenseId: string;
+  claimLeaseId: string | null;
+  claimLeaseExpiresAt: Date | null;
+  replayExpiresAt: Date | null;
+  appVersion: string | null;
+  buildCommit: string | null;
+  publicOrigin: string | null;
+  deploymentKind: string | null;
+  expiresAt: Date;
+  claimedAt: Date | null;
+  activatedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface DeploymentEnrollmentReservation {
+  state: 'reserved' | 'in_progress' | 'activated';
+  enrollment: DeploymentEnrollmentRecord;
+}
+export interface EdgeGatewayPolicyRecord {
+  deploymentId: string;
+  organizationId: string;
+  policyVersion: string;
+  routes: EdgeModelRouteV1[];
+  limits: EdgeGatewayLimitsV1;
+  status: RecordStatus;
+  updatedBy: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -302,6 +363,7 @@ export interface ControlStore {
   ping(): Promise<void>;
   close(): Promise<void>;
   createCustomer(input: { id: string; name: string }): Promise<CustomerRecord>;
+  getCustomer(id: string): Promise<CustomerRecord | null>;
   getCommercialInventory(input: {
     nowMs: number;
     expiringWithinMs: number;
@@ -315,6 +377,62 @@ export interface ControlStore {
     name: string;
   }): Promise<DeploymentRecord>;
   getDeployment(id: string): Promise<DeploymentRecord | null>;
+  createDeploymentEnrollment(input: {
+    id: string;
+    tokenHash: string;
+    customerId: string;
+    organizationId: string;
+    deploymentName: string;
+    plan: string;
+    licenseExpiresAtMs: number;
+    seatLimit: number;
+    modules: OttoLicenseCapability[];
+    telemetryAllowed: boolean;
+    federationGatewayUrl: string | null;
+    modelGatewayUrl: string | null;
+    telemetryEndpoint: string | null;
+    updateDistributionId: string | null;
+    provisioningCiphertext: string | null;
+    licenseId: string;
+    expiresAt: Date;
+  }): Promise<DeploymentEnrollmentRecord>;
+  reserveDeploymentEnrollmentClaim(input: {
+    tokenHash: string;
+    requestHash: string;
+    deploymentId: string;
+    machineFingerprint: string;
+    claimLeaseId: string;
+    claimLeaseExpiresAt: Date;
+    appVersion: string;
+    buildCommit: string;
+    publicOrigin: string | null;
+    deploymentKind: string;
+    now: Date;
+  }): Promise<DeploymentEnrollmentReservation | null>;
+  completeDeploymentEnrollmentClaim(input: {
+    enrollmentId: string;
+    claimLeaseId: string;
+    activatedAt: Date;
+    replayExpiresAt: Date;
+    provisioningCiphertext: string | null;
+  }): Promise<DeploymentEnrollmentRecord | null>;
+  upsertEdgeGatewayPolicy(input: {
+    deploymentId: string;
+    organizationId: string;
+    policyVersion: string;
+    routes: EdgeModelRouteV1[];
+    limits: EdgeGatewayLimitsV1;
+    status: RecordStatus;
+    updatedBy: string;
+    changedAt: Date;
+  }): Promise<EdgeGatewayPolicyRecord>;
+  getEdgeGatewayPolicy(deploymentId: string): Promise<EdgeGatewayPolicyRecord | null>;
+  consumeEdgeGatewayNonce(input: {
+    deploymentId: string;
+    nonce: string;
+    nowMs: number;
+    expiresAtMs: number;
+  }): Promise<boolean>;
   createLicense(input: CreateLicenseRecordInput): Promise<LicenseRecord>;
   getLicense(id: string): Promise<LicenseRecord | null>;
   revokeLicense(id: string, revokedAtMs: number): Promise<LicenseRecord | null>;
@@ -589,7 +707,18 @@ export interface ControlStore {
     envelope: SignedExecutionReceiptV2;
     metadata: Record<string, unknown>;
     receivedAt: Date;
+    edgeNodeId?: string;
   }): Promise<ExecutionReceiptMutationResult>;
+  settleCreditHoldWithExecutionReceipt(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    amount: number;
+    envelope: SignedExecutionReceiptV2;
+    metadata: Record<string, unknown>;
+    receivedAt: Date;
+    edgeNodeId?: string;
+  }): Promise<ExecutionReceiptHoldMutationResult | null>;
   getExecutionReceipt(receiptId: string): Promise<ExecutionReceiptRecord | null>;
   listExecutionReceipts(input: {
     customerId: string;
@@ -600,6 +729,50 @@ export interface ControlStore {
     module?: OttoBillingModule;
     limit: number;
   }): Promise<ExecutionReceiptRecord[]>;
+  registerEdgeBillingNode(input: {
+    nodeId: string;
+    deploymentId: string;
+    organizationId: string;
+    signingKeyId: string;
+    createdAt: Date;
+  }): Promise<EdgeBillingNodeRecord>;
+  revokeEdgeBillingNode(input: {
+    nodeId: string;
+    deploymentId: string;
+    revokedAt: Date;
+  }): Promise<EdgeBillingNodeRecord | null>;
+  getEdgeBillingNode(nodeId: string): Promise<EdgeBillingNodeRecord | null>;
+  listEdgeBillingNodes(deploymentId: string): Promise<EdgeBillingNodeRecord[]>;
+  enqueueEdgeBillingEvent(input: {
+    eventId: string;
+    nodeId: string;
+    nodeSequence: number;
+    customerId: string;
+    deploymentId: string;
+    organizationId: string;
+    holdId: string | null;
+    envelope: SignedExecutionReceiptV2;
+    payloadSha256: string;
+    receivedAt: Date;
+  }): Promise<{ event: EdgeBillingAggregationEventRecord; replayed: boolean }>;
+  listReadyEdgeBillingEvents(input: {
+    now: Date;
+    limit: number;
+    nodeId?: string;
+  }): Promise<EdgeBillingAggregationEventRecord[]>;
+  markEdgeBillingEventReconciled(input: {
+    eventId: string;
+    reconciledAt: Date;
+  }): Promise<EdgeBillingAggregationEventRecord | null>;
+  markEdgeBillingEventFailed(input: {
+    eventId: string;
+    errorCode: string;
+    nextAttemptAt: Date;
+    deadLetter: boolean;
+    updatedAt: Date;
+  }): Promise<EdgeBillingAggregationEventRecord | null>;
+  retryEdgeBillingDeadLetters(input: { now: Date; limit: number }): Promise<number>;
+  getEdgeBillingAggregationStatus(deploymentId?: string): Promise<EdgeBillingAggregationStatus>;
   refundCredits(input: {
     transactionId: string;
     customerId: string;

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
   isOttoLicenseCapability,
@@ -29,6 +29,14 @@ import {
   validatePlanModules,
 } from '../../contracts/commercial-package.js';
 import {
+  decryptEnterpriseProvisioningContainer,
+  encryptEnterpriseProvisioningContainer,
+  enterpriseProvisioningPayloadDigest,
+  signEnterpriseProvisioningCommand,
+  type EnterpriseProvisioningCommand,
+  type EnterpriseProvisioningPayload,
+} from '../../contracts/deployment-provisioning.js';
+import {
   secureTextMatches,
   signTelemetryRequest,
   telemetryIntegrityHash,
@@ -47,6 +55,7 @@ import type {
   LicenseLifecycleEventRecord,
   CustomerRecord,
   DeploymentRecord,
+  DeploymentEnrollmentRecord,
   LicenseRecord,
   LicenseSeatUsageRecord,
 } from '../../storage/control-store.js';
@@ -62,6 +71,14 @@ const DEFAULT_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
 const TELEMETRY_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const TELEMETRY_MAX_EVENT_BYTES = 64 * 1024;
 const OPERATOR_EXPIRY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const DEPLOYMENT_ENROLLMENT_DEFAULT_TTL_MS = 60 * 60 * 1000;
+const DEPLOYMENT_ENROLLMENT_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DEPLOYMENT_CLAIM_LEASE_MS = 30 * 1000;
+const DEPLOYMENT_CLAIM_REPLAY_MS = 15 * 60 * 1000;
+const DEPLOYMENT_KIND_PATTERN = /^[a-z0-9][a-z0-9_-]{1,63}$/u;
+const CEO_USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/u;
+const MAINLAND_PHONE_PATTERN = /^(?:\+86)?1[3-9]\d{9}$/u;
+const ORGANIZATION_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/u;
 const FORBIDDEN_TELEMETRY_KEYS = new Set([
   'message',
   'messages',
@@ -97,6 +114,66 @@ function requiredString(
   return value;
 }
 
+const UNSAFE_DISPLAY_TEXT_PATTERN = /[\u0000-\u001f\u007f-\u009f\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\u3164\ufeff]/u;
+
+function requiredSafeDisplayText(
+  object: Record<string, unknown>,
+  key: string,
+  maxLength: number,
+): string {
+  const value = requiredString(object, key, maxLength);
+  if (UNSAFE_DISPLAY_TEXT_PATTERN.test(value)) {
+    throw invalidRequest(key + ' contains unsafe or invisible characters');
+  }
+  return value.normalize('NFC');
+}
+
+function optionalBoolean(
+  object: Record<string, unknown>,
+  key: string,
+  defaultValue: boolean,
+): boolean {
+  if (object[key] === undefined) return defaultValue;
+  if (typeof object[key] !== 'boolean') throw invalidRequest(key + ' must be a boolean');
+  return object[key];
+}
+
+function optionalString(
+  object: Record<string, unknown>,
+  key: string,
+  maxLength = 512,
+): string | null {
+  if (object[key] === undefined || object[key] === null || object[key] === '') {
+    return null;
+  }
+  if (typeof object[key] !== 'string') throw invalidRequest(`${key} must be a string`);
+  const value = object[key].trim();
+  if (!value || value.length > maxLength) throw invalidRequest(`${key} is invalid`);
+  return value;
+}
+
+function optionalHttpsUrl(
+  object: Record<string, unknown>,
+  key: string,
+  fallback: string | null = null,
+): string | null {
+  const value = optionalString(object, key, 2_048) ?? fallback;
+  if (value === null) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw invalidRequest(`${key} must be a valid HTTPS URL`);
+  }
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    throw invalidRequest(`${key} must be an HTTPS URL without credentials`);
+  }
+  return url.toString();
+}
+
+function bootstrapTokenHash(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
 function prefixedId(prefix: string): string {
   return `${prefix}_${randomUUID().replace(/-/gu, '')}`;
 }
@@ -549,6 +626,426 @@ export class CommercialControlService {
     return deployment;
   }
 
+  async createDeploymentEnrollment(
+    raw: unknown,
+    actorId: string,
+  ): Promise<{
+    enrollment: Omit<DeploymentEnrollmentRecord, 'tokenHash' | 'provisioningCiphertext'>;
+    bootstrapSecret: string;
+  }> {
+    const body = objectValue(raw);
+    const allowedKeys = new Set([
+      'customerId',
+      'organizationId',
+      'organizationName',
+      'organizationSlug',
+      'ceoUsername',
+      'ceoName',
+      'ceoPhone',
+      'defaultDepartmentName',
+      'deploymentName',
+      'plan',
+      'expiresAt',
+      'seatLimit',
+      'modules',
+      'validForHours',
+      'telemetryAllowed',
+      'federationGatewayUrl',
+      'modelGatewayUrl',
+      'telemetryEndpoint',
+      'updateDistributionId',
+    ]);
+    const unknownKey = Object.keys(body).find((key) => !allowedKeys.has(key));
+    if (unknownKey) throw invalidRequest('unexpected enrollment field: ' + unknownKey);
+    const customerId = requiredString(body, 'customerId', 128);
+    const organizationId = requiredString(body, 'organizationId', 128);
+    const organizationName = requiredSafeDisplayText(body, 'organizationName', 80);
+    const organizationSlug = optionalString(body, 'organizationSlug', 48)?.toLowerCase() ?? null;
+    const ceoUsername = requiredString(body, 'ceoUsername', 64);
+    const ceoName = requiredSafeDisplayText(body, 'ceoName', 80);
+    const ceoPhoneRaw = requiredString(body, 'ceoPhone', 32).replace(/[\s-]/gu, '');
+    const ceoPhone = ceoPhoneRaw.startsWith('+86') ? ceoPhoneRaw : '+86' + ceoPhoneRaw;
+    const defaultDepartmentName = requiredSafeDisplayText(body, 'defaultDepartmentName', 80);
+    const deploymentName = requiredString(body, 'deploymentName', 160);
+    const plan = requiredString(body, 'plan', 80);
+    const expiresAt = requiredString(body, 'expiresAt', 64);
+    const seatLimit = Number(body.seatLimit);
+    if (!ID_PART_PATTERN.test(customerId)) throw invalidRequest('customerId is invalid');
+    if (!ID_PART_PATTERN.test(organizationId) || organizationId === 'org_default') {
+      throw invalidRequest('organizationId is invalid or reserved');
+    }
+    if (organizationSlug && !ORGANIZATION_SLUG_PATTERN.test(organizationSlug)) {
+      throw invalidRequest('organizationSlug is invalid');
+    }
+    if (!CEO_USERNAME_PATTERN.test(ceoUsername)) {
+      throw invalidRequest('ceoUsername is invalid');
+    }
+    if (!MAINLAND_PHONE_PATTERN.test(ceoPhone)) {
+      throw invalidRequest('ceoPhone must be a mainland China mobile number');
+    }
+    const customer = await this.#store.getCustomer(customerId);
+    if (!customer) throw notFound('customer does not exist');
+    if (customer.status !== 'active') throw conflict('customer is suspended');
+    const planDefinition = commercialPlan(plan);
+    if (!planDefinition) {
+      throw invalidRequest(
+        `plan must be one of: ${OTTO_COMMERCIAL_PLAN_CATALOG.plans
+          .map((item) => item.id).join(', ')}`,
+      );
+    }
+    if (!Number.isInteger(seatLimit) || seatLimit < 1 || seatLimit > 100_000) {
+      throw invalidRequest('seatLimit must be an integer between 1 and 100000');
+    }
+    const requestedModules = body.modules === undefined
+      ? planDefinition.defaultModules
+      : Array.isArray(body.modules) ? body.modules.map(String) : [];
+    if (requestedModules.length === 0) {
+      throw invalidRequest('modules must contain at least one capability');
+    }
+    const unknownModule = requestedModules.find((module) => !isOttoLicenseCapability(module));
+    if (unknownModule) {
+      throw invalidRequest(`unknown License capability: ${unknownModule}`);
+    }
+    const modules = [...new Set(requestedModules)] as IssueLicenseInput['modules'];
+    const modulePolicy = validatePlanModules(planDefinition, modules);
+    if (modulePolicy.missing.length > 0) {
+      throw invalidRequest(
+        `plan ${plan} requires modules: ${modulePolicy.missing.join(', ')}`,
+      );
+    }
+    if (modulePolicy.unsupported.length > 0) {
+      throw invalidRequest(
+        `plan ${plan} does not allow modules: ${modulePolicy.unsupported.join(', ')}`,
+      );
+    }
+    const now = this.#now();
+    const licenseExpiresAtMs = Date.parse(expiresAt);
+    if (!Number.isFinite(licenseExpiresAtMs) || licenseExpiresAtMs <= now) {
+      throw invalidRequest('expiresAt must be a future ISO date');
+    }
+    if (licenseExpiresAtMs - now > MAX_LICENSE_DURATION_MS) {
+      throw invalidRequest('License duration cannot exceed five years');
+    }
+    const validForHours = body.validForHours === undefined
+      ? DEPLOYMENT_ENROLLMENT_DEFAULT_TTL_MS / (60 * 60 * 1000)
+      : Number(body.validForHours);
+    const enrollmentTtlMs = validForHours * 60 * 60 * 1000;
+    if (
+      !Number.isInteger(validForHours)
+      || enrollmentTtlMs < 5 * 60 * 1000
+      || enrollmentTtlMs > DEPLOYMENT_ENROLLMENT_MAX_TTL_MS
+    ) {
+      throw invalidRequest('validForHours must be an integer between 1 and 168');
+    }
+    const federationGatewayUrl = optionalHttpsUrl(body, 'federationGatewayUrl');
+    const modelGatewayUrl = optionalHttpsUrl(body, 'modelGatewayUrl');
+    const telemetryEndpoint = optionalHttpsUrl(
+      body,
+      'telemetryEndpoint',
+      `${this.#publicBaseUrl}/v1/telemetry/ingest`,
+    );
+    const updateDistributionId = optionalString(body, 'updateDistributionId', 128);
+    if (updateDistributionId && !ID_PART_PATTERN.test(updateDistributionId)) {
+      throw invalidRequest('updateDistributionId is invalid');
+    }
+    const bootstrapSecret = randomBytes(32).toString('base64url');
+    const enrollmentId = prefixedId('enroll');
+    const provisioningPayload: EnterpriseProvisioningPayload = {
+      organization: {
+        id: organizationId,
+        name: organizationName,
+        ...(organizationSlug ? { slug: organizationSlug } : {}),
+      },
+      ceo: {
+        username: ceoUsername,
+        name: ceoName,
+        phone: ceoPhone,
+      },
+      defaultDepartmentName,
+      modules,
+    };
+    const provisioningCiphertext = encryptEnterpriseProvisioningContainer(
+      bootstrapSecret,
+      enrollmentId,
+      { version: 1, payload: provisioningPayload, command: null },
+    );
+    const record = await this.#store.createDeploymentEnrollment({
+      id: enrollmentId,
+      tokenHash: bootstrapTokenHash(bootstrapSecret),
+      customerId,
+      organizationId,
+      deploymentName,
+      plan,
+      licenseExpiresAtMs,
+      seatLimit,
+      modules,
+      telemetryAllowed: optionalBoolean(body, 'telemetryAllowed', true),
+      federationGatewayUrl,
+      modelGatewayUrl,
+      telemetryEndpoint,
+      updateDistributionId,
+      provisioningCiphertext,
+      licenseId: prefixedId('lic'),
+      expiresAt: new Date(now + enrollmentTtlMs),
+    });
+    await this.#store.appendAuditEvent({
+      actorId,
+      action: 'deployment_enrollment.created',
+      targetType: 'deployment_enrollment',
+      targetId: record.id,
+      detail: {
+        customerId,
+        organizationId,
+        plan,
+        seatLimit,
+        modules,
+        expiresAt: record.expiresAt.toISOString(),
+      },
+    });
+    const enrollment = structuredClone(record) as Partial<DeploymentEnrollmentRecord>;
+    delete enrollment.tokenHash;
+    delete enrollment.provisioningCiphertext;
+    return {
+      enrollment: enrollment as Omit<
+        DeploymentEnrollmentRecord,
+        'tokenHash' | 'provisioningCiphertext'
+      >,
+      bootstrapSecret,
+    };
+  }
+
+  async claimDeploymentEnrollment(
+    raw: unknown,
+    bootstrapSecret: string,
+  ): Promise<{
+    status: 'activated' | 'already_activated';
+    licenseEnvelope: OttoSignedLicenseEnvelope;
+    capabilities: {
+      billing: boolean;
+      telemetry: boolean;
+      federation: boolean;
+      updates: boolean;
+      modelGateway: boolean;
+      storage: boolean;
+    };
+    federationGatewayUrl: string | null;
+    modelGatewayUrl: string | null;
+    telemetryEndpoint: string | null;
+    updateDistributionId: string | null;
+    provisioningCommand: EnterpriseProvisioningCommand;
+  }> {
+    if (Buffer.byteLength(bootstrapSecret, 'utf8') < 32) {
+      throw unauthorized('deployment enrollment is invalid or unavailable');
+    }
+    const body = objectValue(raw);
+    const allowedKeys = new Set([
+      'version',
+      'deploymentId',
+      'machineFingerprint',
+      'appVersion',
+      'buildCommit',
+      'publicOrigin',
+      'deploymentKind',
+    ]);
+    const unknownKey = Object.keys(body).find((key) => !allowedKeys.has(key));
+    if (unknownKey) throw invalidRequest(`unexpected enrollment field: ${unknownKey}`);
+    if (body.version !== 1) throw invalidRequest('version must be 1');
+    const deploymentId = requiredString(body, 'deploymentId', 68);
+    const machineFingerprint = requiredString(
+      body,
+      'machineFingerprint',
+      64,
+    ).toLowerCase();
+    const appVersion = requiredString(body, 'appVersion', 80);
+    const buildCommit = requiredString(body, 'buildCommit', 128);
+    const deploymentKind = requiredString(body, 'deploymentKind', 64).toLowerCase();
+    const publicOrigin = optionalHttpsUrl(body, 'publicOrigin');
+    if (!DEPLOYMENT_ID_PATTERN.test(deploymentId)) {
+      throw invalidRequest('deploymentId is invalid');
+    }
+    if (!MACHINE_FINGERPRINT_PATTERN.test(machineFingerprint)) {
+      throw invalidRequest('machineFingerprint must be a SHA-256 hex digest');
+    }
+    if (!DEPLOYMENT_KIND_PATTERN.test(deploymentKind)) {
+      throw invalidRequest('deploymentKind is invalid');
+    }
+    const now = this.#now();
+    const claimLeaseId = prefixedId('claim');
+    const requestHash = createHash('sha256').update(JSON.stringify([
+      1,
+      deploymentId,
+      machineFingerprint,
+      appVersion,
+      buildCommit,
+      publicOrigin,
+      deploymentKind,
+    ]), 'utf8').digest('hex');
+    const reservation = await this.#store.reserveDeploymentEnrollmentClaim({
+      tokenHash: bootstrapTokenHash(bootstrapSecret),
+      requestHash,
+      deploymentId,
+      machineFingerprint,
+      claimLeaseId,
+      claimLeaseExpiresAt: new Date(now + DEPLOYMENT_CLAIM_LEASE_MS),
+      appVersion,
+      buildCommit,
+      publicOrigin,
+      deploymentKind,
+      now: new Date(now),
+    });
+    if (!reservation) {
+      throw unauthorized('deployment enrollment is invalid or unavailable');
+    }
+    if (reservation.state === 'in_progress') {
+      throw conflict('deployment enrollment is already being activated; retry shortly');
+    }
+    const enrollment = reservation.enrollment;
+    const customer = await this.#store.getCustomer(enrollment.customerId);
+    if (!customer || customer.status !== 'active') {
+      throw conflict('customer is unavailable or suspended');
+    }
+    let envelope: OttoSignedLicenseEnvelope;
+    let provisioningCommand: EnterpriseProvisioningCommand;
+    const provisioning = enrollment.provisioningCiphertext
+      ? decryptEnterpriseProvisioningContainer(
+          bootstrapSecret,
+          enrollment.id,
+          enrollment.provisioningCiphertext,
+        )
+      : null;
+    if (!provisioning) {
+      throw unauthorized('deployment enrollment is invalid or unavailable');
+    }
+    if (reservation.state === 'activated') {
+      const deployment = await this.#store.getDeployment(deploymentId);
+      if (
+        !deployment
+        || deployment.status !== 'active'
+        || deployment.customerId !== enrollment.customerId
+        || deployment.organizationId !== enrollment.organizationId
+        || deployment.machineFingerprint !== machineFingerprint
+      ) {
+        throw unauthorized('deployment enrollment binding is no longer active');
+      }
+      const license = await this.#store.getLicense(enrollment.licenseId);
+      if (
+        !license
+        || license.revokedAtMs !== null
+        || license.expiresAtMs <= now
+        || license.deploymentId !== deploymentId
+        || license.organizationId !== enrollment.organizationId
+        || license.machineFingerprint !== machineFingerprint
+      ) {
+        throw unauthorized('deployment enrollment License is no longer active');
+      }
+      envelope = await this.getLicenseEnvelope(enrollment.licenseId);
+      if (!provisioning.command) {
+        throw unauthorized('deployment enrollment is invalid or unavailable');
+      }
+      provisioningCommand = provisioning.command;
+    } else {
+      const existing = await this.#store.getDeployment(deploymentId);
+      if (existing) {
+        if (existing.status !== 'active') {
+          throw conflict('deployment is suspended');
+        }
+        if (
+          existing.customerId !== enrollment.customerId
+          || existing.organizationId !== enrollment.organizationId
+          || existing.machineFingerprint !== machineFingerprint
+        ) {
+          throw conflict('deploymentId is already bound to another deployment');
+        }
+      } else {
+        await this.createDeployment({
+          deploymentId,
+          customerId: enrollment.customerId,
+          organizationId: enrollment.organizationId,
+          machineFingerprint,
+          name: enrollment.deploymentName,
+        }, `deployment-enrollment:${enrollment.id}`);
+      }
+      const existingLicense = await this.#store.getLicense(enrollment.licenseId);
+      if (
+        existingLicense
+        && (existingLicense.revokedAtMs !== null || existingLicense.expiresAtMs <= now)
+      ) {
+        throw conflict('reserved License is no longer active');
+      }
+      envelope = existingLicense
+        ? await this.getLicenseEnvelope(enrollment.licenseId)
+        : await this.issueLicense({
+          deploymentId,
+          plan: enrollment.plan,
+          expiresAt: new Date(enrollment.licenseExpiresAtMs).toISOString(),
+          seatLimit: enrollment.seatLimit,
+          modules: enrollment.modules,
+          offline: false,
+          telemetryAllowed: enrollment.telemetryAllowed,
+        }, `deployment-enrollment:${enrollment.id}`, enrollment.licenseId);
+      const issuedAt = new Date(now).toISOString();
+      const commandExpiresAt = new Date(now + DEPLOYMENT_CLAIM_REPLAY_MS).toISOString();
+      provisioningCommand = await signEnterpriseProvisioningCommand(this.#signer, {
+        commandId: prefixedId('cmd'),
+        deploymentId,
+        type: 'enterprise.initiate',
+        schemaVersion: 1,
+        sequence: 1,
+        issuedAt,
+        expiresAt: commandExpiresAt,
+        idempotencyKey: 'bootstrap-enterprise:' + enrollment.id,
+        payloadDigest: enterpriseProvisioningPayloadDigest(provisioning.payload),
+        payload: provisioning.payload,
+      });
+      const completedCiphertext = encryptEnterpriseProvisioningContainer(
+        bootstrapSecret,
+        enrollment.id,
+        { ...provisioning, command: provisioningCommand },
+      );
+      const completed = await this.#store.completeDeploymentEnrollmentClaim({
+        enrollmentId: enrollment.id,
+        claimLeaseId,
+        activatedAt: new Date(now),
+        replayExpiresAt: new Date(now + DEPLOYMENT_CLAIM_REPLAY_MS),
+        provisioningCiphertext: completedCiphertext,
+      });
+      if (!completed) {
+        throw conflict('deployment enrollment activation lease was lost; retry shortly');
+      }
+      await this.#store.appendAuditEvent({
+        actorId: `deployment:${deploymentId}`,
+        action: 'deployment_enrollment.claimed',
+        targetType: 'deployment_enrollment',
+        targetId: enrollment.id,
+        detail: {
+          deploymentId,
+          organizationId: enrollment.organizationId,
+          appVersion,
+          buildCommit,
+          publicOrigin,
+          deploymentKind,
+          licenseId: enrollment.licenseId,
+        },
+      });
+    }
+    return {
+      status: reservation.state === 'activated' ? 'already_activated' : 'activated',
+      licenseEnvelope: envelope,
+      capabilities: {
+        billing: envelope.license.billingEnforcement === 'enforce',
+        telemetry: enrollment.telemetryAllowed,
+        federation: Boolean(enrollment.federationGatewayUrl),
+        updates: Boolean(enrollment.updateDistributionId),
+        modelGateway: Boolean(enrollment.modelGatewayUrl),
+        storage: true,
+      },
+      federationGatewayUrl: enrollment.federationGatewayUrl,
+      modelGatewayUrl: enrollment.modelGatewayUrl,
+      telemetryEndpoint: enrollment.telemetryEndpoint,
+      updateDistributionId: enrollment.updateDistributionId,
+      provisioningCommand,
+    };
+  }
   async #changeLicense(
     existing: LicenseRecord,
     changes: Partial<LicenseRecord>,
@@ -831,7 +1328,11 @@ export class CommercialControlService {
     return this.#store.getLicenseSeatUsage(id);
   }
 
-  async issueLicense(raw: unknown, actorId: string): Promise<OttoSignedLicenseEnvelope> {
+  async issueLicense(
+    raw: unknown,
+    actorId: string,
+    forcedLicenseId?: string,
+  ): Promise<OttoSignedLicenseEnvelope> {
     const body = objectValue(raw);
     const deploymentId = requiredString(body, 'deploymentId', 68);
     const plan = requiredString(body, 'plan', 80);
@@ -907,7 +1408,7 @@ export class CommercialControlService {
     if (offline && billingEnforcement === 'enforce') {
       throw invalidRequest('offline License cannot enforce real-time billing');
     }
-    const id = prefixedId('lic');
+    const id = forcedLicenseId ?? prefixedId('lic');
     const leaseEndpoint = offline
       ? null
       : `${this.#publicBaseUrl}/v1/licenses/${encodeURIComponent(id)}/lease`;

@@ -1295,6 +1295,194 @@ const MIGRATIONS: Migration[] = [
        ON control_federation_attachments(status, expires_at)`,
     ],
   },
+  {
+    id: '030_edge_gateway_control_plane',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_edge_gateway_policies (
+        deployment_id TEXT PRIMARY KEY REFERENCES control_deployments(id) ON DELETE CASCADE,
+        organization_id TEXT NOT NULL,
+        policy_version TEXT NOT NULL,
+        routes JSONB NOT NULL,
+        limits JSONB NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
+        updated_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CHECK (jsonb_typeof(routes) = 'array'),
+        CHECK (jsonb_array_length(routes) BETWEEN 1 AND 64),
+        CHECK (jsonb_typeof(limits) = 'object')
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_edge_gateway_policies_organization
+       ON control_edge_gateway_policies(organization_id, status, updated_at DESC)`,
+      `CREATE TABLE IF NOT EXISTS control_edge_gateway_nonces (
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id) ON DELETE CASCADE,
+        nonce TEXT NOT NULL,
+        expires_at_ms BIGINT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (deployment_id, nonce)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_edge_gateway_nonces_expiry
+       ON control_edge_gateway_nonces(expires_at_ms)`,
+      `INSERT INTO control_admin_permissions (id) VALUES
+        ('edge_gateway.read'), ('edge_gateway.manage')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'super_admin', id FROM control_admin_permissions
+       WHERE id IN ('edge_gateway.read', 'edge_gateway.manage')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'license_admin', id FROM control_admin_permissions
+       WHERE id IN ('edge_gateway.read', 'edge_gateway.manage')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       SELECT 'auditor', id FROM control_admin_permissions
+       WHERE id = 'edge_gateway.read'
+       ON CONFLICT DO NOTHING`,
+    ],
+  },
+  {
+    id: '031_edge_billing_aggregation',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_edge_billing_nodes (
+        node_id TEXT PRIMARY KEY CHECK (node_id ~ '^edge_[a-f0-9]{32}$'),
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id) ON DELETE CASCADE,
+        organization_id TEXT NOT NULL,
+        signing_key_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+        last_sequence BIGINT NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
+        last_seen_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (deployment_id, signing_key_id),
+        FOREIGN KEY (deployment_id, signing_key_id)
+          REFERENCES control_execution_receipt_keys(deployment_id, key_id),
+        CHECK ((status = 'revoked') = (revoked_at IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_edge_billing_nodes_deployment
+       ON control_edge_billing_nodes(deployment_id, status, node_id)`,
+      `ALTER TABLE control_execution_receipts
+       ADD COLUMN IF NOT EXISTS edge_node_id TEXT
+       REFERENCES control_edge_billing_nodes(node_id)`,
+      `ALTER TABLE control_execution_receipts
+       DROP CONSTRAINT IF EXISTS control_execution_receipts_deployment_id_sequence_key`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_execution_receipts_source_sequence
+       ON control_execution_receipts(deployment_id, COALESCE(edge_node_id, ''), sequence)`,
+      `CREATE TABLE IF NOT EXISTS control_edge_billing_events (
+        event_id TEXT PRIMARY KEY CHECK (event_id ~ '^edgeevt_[a-f0-9]{32}$'),
+        node_id TEXT NOT NULL REFERENCES control_edge_billing_nodes(node_id),
+        node_sequence BIGINT NOT NULL CHECK (node_sequence > 0),
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        deployment_id TEXT NOT NULL REFERENCES control_deployments(id),
+        organization_id TEXT NOT NULL,
+        hold_id TEXT REFERENCES control_credit_holds(id),
+        receipt_id TEXT NOT NULL UNIQUE CHECK (receipt_id ~ '^exec_[a-f0-9]{32}$'),
+        payload JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+        payload_sha256 TEXT NOT NULL CHECK (payload_sha256 ~ '^[a-f0-9]{64}$'),
+        state TEXT NOT NULL DEFAULT 'pending'
+          CHECK (state IN ('pending', 'retrying', 'dead_letter', 'reconciled')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 1000),
+        next_attempt_at TIMESTAMPTZ NOT NULL,
+        last_error_code TEXT,
+        received_at TIMESTAMPTZ NOT NULL,
+        reconciled_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (node_id, node_sequence),
+        CHECK (node_sequence = ((payload->'receipt'->>'sequence')::BIGINT)),
+        CHECK ((state = 'reconciled') = (reconciled_at IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_control_edge_billing_events_ready
+       ON control_edge_billing_events(node_id, node_sequence, next_attempt_at)
+       WHERE state IN ('pending', 'retrying')`,
+      `CREATE INDEX IF NOT EXISTS idx_control_edge_billing_events_reconciliation
+       ON control_edge_billing_events(deployment_id, state, received_at)`,
+    ],
+  },
+  {
+    id: '032_private_deployment_enrollments',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS control_deployment_enrollments (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE CHECK (token_hash ~ '^[a-f0-9]{64}$'),
+        request_hash TEXT CHECK (request_hash ~ '^[a-f0-9]{64}$'),
+        customer_id TEXT NOT NULL REFERENCES control_customers(id),
+        organization_id TEXT NOT NULL,
+        deployment_name TEXT NOT NULL,
+        plan TEXT NOT NULL,
+        license_expires_at_ms BIGINT NOT NULL,
+        seat_limit INTEGER NOT NULL CHECK (seat_limit BETWEEN 1 AND 100000),
+        modules JSONB NOT NULL CHECK (jsonb_typeof(modules) = 'array'),
+        telemetry_allowed BOOLEAN NOT NULL DEFAULT true,
+        federation_gateway_url TEXT,
+        model_gateway_url TEXT,
+        telemetry_endpoint TEXT,
+        update_distribution_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'claiming', 'activated', 'revoked')),
+        deployment_id TEXT,
+        machine_fingerprint TEXT,
+        license_id TEXT NOT NULL UNIQUE,
+        claim_lease_id TEXT,
+        claim_lease_expires_at TIMESTAMPTZ,
+        replay_expires_at TIMESTAMPTZ,
+        app_version TEXT,
+        build_commit TEXT,
+        public_origin TEXT,
+        deployment_kind TEXT,
+        expires_at TIMESTAMPTZ NOT NULL,
+        claimed_at TIMESTAMPTZ,
+        activated_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CHECK (machine_fingerprint IS NULL OR machine_fingerprint ~ '^[a-f0-9]{64}$'),
+        CHECK ((deployment_id IS NULL) = (machine_fingerprint IS NULL)),
+        CHECK (status <> 'activated' OR activated_at IS NOT NULL)
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_control_deployment_enrollments_deployment
+       ON control_deployment_enrollments(deployment_id)
+       WHERE deployment_id IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_control_deployment_enrollments_expiry
+       ON control_deployment_enrollments(status, expires_at)`,
+    ],
+  },
+  {
+    id: '033_enterprise_provisioning_commands',
+    statements: [
+      `ALTER TABLE control_deployment_enrollments
+       ADD COLUMN IF NOT EXISTS provisioning_ciphertext TEXT`,
+      `CREATE INDEX IF NOT EXISTS idx_control_deployment_enrollments_provisioning
+       ON control_deployment_enrollments(status, deployment_id)
+       WHERE provisioning_ciphertext IS NOT NULL`,
+    ],
+  },
+  {
+    id: '034_enterprise_provisioning_security',
+    statements: [
+      `INSERT INTO control_admin_permissions (id) VALUES ('enterprise.provision')
+       ON CONFLICT DO NOTHING`,
+      `INSERT INTO control_admin_role_permissions (role_id, permission_id)
+       VALUES ('super_admin', 'enterprise.provision')
+       ON CONFLICT DO NOTHING`,
+      `UPDATE control_deployment_enrollments
+       SET status = 'revoked',
+           token_hash = md5('legacy-revoked:' || id) || md5('legacy-token:' || id),
+           request_hash = NULL,
+           provisioning_ciphertext = NULL,
+           deployment_id = NULL,
+           machine_fingerprint = NULL,
+           claim_lease_id = NULL,
+           claim_lease_expires_at = NULL,
+           replay_expires_at = NULL,
+           app_version = NULL,
+           build_commit = NULL,
+           public_origin = NULL,
+           deployment_kind = NULL,
+           claimed_at = NULL,
+           updated_at = now()
+       WHERE provisioning_ciphertext IS NULL
+         AND status IN ('pending', 'claiming')`,
+    ],
+  },
 ];
 
 export const CONTROL_SCHEMA_MIGRATION_IDS = Object.freeze(

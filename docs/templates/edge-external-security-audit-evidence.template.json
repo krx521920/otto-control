@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "product": "otto-edge-gateway",
+  "releaseCandidate": "REPLACE_WITH_IMMUTABLE_IMAGE_DIGEST",
+  "auditor": "REPLACE_WITH_INDEPENDENT_AUDITOR_LEGAL_NAME",
+  "scope": [
+    "authentication_and_policy",
+    "provider_secret_handling",
+    "network_boundary",
+    "billing_integrity",
+    "availability_and_abuse_resistance"
+  ],
+  "testEnvironment": "REPLACE_WITH_ENVIRONMENT_AND_BUILD_ID",
+  "methodology": "REPLACE_WITH_AUDIT_STANDARD_AND_TEST_METHOD",
+  "openFindings": {
+    "critical": null,
+    "high": null,
+    "medium": null,
+    "low": null
+  },
+  "reportIssuedAt": null,
+  "validUntil": null,
+  "reportSha256": null,
+  "auditorSignatureReference": null
+}

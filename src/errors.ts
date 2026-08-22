@@ -30,6 +30,14 @@ export function conflict(message: string): ControlPlaneError {
   return new ControlPlaneError(409, 'CONFLICT', message);
 }
 
+export function creditRequired(message = 'Insufficient credits'): ControlPlaneError {
+  return new ControlPlaneError(402, 'CREDIT_REQUIRED', message);
+}
+
+export function creditHoldUnavailable(message = 'Credit hold is unavailable'): ControlPlaneError {
+  return new ControlPlaneError(409, 'CREDIT_HOLD_UNAVAILABLE', message);
+}
+
 export function rateLimited(message: string): ControlPlaneError {
   return new ControlPlaneError(429, 'RATE_LIMITED', message);
 }

@@ -165,9 +165,14 @@ class GovernanceMemoryStore implements DataGovernanceStore {
 
   async runDataRetention(): Promise<{
     telemetryEventsDeleted: number; expiredNoncesDeleted: number;
-    expiredExportPayloadsRestricted: number;
+    expiredExportPayloadsRestricted: number; deploymentEnrollmentsSanitized: number;
   }> {
-    return { telemetryEventsDeleted: 2, expiredNoncesDeleted: 3, expiredExportPayloadsRestricted: 1 };
+    return {
+      telemetryEventsDeleted: 2,
+      expiredNoncesDeleted: 3,
+      expiredExportPayloadsRestricted: 1,
+      deploymentEnrollmentsSanitized: 4,
+    };
   }
 
   async appendAuditEvent(input: AuditEventInput): Promise<void> {

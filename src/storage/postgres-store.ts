@@ -21,7 +21,7 @@ import type {
   OttoTelemetryEvent,
   OttoTelemetryReceipt,
 } from '../contracts/telemetry.js';
-import { conflict } from '../errors.js';
+import { conflict, creditRequired } from '../errors.js';
 import type {
   AuditEventInput,
   CommercialInventorySnapshot,
@@ -33,6 +33,9 @@ import type {
   CustomerRecord,
   DeploymentUpdateAssignmentRecord,
   DeploymentRecord,
+  DeploymentEnrollmentRecord,
+  DeploymentEnrollmentReservation,
+  EdgeGatewayPolicyRecord,
   LicenseLifecycleEventRecord,
   LicenseRecord,
   LicenseSeatUsageRecord,
@@ -50,6 +53,7 @@ import type {
   UpdateReleaseRecord,
   UpdateReleaseTransition,
 } from './control-store.js';
+import type { EdgeGatewayLimitsV1, EdgeModelRouteV1 } from '../contracts/edge-gateway.js';
 import type { UpdateChannel, UpdateReleaseState } from '../contracts/update-policy.js';
 import type {
   ReleaseArtifactKind,
@@ -65,7 +69,11 @@ import type {
   CreditStatement,
   CreditTransactionRecord,
   CreditTransactionType,
+  EdgeBillingAggregationEventRecord,
+  EdgeBillingAggregationStatus,
+  EdgeBillingNodeRecord,
   ExecutionReceiptKeyRecord,
+  ExecutionReceiptHoldMutationResult,
   ExecutionReceiptMutationResult,
   ExecutionReceiptRecord,
   SignedExecutionReceiptV2,
@@ -180,6 +188,52 @@ interface DeploymentRow {
   machine_fingerprint: string;
   name: string;
   status: RecordStatus;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface DeploymentEnrollmentRow {
+  id: string;
+  token_hash: string;
+  request_hash: string | null;
+  customer_id: string;
+  organization_id: string;
+  deployment_name: string;
+  plan: string;
+  license_expires_at_ms: string;
+  seat_limit: number;
+  modules: OttoLicenseCapability[];
+  telemetry_allowed: boolean;
+  federation_gateway_url: string | null;
+  model_gateway_url: string | null;
+  telemetry_endpoint: string | null;
+  update_distribution_id: string | null;
+  provisioning_ciphertext: string | null;
+  status: DeploymentEnrollmentRecord['status'];
+  deployment_id: string | null;
+  machine_fingerprint: string | null;
+  license_id: string;
+  claim_lease_id: string | null;
+  claim_lease_expires_at: Date | null;
+  replay_expires_at: Date | null;
+  app_version: string | null;
+  build_commit: string | null;
+  public_origin: string | null;
+  deployment_kind: string | null;
+  expires_at: Date;
+  claimed_at: Date | null;
+  activated_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+interface EdgeGatewayPolicyRow {
+  deployment_id: string;
+  organization_id: string;
+  policy_version: string;
+  routes: EdgeModelRouteV1[];
+  limits: EdgeGatewayLimitsV1;
+  status: RecordStatus;
+  updated_by: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -382,6 +436,39 @@ interface ExecutionReceiptRow {
   transaction_id: string;
   verification_status: 'verified';
   received_at: Date;
+  edge_node_id: string | null;
+}
+
+interface EdgeBillingNodeRow {
+  node_id: string;
+  deployment_id: string;
+  organization_id: string;
+  signing_key_id: string;
+  status: EdgeBillingNodeRecord['status'];
+  last_sequence: string;
+  last_seen_at: Date | null;
+  revoked_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface EdgeBillingEventRow {
+  event_id: string;
+  node_id: string;
+  node_sequence: string;
+  customer_id: string;
+  deployment_id: string;
+  organization_id: string;
+  hold_id: string | null;
+  payload: SignedExecutionReceiptV2;
+  payload_sha256: string;
+  state: EdgeBillingAggregationEventRecord['state'];
+  attempts: number;
+  next_attempt_at: Date;
+  last_error_code: string | null;
+  received_at: Date;
+  reconciled_at: Date | null;
+  updated_at: Date;
 }
 
 interface LatestTelemetryRow {
@@ -633,6 +720,58 @@ function deploymentFromRow(row: DeploymentRow): DeploymentRecord {
     machineFingerprint: row.machine_fingerprint,
     name: row.name,
     status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function deploymentEnrollmentFromRow(
+  row: DeploymentEnrollmentRow,
+): DeploymentEnrollmentRecord {
+  return {
+    id: row.id,
+    tokenHash: row.token_hash,
+    requestHash: row.request_hash,
+    customerId: row.customer_id,
+    organizationId: row.organization_id,
+    deploymentName: row.deployment_name,
+    plan: row.plan,
+    licenseExpiresAtMs: Number(row.license_expires_at_ms),
+    seatLimit: row.seat_limit,
+    modules: row.modules,
+    telemetryAllowed: row.telemetry_allowed,
+    federationGatewayUrl: row.federation_gateway_url,
+    modelGatewayUrl: row.model_gateway_url,
+    telemetryEndpoint: row.telemetry_endpoint,
+    updateDistributionId: row.update_distribution_id,
+    provisioningCiphertext: row.provisioning_ciphertext,
+    status: row.status,
+    deploymentId: row.deployment_id,
+    machineFingerprint: row.machine_fingerprint,
+    licenseId: row.license_id,
+    claimLeaseId: row.claim_lease_id,
+    claimLeaseExpiresAt: row.claim_lease_expires_at,
+    replayExpiresAt: row.replay_expires_at,
+    appVersion: row.app_version,
+    buildCommit: row.build_commit,
+    publicOrigin: row.public_origin,
+    deploymentKind: row.deployment_kind,
+    expiresAt: row.expires_at,
+    claimedAt: row.claimed_at,
+    activatedAt: row.activated_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+function edgeGatewayPolicyFromRow(row: EdgeGatewayPolicyRow): EdgeGatewayPolicyRecord {
+  return {
+    deploymentId: row.deployment_id,
+    organizationId: row.organization_id,
+    policyVersion: row.policy_version,
+    routes: row.routes,
+    limits: row.limits,
+    status: row.status,
+    updatedBy: row.updated_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1062,6 +1201,7 @@ function executionReceiptFromRow(row: ExecutionReceiptRow): ExecutionReceiptReco
     version: 2,
     receiptId: row.receipt_id,
     customerId: row.customer_id,
+    edgeNodeId: row.edge_node_id,
     deploymentId: row.deployment_id,
     organizationId: row.organization_id,
     taskId: row.task_id,
@@ -1077,6 +1217,42 @@ function executionReceiptFromRow(row: ExecutionReceiptRow): ExecutionReceiptReco
     transactionId: row.transaction_id,
     verificationStatus: row.verification_status,
     receivedAt: row.received_at,
+  };
+}
+
+function edgeBillingNodeFromRow(row: EdgeBillingNodeRow): EdgeBillingNodeRecord {
+  return {
+    nodeId: row.node_id,
+    deploymentId: row.deployment_id,
+    organizationId: row.organization_id,
+    signingKeyId: row.signing_key_id,
+    status: row.status,
+    lastSequence: Number(row.last_sequence),
+    lastSeenAt: row.last_seen_at,
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function edgeBillingEventFromRow(row: EdgeBillingEventRow): EdgeBillingAggregationEventRecord {
+  return {
+    eventId: row.event_id,
+    nodeId: row.node_id,
+    nodeSequence: Number(row.node_sequence),
+    customerId: row.customer_id,
+    deploymentId: row.deployment_id,
+    organizationId: row.organization_id,
+    holdId: row.hold_id,
+    envelope: row.payload,
+    payloadSha256: row.payload_sha256,
+    state: row.state,
+    attempts: row.attempts,
+    nextAttemptAt: row.next_attempt_at,
+    lastErrorCode: row.last_error_code,
+    receivedAt: row.received_at,
+    reconciledAt: row.reconciled_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -1194,6 +1370,14 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       if (postgresCode(error) === '23505') throw conflict('customer already exists');
       throw error;
     }
+  }
+
+  async getCustomer(id: string): Promise<CustomerRecord | null> {
+    const result = await this.#pool.query<CustomerRow>(
+      'SELECT * FROM control_customers WHERE id = $1',
+      [id],
+    );
+    return result.rows[0] ? customerFromRow(result.rows[0]) : null;
   }
 
   async getCommercialInventory(input: {
@@ -1328,6 +1512,310 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       [id],
     );
     return result.rows[0] ? deploymentFromRow(result.rows[0]) : null;
+  }
+
+  async createDeploymentEnrollment(input: {
+    id: string;
+    tokenHash: string;
+    customerId: string;
+    organizationId: string;
+    deploymentName: string;
+    plan: string;
+    licenseExpiresAtMs: number;
+    seatLimit: number;
+    modules: OttoLicenseCapability[];
+    telemetryAllowed: boolean;
+    federationGatewayUrl: string | null;
+    modelGatewayUrl: string | null;
+    telemetryEndpoint: string | null;
+    updateDistributionId: string | null;
+    provisioningCiphertext: string | null;
+    licenseId: string;
+    expiresAt: Date;
+  }): Promise<DeploymentEnrollmentRecord> {
+    try {
+      const result = await this.#pool.query<DeploymentEnrollmentRow>(
+        `INSERT INTO control_deployment_enrollments
+          (id, token_hash, customer_id, organization_id, deployment_name, plan,
+           license_expires_at_ms, seat_limit, modules, telemetry_allowed,
+           federation_gateway_url, model_gateway_url, telemetry_endpoint,
+           update_distribution_id, provisioning_ciphertext, license_id, expires_at)
+         VALUES
+          ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13,
+           $14, $15, $16, $17)
+         RETURNING *`,
+        [
+          input.id,
+          input.tokenHash,
+          input.customerId,
+          input.organizationId,
+          input.deploymentName,
+          input.plan,
+          input.licenseExpiresAtMs,
+          input.seatLimit,
+          JSON.stringify(input.modules),
+          input.telemetryAllowed,
+          input.federationGatewayUrl,
+          input.modelGatewayUrl,
+          input.telemetryEndpoint,
+          input.updateDistributionId,
+          input.provisioningCiphertext,
+          input.licenseId,
+          input.expiresAt,
+        ],
+      );
+      return deploymentEnrollmentFromRow(result.rows[0]!);
+    } catch (error) {
+      if (postgresCode(error) === '23503') throw conflict('customer does not exist');
+      if (postgresCode(error) === '23505') throw conflict('deployment enrollment already exists');
+      throw error;
+    }
+  }
+
+  async reserveDeploymentEnrollmentClaim(input: {
+    tokenHash: string;
+    requestHash: string;
+    deploymentId: string;
+    machineFingerprint: string;
+    claimLeaseId: string;
+    claimLeaseExpiresAt: Date;
+    appVersion: string;
+    buildCommit: string;
+    publicOrigin: string | null;
+    deploymentKind: string;
+    now: Date;
+  }): Promise<DeploymentEnrollmentReservation | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const selected = await client.query<DeploymentEnrollmentRow>(
+        'SELECT * FROM control_deployment_enrollments WHERE token_hash = $1 FOR UPDATE',
+        [input.tokenHash],
+      );
+      const row = selected.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (row.status === 'revoked' || row.expires_at <= input.now) {
+        await client.query(
+          `UPDATE control_deployment_enrollments
+           SET status = CASE WHEN status = 'activated' THEN status ELSE 'revoked' END,
+               token_hash = md5('retired:' || id) || md5('retired-token:' || id),
+               request_hash = NULL,
+               provisioning_ciphertext = NULL,
+               deployment_id = NULL,
+               machine_fingerprint = NULL,
+               claim_lease_id = NULL,
+               claim_lease_expires_at = NULL,
+               replay_expires_at = NULL,
+               app_version = NULL,
+               build_commit = NULL,
+               public_origin = NULL,
+               deployment_kind = NULL,
+               updated_at = $2
+           WHERE id = $1`,
+          [row.id, input.now],
+        );
+        await client.query('COMMIT');
+        return null;
+      }
+      const sameBinding = (
+        (row.request_hash === null || row.request_hash === input.requestHash)
+        && (row.deployment_id === null || row.deployment_id === input.deploymentId)
+        && (row.machine_fingerprint === null
+          || row.machine_fingerprint === input.machineFingerprint)
+      );
+      if (!sameBinding) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (row.status === 'activated') {
+        if (!row.replay_expires_at || row.replay_expires_at <= input.now) {
+          await client.query(
+            `UPDATE control_deployment_enrollments
+             SET token_hash = md5('retired:' || id) || md5('retired-token:' || id),
+                 request_hash = NULL,
+                 provisioning_ciphertext = NULL,
+                 deployment_id = NULL,
+                 machine_fingerprint = NULL,
+                 claim_lease_id = NULL,
+                 claim_lease_expires_at = NULL,
+                 replay_expires_at = NULL,
+                 app_version = NULL,
+                 build_commit = NULL,
+                 public_origin = NULL,
+                 deployment_kind = NULL,
+                 updated_at = $2
+             WHERE id = $1`,
+            [row.id, input.now],
+          );
+          await client.query('COMMIT');
+          return null;
+        }
+        await client.query('COMMIT');
+        return { state: 'activated', enrollment: deploymentEnrollmentFromRow(row) };
+      }
+      if (
+        row.status === 'claiming'
+        && row.claim_lease_expires_at
+        && row.claim_lease_expires_at > input.now
+      ) {
+        await client.query('COMMIT');
+        return { state: 'in_progress', enrollment: deploymentEnrollmentFromRow(row) };
+      }
+      const updated = await client.query<DeploymentEnrollmentRow>(
+        `UPDATE control_deployment_enrollments
+         SET status = 'claiming',
+             deployment_id = $2,
+             machine_fingerprint = $3,
+             claim_lease_id = $4,
+             claim_lease_expires_at = $5,
+             app_version = $6,
+             build_commit = $7,
+             public_origin = $8,
+             deployment_kind = $9,
+             claimed_at = COALESCE(claimed_at, $10),
+             updated_at = $10,
+             request_hash = $11
+         WHERE id = $1
+         RETURNING *`,
+        [
+          row.id,
+          input.deploymentId,
+          input.machineFingerprint,
+          input.claimLeaseId,
+          input.claimLeaseExpiresAt,
+          input.appVersion,
+          input.buildCommit,
+          input.publicOrigin,
+          input.deploymentKind,
+          input.now,
+          input.requestHash,
+        ],
+      );
+      await client.query('COMMIT');
+      return {
+        state: 'reserved',
+        enrollment: deploymentEnrollmentFromRow(updated.rows[0]!),
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async completeDeploymentEnrollmentClaim(input: {
+    enrollmentId: string;
+    claimLeaseId: string;
+    activatedAt: Date;
+    replayExpiresAt: Date;
+    provisioningCiphertext: string | null;
+  }): Promise<DeploymentEnrollmentRecord | null> {
+    const result = await this.#pool.query<DeploymentEnrollmentRow>(
+      `UPDATE control_deployment_enrollments
+       SET status = 'activated',
+           activated_at = $3,
+           replay_expires_at = $4,
+           provisioning_ciphertext = $5,
+           claim_lease_id = NULL,
+           claim_lease_expires_at = NULL,
+           updated_at = $3
+       WHERE id = $1
+         AND status = 'claiming'
+         AND claim_lease_id = $2
+       RETURNING *`,
+      [
+        input.enrollmentId,
+        input.claimLeaseId,
+        input.activatedAt,
+        input.replayExpiresAt,
+        input.provisioningCiphertext,
+      ],
+    );
+    return result.rows[0] ? deploymentEnrollmentFromRow(result.rows[0]) : null;
+  }
+  async upsertEdgeGatewayPolicy(input: {
+    deploymentId: string;
+    organizationId: string;
+    policyVersion: string;
+    routes: EdgeModelRouteV1[];
+    limits: EdgeGatewayLimitsV1;
+    status: RecordStatus;
+    updatedBy: string;
+    changedAt: Date;
+  }): Promise<EdgeGatewayPolicyRecord> {
+    try {
+      const result = await this.#pool.query<EdgeGatewayPolicyRow>(
+        `INSERT INTO control_edge_gateway_policies
+          (deployment_id, organization_id, policy_version, routes, limits, status,
+           updated_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $8)
+         ON CONFLICT (deployment_id) DO UPDATE SET
+           organization_id = EXCLUDED.organization_id,
+           policy_version = EXCLUDED.policy_version,
+           routes = EXCLUDED.routes,
+           limits = EXCLUDED.limits,
+           status = EXCLUDED.status,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = EXCLUDED.updated_at
+         RETURNING *`,
+        [
+          input.deploymentId,
+          input.organizationId,
+          input.policyVersion,
+          JSON.stringify(input.routes),
+          JSON.stringify(input.limits),
+          input.status,
+          input.updatedBy,
+          input.changedAt,
+        ],
+      );
+      return edgeGatewayPolicyFromRow(result.rows[0]!);
+    } catch (error) {
+      if (postgresCode(error) === '23503') throw conflict('deployment does not exist');
+      throw error;
+    }
+  }
+
+  async getEdgeGatewayPolicy(deploymentId: string): Promise<EdgeGatewayPolicyRecord | null> {
+    const result = await this.#pool.query<EdgeGatewayPolicyRow>(
+      'SELECT * FROM control_edge_gateway_policies WHERE deployment_id = $1',
+      [deploymentId],
+    );
+    return result.rows[0] ? edgeGatewayPolicyFromRow(result.rows[0]) : null;
+  }
+
+  async consumeEdgeGatewayNonce(input: {
+    deploymentId: string;
+    nonce: string;
+    nowMs: number;
+    expiresAtMs: number;
+  }): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'DELETE FROM control_edge_gateway_nonces WHERE expires_at_ms < $1',
+        [input.nowMs],
+      );
+      const result = await client.query(
+        `INSERT INTO control_edge_gateway_nonces (deployment_id, nonce, expires_at_ms)
+         VALUES ($1, $2, $3)
+         ON CONFLICT DO NOTHING
+         RETURNING nonce`,
+        [input.deploymentId, input.nonce, input.expiresAtMs],
+      );
+      await client.query('COMMIT');
+      return result.rowCount === 1;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async createLicense(input: CreateLicenseRecordInput): Promise<LicenseRecord> {
@@ -3166,7 +3654,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         };
       }
       if (Number(current.available_balance) < input.amount) {
-        throw conflict('insufficient available credits');
+        throw creditRequired('insufficient available credits');
       }
       const updated = await client.query<CreditAccountRow>(
         `UPDATE control_enterprise_credit_accounts SET
@@ -3651,6 +4139,7 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
     envelope: SignedExecutionReceiptV2;
     metadata: Record<string, unknown>;
     receivedAt: Date;
+    edgeNodeId?: string;
   }): Promise<ExecutionReceiptMutationResult> {
     const receipt = input.envelope.receipt;
     const client = await this.#pool.connect();
@@ -3687,7 +4176,8 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
           || replay.sequence !== receipt.sequence
           || replay.policyVersion !== receipt.policyVersion
           || replay.signingKeyId !== input.envelope.signingKeyId
-          || replay.signature !== input.envelope.signature) {
+          || replay.signature !== input.envelope.signature
+          || (replay.edgeNodeId ?? null) !== (input.edgeNodeId ?? null)) {
           throw conflict('execution receipt id was already used for different evidence');
         }
         const transactionResult = await client.query<CreditTransactionRow>(
@@ -3712,16 +4202,28 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       const key = keyResult.rows[0];
       if (!key || key.status !== 'active') throw conflict('execution receipt signing key is inactive');
 
-      await client.query(
-        `INSERT INTO control_execution_receipt_sequences (deployment_id, last_sequence, updated_at)
-         VALUES ($1, 0, $2) ON CONFLICT DO NOTHING`,
-        [receipt.deploymentId, input.receivedAt],
-      );
-      const sequenceResult = await client.query<{ last_sequence: string }>(
-        `SELECT last_sequence FROM control_execution_receipt_sequences
-         WHERE deployment_id = $1 FOR UPDATE`,
-        [receipt.deploymentId],
-      );
+      let sequenceResult;
+      if (input.edgeNodeId) {
+        sequenceResult = await client.query<{ last_sequence: string }>(
+          `SELECT last_sequence FROM control_edge_billing_nodes
+           WHERE node_id = $1 AND deployment_id = $2 AND organization_id = $3
+             AND signing_key_id = $4 AND status = 'active' FOR UPDATE`,
+          [input.edgeNodeId, receipt.deploymentId, receipt.organizationId,
+            input.envelope.signingKeyId],
+        );
+        if (!sequenceResult.rows[0]) throw conflict('edge billing node binding is inactive');
+      } else {
+        await client.query(
+          `INSERT INTO control_execution_receipt_sequences (deployment_id, last_sequence, updated_at)
+           VALUES ($1, 0, $2) ON CONFLICT DO NOTHING`,
+          [receipt.deploymentId, input.receivedAt],
+        );
+        sequenceResult = await client.query<{ last_sequence: string }>(
+          `SELECT last_sequence FROM control_execution_receipt_sequences
+           WHERE deployment_id = $1 FOR UPDATE`,
+          [receipt.deploymentId],
+        );
+      }
       const expectedSequence = Number(sequenceResult.rows[0]!.last_sequence) + 1;
       if (receipt.sequence !== expectedSequence) {
         throw conflict(`execution receipt sequence must be ${expectedSequence}`);
@@ -3764,21 +4266,29 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
         `INSERT INTO control_execution_receipts
           (receipt_id, customer_id, deployment_id, organization_id, task_id, module,
            units, model, issued_at_ms, expires_at_ms, sequence, policy_version,
-           signing_key_id, signature, payload, transaction_id, received_at)
+           signing_key_id, signature, payload, transaction_id, received_at, edge_node_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                 $13, $14, $15::jsonb, $16, $17)
+                 $13, $14, $15::jsonb, $16, $17, $18)
          RETURNING *`,
         [receipt.receiptId, input.customerId, receipt.deploymentId, receipt.organizationId,
           receipt.taskId, receipt.moduleId, receipt.units, receipt.model, receipt.issuedAtMs,
           receipt.expiresAtMs, receipt.sequence, receipt.policyVersion,
           input.envelope.signingKeyId, input.envelope.signature, JSON.stringify(receipt),
-          input.transactionId, input.receivedAt],
+          input.transactionId, input.receivedAt, input.edgeNodeId ?? null],
       );
-      await client.query(
-        `UPDATE control_execution_receipt_sequences
-         SET last_sequence = $2, updated_at = $3 WHERE deployment_id = $1`,
-        [receipt.deploymentId, receipt.sequence, input.receivedAt],
-      );
+      if (input.edgeNodeId) {
+        await client.query(
+          `UPDATE control_edge_billing_nodes SET last_sequence = $2, last_seen_at = $3,
+             updated_at = $3 WHERE node_id = $1`,
+          [input.edgeNodeId, receipt.sequence, input.receivedAt],
+        );
+      } else {
+        await client.query(
+          `UPDATE control_execution_receipt_sequences
+           SET last_sequence = $2, updated_at = $3 WHERE deployment_id = $1`,
+          [receipt.deploymentId, receipt.sequence, input.receivedAt],
+        );
+      }
       await client.query('COMMIT');
       return {
         account,
@@ -3803,6 +4313,217 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       [receiptId],
     );
     return result.rows[0] ? executionReceiptFromRow(result.rows[0]) : null;
+  }
+
+  async settleCreditHoldWithExecutionReceipt(input: {
+    transactionId: string;
+    holdId: string;
+    customerId: string;
+    amount: number;
+    envelope: SignedExecutionReceiptV2;
+    metadata: Record<string, unknown>;
+    receivedAt: Date;
+    edgeNodeId?: string;
+  }): Promise<ExecutionReceiptHoldMutationResult | null> {
+    const receipt = input.envelope.receipt;
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const holdResult = await client.query<CreditHoldRow>(
+        `SELECT * FROM control_credit_holds
+         WHERE id = $1 AND customer_id = $2 FOR UPDATE`,
+        [input.holdId, input.customerId],
+      );
+      const holdRow = holdResult.rows[0];
+      if (!holdRow) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const accountResult = await client.query<CreditAccountRow>(
+        `SELECT * FROM control_enterprise_credit_accounts
+         WHERE customer_id = $1 AND organization_id = $2 FOR UPDATE`,
+        [input.customerId, holdRow.organization_id],
+      );
+      const current = accountResult.rows[0];
+      if (!current) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const replayResult = await client.query<ExecutionReceiptRow>(
+        'SELECT * FROM control_execution_receipts WHERE receipt_id = $1',
+        [receipt.receiptId],
+      );
+      if (replayResult.rows[0]) {
+        const replay = executionReceiptFromRow(replayResult.rows[0]);
+        if (replay.customerId !== input.customerId
+          || replay.deploymentId !== receipt.deploymentId
+          || replay.organizationId !== receipt.organizationId
+          || replay.taskId !== receipt.taskId
+          || replay.moduleId !== receipt.moduleId
+          || replay.units !== receipt.units
+          || replay.model !== receipt.model
+          || replay.issuedAtMs !== receipt.issuedAtMs
+          || replay.expiresAtMs !== receipt.expiresAtMs
+          || replay.sequence !== receipt.sequence
+          || replay.policyVersion !== receipt.policyVersion
+          || replay.signingKeyId !== input.envelope.signingKeyId
+          || replay.signature !== input.envelope.signature
+          || (replay.edgeNodeId ?? null) !== (input.edgeNodeId ?? null)) {
+          throw conflict('execution receipt id was already used for different evidence');
+        }
+        const transactionResult = await client.query<CreditTransactionRow>(
+          'SELECT * FROM control_credit_transactions WHERE id = $1',
+          [replay.transactionId],
+        );
+        const transactionRow = transactionResult.rows[0];
+        if (!transactionRow) throw new Error('execution receipt transaction is missing');
+        const transaction = creditTransactionFromRow(transactionRow);
+        if (transaction.type !== 'capture' || transaction.metadata.holdId !== input.holdId) {
+          throw conflict('execution receipt was settled against a different credit hold');
+        }
+        await client.query('COMMIT');
+        return {
+          account: creditAccountFromRow(current),
+          hold: creditHoldFromRow(holdRow),
+          transaction,
+          receipt: replay,
+          replayed: true,
+        };
+      }
+      if (holdRow.status !== 'active') throw conflict('credit hold is no longer active');
+      if (holdRow.expires_at.getTime() <= input.receivedAt.getTime()) {
+        throw conflict('credit hold has expired');
+      }
+      if (holdRow.deployment_id !== receipt.deploymentId
+        || holdRow.organization_id !== receipt.organizationId
+        || holdRow.module !== receipt.moduleId) {
+        throw conflict('execution receipt does not match the credit hold');
+      }
+      const keyResult = await client.query<ExecutionReceiptKeyRow>(
+        `SELECT * FROM control_execution_receipt_keys
+         WHERE deployment_id = $1 AND key_id = $2 FOR SHARE`,
+        [receipt.deploymentId, input.envelope.signingKeyId],
+      );
+      const key = keyResult.rows[0];
+      if (!key || key.status !== 'active') throw conflict('execution receipt signing key is inactive');
+      let sequenceResult;
+      if (input.edgeNodeId) {
+        sequenceResult = await client.query<{ last_sequence: string }>(
+          `SELECT last_sequence FROM control_edge_billing_nodes
+           WHERE node_id = $1 AND deployment_id = $2 AND organization_id = $3
+             AND signing_key_id = $4 AND status = 'active' FOR UPDATE`,
+          [input.edgeNodeId, receipt.deploymentId, receipt.organizationId,
+            input.envelope.signingKeyId],
+        );
+        if (!sequenceResult.rows[0]) throw conflict('edge billing node binding is inactive');
+      } else {
+        await client.query(
+          `INSERT INTO control_execution_receipt_sequences (deployment_id, last_sequence, updated_at)
+           VALUES ($1, 0, $2) ON CONFLICT DO NOTHING`,
+          [receipt.deploymentId, input.receivedAt],
+        );
+        sequenceResult = await client.query<{ last_sequence: string }>(
+          `SELECT last_sequence FROM control_execution_receipt_sequences
+           WHERE deployment_id = $1 FOR UPDATE`,
+          [receipt.deploymentId],
+        );
+      }
+      const expectedSequence = Number(sequenceResult.rows[0]!.last_sequence) + 1;
+      if (receipt.sequence !== expectedSequence) {
+        throw conflict(`execution receipt sequence must be ${expectedSequence}`);
+      }
+      const existingTask = await client.query<{ receipt_id: string }>(
+        `SELECT receipt_id FROM control_execution_receipts
+         WHERE deployment_id = $1 AND task_id = $2`,
+        [receipt.deploymentId, receipt.taskId],
+      );
+      if (existingTask.rows[0]) throw conflict('task already has a billed execution receipt');
+      const heldAmount = Number(holdRow.amount);
+      const availableDelta = heldAmount - input.amount;
+      if (Number(current.available_balance) + availableDelta < 0) {
+        throw conflict('insufficient available credits for settlement');
+      }
+      const updated = await client.query<CreditAccountRow>(
+        `UPDATE control_enterprise_credit_accounts SET
+           available_balance = available_balance + $2,
+           frozen_balance = frozen_balance - $3,
+           total_consumed = total_consumed + $4,
+           version = version + 1,
+           updated_at = $5
+         WHERE customer_id = $1 AND organization_id = $6 RETURNING *`,
+        [input.customerId, availableDelta, heldAmount, input.amount, input.receivedAt,
+          receipt.organizationId],
+      );
+      const account = creditAccountFromRow(updated.rows[0]!);
+      const updatedHold = await client.query<CreditHoldRow>(
+        `UPDATE control_credit_holds SET status = 'captured', updated_at = $2
+         WHERE id = $1 RETURNING *`,
+        [input.holdId, input.receivedAt],
+      );
+      const metadata = {
+        ...input.metadata,
+        holdId: input.holdId,
+        executionReceiptId: receipt.receiptId,
+        receiptVerificationStatus: 'verified',
+      };
+      const transactionResult = await client.query<CreditTransactionRow>(
+        `INSERT INTO control_credit_transactions
+          (id, customer_id, organization_id, deployment_id, module, type,
+           available_delta, frozen_delta, billed_amount, available_after, frozen_after,
+           idempotency_key, reference_id, description, metadata, occurred_at)
+         VALUES ($1, $2, $3, $4, $5, 'capture', $6, $7, $8, $9, $10,
+                 $11, $12, $13, $14::jsonb, $15)
+         RETURNING *`,
+        [input.transactionId, input.customerId, receipt.organizationId, receipt.deploymentId,
+          receipt.moduleId, availableDelta, -heldAmount, input.amount, account.availableBalance,
+          account.frozenBalance, `receipt:${receipt.receiptId}`, receipt.taskId,
+          'Verified signed execution receipt settled against hold', JSON.stringify(metadata),
+          new Date(receipt.issuedAtMs)],
+      );
+      const inserted = await client.query<ExecutionReceiptRow>(
+        `INSERT INTO control_execution_receipts
+          (receipt_id, customer_id, deployment_id, organization_id, task_id, module,
+           units, model, issued_at_ms, expires_at_ms, sequence, policy_version,
+           signing_key_id, signature, payload, transaction_id, received_at, edge_node_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                 $13, $14, $15::jsonb, $16, $17, $18)
+         RETURNING *`,
+        [receipt.receiptId, input.customerId, receipt.deploymentId, receipt.organizationId,
+          receipt.taskId, receipt.moduleId, receipt.units, receipt.model, receipt.issuedAtMs,
+          receipt.expiresAtMs, receipt.sequence, receipt.policyVersion,
+          input.envelope.signingKeyId, input.envelope.signature, JSON.stringify(receipt),
+          input.transactionId, input.receivedAt, input.edgeNodeId ?? null],
+      );
+      if (input.edgeNodeId) {
+        await client.query(
+          `UPDATE control_edge_billing_nodes SET last_sequence = $2, last_seen_at = $3,
+             updated_at = $3 WHERE node_id = $1`,
+          [input.edgeNodeId, receipt.sequence, input.receivedAt],
+        );
+      } else {
+        await client.query(
+          `UPDATE control_execution_receipt_sequences
+           SET last_sequence = $2, updated_at = $3 WHERE deployment_id = $1`,
+          [receipt.deploymentId, receipt.sequence, input.receivedAt],
+        );
+      }
+      await client.query('COMMIT');
+      return {
+        account,
+        hold: creditHoldFromRow(updatedHold.rows[0]!),
+        transaction: creditTransactionFromRow(transactionResult.rows[0]!),
+        receipt: executionReceiptFromRow(inserted.rows[0]!),
+        replayed: false,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23503') throw conflict('execution receipt binding is invalid');
+      if (postgresCode(error) === '23505') throw conflict('execution receipt was already consumed');
+      if (postgresCode(error) === '23514') throw conflict('execution receipt violates billing limits');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listExecutionReceipts(input: {
@@ -3836,6 +4557,250 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
       values,
     );
     return result.rows.map(executionReceiptFromRow);
+  }
+
+  async registerEdgeBillingNode(input: {
+    nodeId: string;
+    deploymentId: string;
+    organizationId: string;
+    signingKeyId: string;
+    createdAt: Date;
+  }): Promise<EdgeBillingNodeRecord> {
+    try {
+      const result = await this.#pool.query<EdgeBillingNodeRow>(
+        `INSERT INTO control_edge_billing_nodes
+          (node_id, deployment_id, organization_id, signing_key_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $5)
+         ON CONFLICT (node_id) DO UPDATE SET updated_at = control_edge_billing_nodes.updated_at
+         RETURNING *`,
+        [input.nodeId, input.deploymentId, input.organizationId, input.signingKeyId,
+          input.createdAt],
+      );
+      const node = edgeBillingNodeFromRow(result.rows[0]!);
+      if (node.deploymentId !== input.deploymentId
+        || node.organizationId !== input.organizationId
+        || node.signingKeyId !== input.signingKeyId) {
+        throw conflict('edge billing node id is already bound to another identity');
+      }
+      return node;
+    } catch (error) {
+      if (postgresCode(error) === '23503') throw conflict('edge billing node key is not registered');
+      if (postgresCode(error) === '23505') throw conflict('edge billing signing key is already bound');
+      throw error;
+    }
+  }
+
+  async revokeEdgeBillingNode(input: {
+    nodeId: string;
+    deploymentId: string;
+    revokedAt: Date;
+  }): Promise<EdgeBillingNodeRecord | null> {
+    const result = await this.#pool.query<EdgeBillingNodeRow>(
+      `UPDATE control_edge_billing_nodes SET status = 'revoked', revoked_at = $3,
+         updated_at = $3 WHERE node_id = $1 AND deployment_id = $2 RETURNING *`,
+      [input.nodeId, input.deploymentId, input.revokedAt],
+    );
+    return result.rows[0] ? edgeBillingNodeFromRow(result.rows[0]) : null;
+  }
+
+  async getEdgeBillingNode(nodeId: string): Promise<EdgeBillingNodeRecord | null> {
+    const result = await this.#pool.query<EdgeBillingNodeRow>(
+      'SELECT * FROM control_edge_billing_nodes WHERE node_id = $1',
+      [nodeId],
+    );
+    return result.rows[0] ? edgeBillingNodeFromRow(result.rows[0]) : null;
+  }
+
+  async listEdgeBillingNodes(deploymentId: string): Promise<EdgeBillingNodeRecord[]> {
+    const result = await this.#pool.query<EdgeBillingNodeRow>(
+      `SELECT * FROM control_edge_billing_nodes
+       WHERE deployment_id = $1 ORDER BY created_at, node_id`,
+      [deploymentId],
+    );
+    return result.rows.map(edgeBillingNodeFromRow);
+  }
+
+  async enqueueEdgeBillingEvent(input: {
+    eventId: string;
+    nodeId: string;
+    nodeSequence: number;
+    customerId: string;
+    deploymentId: string;
+    organizationId: string;
+    holdId: string | null;
+    envelope: SignedExecutionReceiptV2;
+    payloadSha256: string;
+    receivedAt: Date;
+  }): Promise<{ event: EdgeBillingAggregationEventRecord; replayed: boolean }> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const replay = await client.query<EdgeBillingEventRow>(
+        'SELECT * FROM control_edge_billing_events WHERE event_id = $1 FOR UPDATE',
+        [input.eventId],
+      );
+      if (replay.rows[0]) {
+        const event = edgeBillingEventFromRow(replay.rows[0]);
+        if (event.payloadSha256 !== input.payloadSha256) {
+          throw conflict('edge billing event id was already used for different evidence');
+        }
+        await client.query('COMMIT');
+        return { event, replayed: true };
+      }
+      const nodeResult = await client.query<EdgeBillingNodeRow>(
+        `SELECT node.* FROM control_edge_billing_nodes node
+         JOIN control_deployments deployment ON deployment.id = node.deployment_id
+         WHERE node.node_id = $1 AND deployment.customer_id = $2 FOR UPDATE OF node`,
+        [input.nodeId, input.customerId],
+      );
+      const node = nodeResult.rows[0];
+      if (!node || node.status !== 'active'
+        || node.deployment_id !== input.deploymentId
+        || node.organization_id !== input.organizationId
+        || node.signing_key_id !== input.envelope.signingKeyId) {
+        throw conflict('edge billing node binding is inactive');
+      }
+      if (input.nodeSequence <= Number(node.last_sequence)) {
+        throw conflict('edge billing event sequence was already finalized');
+      }
+      const inserted = await client.query<EdgeBillingEventRow>(
+        `INSERT INTO control_edge_billing_events
+          (event_id, node_id, node_sequence, customer_id, deployment_id, organization_id,
+           hold_id, receipt_id, payload, payload_sha256, next_attempt_at, received_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $11, $11)
+         RETURNING *`,
+        [input.eventId, input.nodeId, input.nodeSequence, input.customerId,
+          input.deploymentId, input.organizationId, input.holdId,
+          input.envelope.receipt.receiptId, JSON.stringify(input.envelope), input.payloadSha256,
+          input.receivedAt],
+      );
+      await client.query('COMMIT');
+      return { event: edgeBillingEventFromRow(inserted.rows[0]!), replayed: false };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (postgresCode(error) === '23505') throw conflict('edge billing event was already submitted');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listReadyEdgeBillingEvents(input: {
+    now: Date;
+    limit: number;
+    nodeId?: string;
+  }): Promise<EdgeBillingAggregationEventRecord[]> {
+    const leaseUntil = new Date(input.now.getTime() + 60_000);
+    const values: unknown[] = [input.now, input.limit, leaseUntil];
+    const nodeFilter = input.nodeId ? 'AND event.node_id = $4' : '';
+    if (input.nodeId) values.push(input.nodeId);
+    const result = await this.#pool.query<EdgeBillingEventRow>(
+      `WITH selected AS (
+         SELECT event.event_id FROM control_edge_billing_events event
+         JOIN control_edge_billing_nodes node ON node.node_id = event.node_id
+         WHERE event.state IN ('pending', 'retrying') AND event.next_attempt_at <= $1
+           AND node.status = 'active'
+           AND (
+             event.node_sequence = node.last_sequence + 1
+             OR (
+               event.node_sequence <= node.last_sequence
+               AND EXISTS (
+                 SELECT 1 FROM control_execution_receipts receipt
+                 WHERE receipt.receipt_id = event.receipt_id
+                   AND receipt.edge_node_id = event.node_id
+               )
+             )
+           )
+           ${nodeFilter}
+         ORDER BY event.node_sequence, event.received_at, event.event_id
+         LIMIT $2 FOR UPDATE OF event SKIP LOCKED
+       )
+       UPDATE control_edge_billing_events event
+       SET state = 'retrying', next_attempt_at = $3, updated_at = $1
+       FROM selected WHERE event.event_id = selected.event_id
+       RETURNING event.*`,
+      values,
+    );
+    return result.rows.map(edgeBillingEventFromRow);
+  }
+
+  async markEdgeBillingEventReconciled(input: {
+    eventId: string;
+    reconciledAt: Date;
+  }): Promise<EdgeBillingAggregationEventRecord | null> {
+    const result = await this.#pool.query<EdgeBillingEventRow>(
+      `UPDATE control_edge_billing_events SET state = 'reconciled', reconciled_at = $2,
+         last_error_code = NULL, updated_at = $2 WHERE event_id = $1 RETURNING *`,
+      [input.eventId, input.reconciledAt],
+    );
+    return result.rows[0] ? edgeBillingEventFromRow(result.rows[0]) : null;
+  }
+
+  async markEdgeBillingEventFailed(input: {
+    eventId: string;
+    errorCode: string;
+    nextAttemptAt: Date;
+    deadLetter: boolean;
+    updatedAt: Date;
+  }): Promise<EdgeBillingAggregationEventRecord | null> {
+    const result = await this.#pool.query<EdgeBillingEventRow>(
+      `UPDATE control_edge_billing_events SET attempts = attempts + 1,
+         state = $2, last_error_code = $3, next_attempt_at = $4, updated_at = $5
+       WHERE event_id = $1 AND state <> 'reconciled' RETURNING *`,
+      [input.eventId, input.deadLetter ? 'dead_letter' : 'retrying', input.errorCode,
+        input.nextAttemptAt, input.updatedAt],
+    );
+    return result.rows[0] ? edgeBillingEventFromRow(result.rows[0]) : null;
+  }
+
+  async retryEdgeBillingDeadLetters(input: { now: Date; limit: number }): Promise<number> {
+    const result = await this.#pool.query(
+      `WITH selected AS (
+         SELECT event_id FROM control_edge_billing_events
+         WHERE state = 'dead_letter' ORDER BY received_at, event_id LIMIT $1
+         FOR UPDATE SKIP LOCKED
+       )
+       UPDATE control_edge_billing_events event SET state = 'retrying', attempts = 0,
+         next_attempt_at = $2, last_error_code = NULL, updated_at = $2
+       FROM selected WHERE event.event_id = selected.event_id`,
+      [input.limit, input.now],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async getEdgeBillingAggregationStatus(
+    deploymentId?: string,
+  ): Promise<EdgeBillingAggregationStatus> {
+    const result = await this.#pool.query<{
+      nodes: string; active_nodes: string; revoked_nodes: string; pending: string;
+      retrying: string; dead_letter: string; reconciled: string; sequence_gaps: string;
+      oldest_pending_at: Date | null;
+    }>(
+      `SELECT
+         COUNT(DISTINCT node.node_id) AS nodes,
+         COUNT(DISTINCT node.node_id) FILTER (WHERE node.status = 'active') AS active_nodes,
+         COUNT(DISTINCT node.node_id) FILTER (WHERE node.status = 'revoked') AS revoked_nodes,
+         COUNT(event.event_id) FILTER (WHERE event.state = 'pending') AS pending,
+         COUNT(event.event_id) FILTER (WHERE event.state = 'retrying') AS retrying,
+         COUNT(event.event_id) FILTER (WHERE event.state = 'dead_letter') AS dead_letter,
+         COUNT(event.event_id) FILTER (WHERE event.state = 'reconciled') AS reconciled,
+         COUNT(DISTINCT node.node_id) FILTER (WHERE event.state IN ('pending', 'retrying')
+           AND event.node_sequence > node.last_sequence + 1) AS sequence_gaps,
+         MIN(event.received_at) FILTER (WHERE event.state IN ('pending', 'retrying'))
+           AS oldest_pending_at
+       FROM control_edge_billing_nodes node
+       LEFT JOIN control_edge_billing_events event ON event.node_id = node.node_id
+       WHERE ($1::TEXT IS NULL OR node.deployment_id = $1)`,
+      [deploymentId ?? null],
+    );
+    const row = result.rows[0]!;
+    return {
+      nodes: Number(row.nodes), activeNodes: Number(row.active_nodes),
+      revokedNodes: Number(row.revoked_nodes), pending: Number(row.pending),
+      retrying: Number(row.retrying), deadLetter: Number(row.dead_letter),
+      reconciled: Number(row.reconciled), sequenceGaps: Number(row.sequence_gaps),
+      oldestPendingAt: row.oldest_pending_at,
+    };
   }
 
   async refundCredits(input: {
@@ -5276,6 +6241,10 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
          WHERE deployments.id = seats.deployment_id AND deployments.customer_id = $1`,
         [request.customer_id],
       );
+      const deploymentEnrollments = await client.query(
+        'DELETE FROM control_deployment_enrollments WHERE customer_id = $1',
+        [request.customer_id],
+      );
       await client.query(
         `UPDATE control_deployments
          SET organization_id = 'erased:' || md5($2 || ':org:' || id),
@@ -5369,8 +6338,10 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
           { dataClass: 'health_telemetry', disposition: 'deleted', records: telemetry.rowCount ?? 0,
             reason: 'health telemetry is not required after customer erasure', retainUntil: null },
           { dataClass: 'ephemeral_security_state', disposition: 'deleted',
-            records: nonceCount + (assignments.rowCount ?? 0) + (seats.rowCount ?? 0),
-            reason: 'nonces, update assignments and live seat state are no longer required', retainUntil: null },
+            records: nonceCount + (assignments.rowCount ?? 0) + (seats.rowCount ?? 0)
+              + (deploymentEnrollments.rowCount ?? 0),
+            reason: 'nonces, enrollment secrets, update assignments and live seat state are no longer required',
+            retainUntil: null },
           { dataClass: 'privacy_acceptance_identity', disposition: 'anonymized',
             records: acceptanceCount.rowCount ?? 0, reason: 'acceptance proof retained without accepter identity',
             retainUntil: input.auditRetainUntil.toISOString() },
@@ -5447,11 +6418,41 @@ export class PostgresControlStore implements ControlStore, DatabaseObservability
            )`,
         [input.exportPayloadBefore, input.now],
       );
+      const deploymentEnrollments = await client.query(
+        `UPDATE control_deployment_enrollments
+         SET status = CASE WHEN status IN ('pending', 'claiming') THEN 'revoked' ELSE status END,
+             token_hash = md5('retired:' || id) || md5('retired-token:' || id),
+             request_hash = NULL,
+             provisioning_ciphertext = NULL,
+             deployment_id = NULL,
+             machine_fingerprint = NULL,
+             claim_lease_id = NULL,
+             claim_lease_expires_at = NULL,
+             replay_expires_at = NULL,
+             app_version = NULL,
+             build_commit = NULL,
+             public_origin = NULL,
+             deployment_kind = NULL,
+             updated_at = $1
+         WHERE (
+           status = 'revoked'
+           OR expires_at <= $1
+           OR (status = 'activated' AND replay_expires_at IS NOT NULL AND replay_expires_at <= $1)
+         ) AND (
+           provisioning_ciphertext IS NOT NULL
+           OR request_hash IS NOT NULL
+           OR deployment_id IS NOT NULL
+           OR machine_fingerprint IS NOT NULL
+           OR public_origin IS NOT NULL
+         )`,
+        [input.now],
+      );
       await client.query('COMMIT');
       return {
         telemetryEventsDeleted: telemetry.rowCount ?? 0,
         expiredNoncesDeleted: nonces,
         expiredExportPayloadsRestricted: restricted.rowCount ?? 0,
+        deploymentEnrollmentsSanitized: deploymentEnrollments.rowCount ?? 0,
       };
     } catch (error) {
       await client.query('ROLLBACK');

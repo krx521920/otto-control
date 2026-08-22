@@ -1,6 +1,8 @@
 node_modules/
 dist/
 coverage/
+.stryker-tmp/
+reports/mutation/
 .env
 .env.*
 !.env.example
@@ -8,7 +10,17 @@ secrets/
 signing/
 signing-staging/
 backups/
+edge-config/
+edge-config-staging/
+edge-provider-secrets/
+edge-provider-secrets-staging/
+.edge-rollout/
 compose.*.resolved.yaml
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+deploy/aliyun-esa/release/
 *.log
 .DS_Store
 Thumbs.db

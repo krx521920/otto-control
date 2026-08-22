@@ -142,6 +142,89 @@ x-federation-common: &federation-common
     - SETGID
     - SETUID
 
+x-edge-gateway-common: &edge-gateway-common
+  image: ${OTTO_EDGE_IMAGE:-otto-control-edge:local}
+  build:
+    context: .
+    dockerfile: Dockerfile
+  entrypoint: ["/usr/local/bin/otto-edge-entrypoint"]
+  command: ["node", "dist/edge-gateway/server.js"]
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 45s
+  env_file:
+    - ${OTTO_CONTROL_ENV_FILE:-.env.production}
+  environment:
+    OTTO_EDGE_HOST: 0.0.0.0
+    OTTO_EDGE_PORT: "7791"
+    OTTO_EDGE_CONTROL_URL: https://${CONTROL_DOMAIN}
+    OTTO_EDGE_CONTROL_PUBLIC_KEYS_FILE: /run/secrets/edge_control_public_keys
+    OTTO_EDGE_UPSTREAM_ORIGINS_FILE: /run/secrets/edge_upstream_origins
+    OTTO_EDGE_DEPLOYMENT_IDENTITY_FILE: /run/secrets/edge_deployment_identity
+    OTTO_EDGE_LEASE_TOKEN_FILE: /run/secrets/edge_lease_token
+    OTTO_EDGE_RATE_LIMIT_BACKEND: redis
+    OTTO_EDGE_REDIS_URL: rediss://edge-redis:6379/0
+    OTTO_EDGE_REDIS_PASSWORD_FILE: /run/secrets/edge_redis_password
+    OTTO_EDGE_REDIS_CA_FILE: /run/secrets/edge_redis_tls_ca
+    OTTO_EDGE_REDIS_SERVER_NAME: edge-redis
+    OTTO_EDGE_REDIS_ALLOW_INSECURE: "false"
+    OTTO_EDGE_RATE_LIMIT_KEY_FILE: /run/secrets/edge_rate_limit_key
+    OTTO_EDGE_BILLING_BACKEND: control
+    OTTO_EDGE_BILLING_NODE_ID: ${OTTO_EDGE_BILLING_NODE_ID:-}
+    OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE: /run/secrets/edge_execution_receipt_key
+    OTTO_EDGE_BILLING_JOURNAL_FILE: /var/lib/otto-edge/billing-journal.ndjson
+    OTTO_EDGE_REQUEST_LEDGER_FILE: /var/lib/otto-edge/request-ledger.ndjson
+    OTTO_EDGE_OPERATIONS_TOKEN_FILE: /run/secrets/edge_operations_token
+    OTTO_EDGE_STATE_DIRECTORY: /var/lib/otto-edge
+  depends_on:
+    control-a:
+      condition: service_healthy
+    caddy:
+      condition: service_started
+    edge-redis:
+      condition: service_healthy
+  expose:
+    - "7791"
+  secrets:
+    - edge_control_public_keys
+    - edge_upstream_origins
+    - edge_deployment_identity
+    - edge_lease_token
+    - edge_rate_limit_key
+    - edge_redis_password
+    - edge_redis_tls_ca
+    - edge_execution_receipt_key
+    - edge_operations_token
+  volumes:
+    - ${OTTO_EDGE_PROVIDER_SECRETS_DIR:-./edge-provider-secrets}:/run/otto-edge-provider-secrets:ro
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=32m
+    - /run/otto-runtime-secrets:rw,noexec,nosuid,size=2m,uid=1000,gid=1000,mode=0700
+  networks:
+    - backend
+    - edge
+  healthcheck:
+    test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7791/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+    interval: 10s
+    timeout: 5s
+    start_period: 20s
+    retries: 6
+  logging:
+    driver: json-file
+    options:
+      max-size: ${OTTO_EDGE_LOG_MAX_SIZE:-20m}
+      max-file: ${OTTO_EDGE_LOG_MAX_FILES:-5}
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - DAC_READ_SEARCH
+    - SETGID
+    - SETUID
+
 services:
   etcd-1:
     image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.21}
@@ -324,6 +407,71 @@ services:
   federation-c:
     <<: *federation-common
 
+  edge-redis:
+    profiles: [edge, edge-rollout]
+    image: ${OTTO_EDGE_REDIS_IMAGE:-redis:7.4-alpine}
+    restart: unless-stopped
+    user: redis
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        password="$$(cat /run/secrets/edge_redis_password)"
+        umask 077
+        {
+          printf '%s\n' \
+            'port 0' \
+            'tls-port 6379' \
+            'tls-cert-file /run/secrets/edge_redis_tls_cert' \
+            'tls-key-file /run/secrets/edge_redis_tls_key' \
+            'tls-ca-cert-file /run/secrets/edge_redis_tls_ca' \
+            'tls-auth-clients no' \
+            'appendonly yes' \
+            'appendfsync everysec' \
+            'save 300 10'
+          printf 'requirepass %s\n' "$$password"
+        } > /tmp/redis.conf
+        unset password
+        exec redis-server /tmp/redis.conf
+    secrets:
+      - edge_redis_password
+      - edge_redis_tls_ca
+      - edge_redis_tls_cert
+      - edge_redis_tls_key
+    volumes:
+      - edge_redis_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1m,mode=0700
+    expose: ["6379"]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$(cat /run/secrets/edge_redis_password) redis-cli --tls --cacert /run/secrets/edge_redis_tls_ca -h edge-redis ping | grep -qx PONG"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 12
+    networks: [backend]
+    logging:
+      driver: json-file
+      options:
+        max-size: ${OTTO_EDGE_LOG_MAX_SIZE:-20m}
+        max-file: ${OTTO_EDGE_LOG_MAX_FILES:-5}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  edge-gateway:
+    <<: *edge-gateway-common
+    profiles: [edge]
+    volumes:
+      - edge_gateway_state:/var/lib/otto-edge
+      - ${OTTO_EDGE_PROVIDER_SECRETS_DIR:-./edge-provider-secrets}:/run/otto-edge-provider-secrets:ro
+
+  edge-gateway-canary:
+    <<: *edge-gateway-common
+    profiles: [edge-rollout]
+    volumes:
+      - edge_gateway_canary_state:/var/lib/otto-edge
+      - ${OTTO_EDGE_PROVIDER_SECRETS_DIR:-./edge-provider-secrets}:/run/otto-edge-provider-secrets:ro
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -336,7 +484,10 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    networks: [edge]
+    networks:
+      edge:
+        aliases:
+          - ${CONTROL_DOMAIN}
     security_opt: [no-new-privileges:true]
 
   prometheus:
@@ -428,6 +579,28 @@ secrets:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_tls_cert.pem
   postgres_tls_key:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_tls_key.pem
+  edge_control_public_keys:
+    file: ${OTTO_EDGE_CONFIG_DIR:-./edge-config}/control_public_keys.json
+  edge_upstream_origins:
+    file: ${OTTO_EDGE_CONFIG_DIR:-./edge-config}/upstream_origins.json
+  edge_deployment_identity:
+    file: ${OTTO_EDGE_CONFIG_DIR:-./edge-config}/deployment_identity.json
+  edge_lease_token:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/edge_lease_token
+  edge_rate_limit_key:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/edge_rate_limit_key
+  edge_redis_password:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/edge_redis_password
+  edge_redis_tls_ca:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/edge_redis_tls_ca.pem
+  edge_redis_tls_cert:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/edge_redis_tls_cert.pem
+  edge_redis_tls_key:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/edge_redis_tls_key.pem
+  edge_execution_receipt_key:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/edge_execution_receipt_private_key.pem
+  edge_operations_token:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/edge_operations_token
 
 volumes:
   etcd_1_data:
@@ -441,6 +614,9 @@ volumes:
   caddy_data:
   caddy_config:
   prometheus_data:
+  edge_redis_data:
+  edge_gateway_state:
+  edge_gateway_canary_state:
 
 networks:
   database:

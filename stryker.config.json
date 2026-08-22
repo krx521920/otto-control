@@ -1,0 +1,84 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "testRunner": "vitest",
+  "plugins": ["@stryker-mutator/vitest-runner"],
+  "mutate": [
+    "src/edge-gateway/aliyun-esa.ts",
+    "src/edge-gateway/aliyun-esa-rollout.ts",
+    "src/edge-gateway/gateway.ts",
+    "src/edge-gateway/background-tasks.ts",
+    "src/edge-gateway/adapter-contracts.ts",
+    "src/edge-gateway/control-keyring-verifier.ts",
+    "src/edge-gateway/control-billing-coordinator.ts",
+    "src/edge-gateway/control-policy-source.ts",
+    "src/edge-gateway/circuit-breaker.ts",
+    "src/edge-gateway/clock.ts",
+    "src/edge-gateway/completion-hook.ts",
+    "src/edge-gateway/concurrency-limit.ts",
+    "src/edge-gateway/lifecycle.ts",
+    "src/edge-gateway/node-http-adapter.ts",
+    "src/edge-gateway/node-http-limits.ts",
+    "src/edge-gateway/protocol.ts",
+    "src/edge-gateway/provider-secret.ts",
+    "src/edge-gateway/rate-limit.ts",
+    "src/edge-gateway/redis-rate-limit.ts",
+    "src/edge-gateway/request-id.ts",
+    "src/edge-gateway/request-limits.ts",
+    "src/edge-gateway/server-lifecycle.ts",
+    "src/edge-gateway/usage-meter.ts",
+    "src/edge-gateway/upstream-response-headers.ts",
+    "src/edge-gateway/upstream-response-limits.ts",
+    "src/edge-gateway/upstream-origin-policy.ts",
+    "src/modules/edge-gateway/service.ts"
+  ],
+  "testFiles": [
+    "test/edge-gateway-aliyun-esa-adapter.test.ts",
+    "test/edge-gateway-aliyun-esa-rollout.test.ts",
+    "test/edge-gateway.test.ts",
+    "test/edge-gateway-properties.test.ts",
+    "test/edge-gateway-adapter-contracts.test.ts",
+    "test/edge-gateway-control.test.ts",
+    "test/edge-gateway-control-billing-coordinator.test.ts",
+    "test/edge-gateway-control-keyring-verifier.test.ts",
+    "test/edge-gateway-control-policy-source.test.ts",
+    "test/edge-gateway-circuit-breaker.test.ts",
+    "test/edge-gateway-clock.test.ts",
+    "test/edge-gateway-completion-hook.test.ts",
+    "test/edge-gateway-concurrency-limit.test.ts",
+    "test/edge-gateway-lifecycle.test.ts",
+    "test/edge-gateway-node-adapter.test.ts",
+    "test/edge-gateway-node-http-limits.test.ts",
+    "test/edge-gateway-provider-secret.test.ts",
+    "test/edge-gateway-redis-rate-limit.test.ts",
+    "test/edge-gateway-request-id.test.ts",
+    "test/edge-gateway-request-limits.test.ts",
+    "test/edge-gateway-usage-meter.test.ts",
+    "test/edge-gateway-upstream-response-headers.test.ts",
+    "test/edge-gateway-upstream-response-limits.test.ts",
+    "test/edge-gateway-upstream-origin-policy.test.ts",
+    "test/edge-gateway-protocol.test.ts"
+  ],
+  "coverageAnalysis": "perTest",
+  "mutator": {
+    "excludedMutations": ["StringLiteral"]
+  },
+  "reporters": ["clear-text", "progress", "html", "json"],
+  "htmlReporter": {
+    "fileName": "reports/mutation/edge-gateway.html"
+  },
+  "jsonReporter": {
+    "fileName": "reports/mutation/edge-gateway.json"
+  },
+  "thresholds": {
+    "high": 90,
+    "low": 85,
+    "break": 80
+  },
+  "concurrency": 2,
+  "timeoutMS": 10000,
+  "dryRunTimeoutMinutes": 2,
+  "vitest": {
+    "configFile": "vitest.config.ts",
+    "related": true
+  }
+}

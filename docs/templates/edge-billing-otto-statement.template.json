@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "period": {
+    "from": "2026-08-01T00:00:00.000Z",
+    "to": "2026-09-01T00:00:00.000Z"
+  },
+  "currency": "CNY",
+  "reservations": [
+    {
+      "requestId": "request_opaque_id",
+      "reservationId": "hold_opaque_id",
+      "providerBillingKey": "provider_usage_opaque_id",
+      "provider": "provider_id",
+      "model": "provider-model-id",
+      "reservedUnits": 2000,
+      "actualUnits": 1250,
+      "chargedMicros": 35000,
+      "status": "settled",
+      "occurredAt": "2026-08-02T00:00:00.000Z"
+    },
+    {
+      "requestId": "request_released_id",
+      "reservationId": "hold_released_id",
+      "providerBillingKey": null,
+      "provider": "provider_id",
+      "model": "provider-model-id",
+      "reservedUnits": 500,
+      "actualUnits": 0,
+      "chargedMicros": 0,
+      "status": "released",
+      "occurredAt": "2026-08-02T00:01:00.000Z"
+    }
+  ]
+}

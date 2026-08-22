@@ -1,0 +1,21 @@
+{
+  "kind": "otto_aliyun_esa_infrastructure_acceptance",
+  "result": "pending",
+  "releaseCandidate": "replace-with-content-addressed-release",
+  "siteId": "replace-with-esa-site-id",
+  "hostname": "edge.example.com",
+  "routineDeploymentId": "replace-with-immutable-openapi-deployment-id",
+  "secretBindingRevision": "replace-with-immutable-secret-revision",
+  "publicRouteEnabled": false,
+  "publicRouteBypass": false,
+  "certificateStatus": "pending",
+  "wafEnabled": false,
+  "tls10": false,
+  "tls11": false,
+  "tls12": true,
+  "tls13": true,
+  "secretMaterialInTerraform": false,
+  "terraformPlanSha256": "replace-with-64-lower-case-hex-characters",
+  "approvedBy": ["operator-a", "operator-b"],
+  "performedAt": "RFC3339 timestamp"
+}

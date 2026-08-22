@@ -53,3 +53,38 @@
     -Server
   }
 }
+
+{$EDGE_DOMAIN} {
+  encode zstd gzip
+
+  @edge_api path /v1/chat/completions /v1/responses
+  handle @edge_api {
+    reverse_proxy edge-gateway:7791 {
+      health_uri /readyz
+      health_interval 10s
+      health_timeout 3s
+      fail_duration 30s
+      max_fails 2
+    }
+  }
+
+  @edge_health path /healthz /readyz
+  handle @edge_health {
+    reverse_proxy edge-gateway:7791
+  }
+
+  # Operations, billing recovery and every unknown path stay private.
+  handle {
+    respond 404
+  }
+
+  request_body {
+    max_size 4MB
+  }
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    -Server
+  }
+}

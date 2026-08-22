@@ -4,6 +4,7 @@ const PERMISSION_LABELS = {
   'commercial.read': '查看商业概览',
   'customer.create': '创建客户',
   'deployment.create': '登记部署',
+  'enterprise.provision': '初始化企业与 CEO',
   'license.issue': '签发 License',
   'license.read': '查看 License',
   'license.export': '导出 License',
@@ -41,6 +42,8 @@ const PERMISSION_LABELS = {
   'legal_hold.manage': '管理法律保全',
   'forensic_export.create': '创建取证导出',
   'customer_delivery.read': '查看客户交付资料',
+  'edge_gateway.read': '查看边缘网关',
+  'edge_gateway.manage': '管理边缘网关',
 } satisfies Record<AdminPermission, string>;
 
 const ROLE_LABELS: Record<string, string> = {

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "evidenceId": "esa-release-replace-with-32-to-64-lower-case-hex",
+  "routineName": "otto-edge-production",
+  "workerSha256": "replace-with-64-lower-case-hex-characters",
+  "policySha256": "replace-with-64-lower-case-hex-characters",
+  "keyringSha256": "replace-with-64-lower-case-hex-characters",
+  "secretBindingsSha256": "replace-with-64-lower-case-hex-characters",
+  "secretBindingRevision": "immutable-provider-revision-id",
+  "productionDeploymentId": "immutable-esa-deployment-id",
+  "canaryReportSha256": "replace-with-64-lower-case-hex-characters",
+  "approvedBy": ["operator-a", "operator-b"],
+  "approvedAt": "RFC3339 timestamp"
+}

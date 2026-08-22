@@ -62,7 +62,6 @@ describe('commercial control service', () => {
       plan: 'enterprise',
       expiresAt: '2027-07-31T02:00:00.000Z',
       seatLimit: 200,
-      billingEnforcement: 'enforce',
       modules: ['enterprise_tree', 'direct_messages', 'park_service'],
     }, ADMIN);
 
@@ -105,10 +104,10 @@ describe('commercial control service', () => {
     expect(signed.catalog).toMatchObject({
       version: '2026-08-03',
       plans: [
-        { id: 'basic' },
-        { id: 'enterprise' },
-        { id: 'park' },
-        { id: 'government' },
+        { id: 'basic', defaultBillingEnforcement: 'enforce' },
+        { id: 'enterprise', defaultBillingEnforcement: 'enforce' },
+        { id: 'park', defaultBillingEnforcement: 'enforce' },
+        { id: 'government', defaultBillingEnforcement: 'enforce' },
       ],
     });
     expect(verifyEnvelope(publicKey, signed.catalog, String(signed.signature))).toBe(true);

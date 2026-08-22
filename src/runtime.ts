@@ -19,6 +19,7 @@ import { S3AuditWitnessWormObjectStore } from './modules/audit-witness/s3-worm-o
 import { DataGovernanceService } from './modules/data-governance/service.js';
 import { loadDataGovernanceConfig } from './modules/data-governance/config.js';
 import { CommercialDeliveryService } from './modules/commercial-delivery/service.js';
+import { EdgeGatewayControlService } from './modules/edge-gateway/service.js';
 import { PostgresControlStore } from './storage/postgres-store.js';
 import type { DatabaseObservabilitySource } from './observability/contracts.js';
 
@@ -36,6 +37,7 @@ export interface CommercialControlRuntime {
   auditWitness?: AuditWitnessService;
   dataGovernance?: DataGovernanceService;
   commercialDelivery?: CommercialDeliveryService;
+  edgeGateway?: EdgeGatewayControlService;
   observability?: DatabaseObservabilitySource;
 }
 
@@ -130,6 +132,11 @@ export async function createCommercialControlRuntime(
       allowLegacyUsageReports: config.legacyUsageReportsAllowed
         ?? config.environment !== 'production',
     });
+    const edgeGateway = new EdgeGatewayControlService({
+      store,
+      signer,
+      tokenIssuer,
+    });
     const commercialDelivery = new CommercialDeliveryService({
       store,
       billing,
@@ -176,6 +183,7 @@ export async function createCommercialControlRuntime(
       adminToken: config.adminToken!,
       identity,
       billing,
+      edgeGateway,
       commercialDelivery,
       releaseArtifacts,
       backupStatus,
