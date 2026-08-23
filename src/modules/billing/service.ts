@@ -39,6 +39,10 @@ const MAX_CREDITS = 9_000_000_000_000_000;
 const MAX_UNITS = 9_000_000_000_000;
 const MAX_RECEIPT_KEY_LIFETIME_MS = 400 * 24 * 60 * 60 * 1000;
 const RECEIPT_REQUEST_FIELDS = new Set(['licenseId', 'machineFingerprint', 'envelope']);
+const RECEIPT_STATUS_REQUEST_FIELDS = new Set([
+  'licenseId', 'machineFingerprint', 'deploymentId', 'organizationId', 'receiptId',
+]);
+const EXECUTION_RECEIPT_ID = /^exec_[a-f0-9]{32}$/u;
 const EDGE_NODE_ID = /^edge_[a-f0-9]{32}$/u;
 const EDGE_EVENT_ID = /^edgeevt_[a-f0-9]{32}$/u;
 const HOLD_ID = /^hold_[a-f0-9]{32}$/u;
@@ -721,6 +725,28 @@ export class BillingService {
       });
     }
     return result;
+  }
+  async executionReceiptStatus(raw: unknown, bearerToken: string) {
+    const body = objectValue(raw);
+    exactFields(body, RECEIPT_STATUS_REQUEST_FIELDS, 'execution receipt status request');
+    const receiptId = requiredString(body, 'receiptId');
+    if (!EXECUTION_RECEIPT_ID.test(receiptId)) {
+      throw invalidRequest('receiptId is invalid');
+    }
+    const authenticated = await this.#authenticateDeployment(
+      body,
+      bearerToken,
+      true,
+    );
+    const receipt = await this.#store.getExecutionReceipt(receiptId);
+    if (
+      !receipt ||
+      receipt.deploymentId !== authenticated.deploymentId ||
+      receipt.organizationId !== authenticated.organizationId
+    ) {
+      return { status: 'missing' as const, receiptId };
+    }
+    return { status: 'consumed' as const, receipt };
   }
 
   async settleHoldWithExecutionReceipt(

@@ -694,6 +694,23 @@ describe('commercial control HTTP routes', () => {
       sequence: 1,
       policyVersion: 'commercial-v2',
     } as const;
+    const receiptStatusRequest = {
+      licenseId: license.id,
+      deploymentId,
+      organizationId: betaOrganizationId,
+      machineFingerprint: fingerprint,
+      receiptId: receipt.receiptId,
+    };
+    const missingReceiptStatus = await app.inject({
+      method: 'POST',
+      url: '/v1/billing/execution-receipts/status',
+      headers: { authorization: `Bearer ${license.leaseToken as string}` },
+      payload: receiptStatusRequest,
+    });
+    expect(missingReceiptStatus.statusCode).toBe(200);
+    expect(missingReceiptStatus.json()).toEqual({
+      result: { status: 'missing', receiptId: receipt.receiptId },
+    });
     const receiptResponse = await app.inject({
       method: 'POST',
       url: '/v1/billing/execution-receipts',
@@ -713,6 +730,28 @@ describe('commercial control HTTP routes', () => {
       account: { organizationId: betaOrganizationId, availableBalance: 21 },
       transaction: { billedAmount: 4 },
       receipt: { verificationStatus: 'verified', sequence: 1 },
+    });
+
+    const consumedReceiptStatus = await app.inject({
+      method: 'POST',
+      url: '/v1/billing/execution-receipts/status',
+      headers: { authorization: `Bearer ${license.leaseToken as string}` },
+      payload: receiptStatusRequest,
+    });
+    expect(consumedReceiptStatus.statusCode).toBe(200);
+    expect(consumedReceiptStatus.json()).toMatchObject({
+      result: {
+        status: 'consumed',
+        receipt: {
+          receiptId: receipt.receiptId,
+          deploymentId,
+          organizationId: betaOrganizationId,
+          taskId: receipt.taskId,
+          moduleId: receipt.moduleId,
+          units: receipt.units,
+          sequence: receipt.sequence,
+        },
+      },
     });
 
     const receiptList = await app.inject({

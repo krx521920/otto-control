@@ -277,6 +277,14 @@ export async function registerBillingRoutes(
     );
     return reply.code(result.replayed ? 200 : 201).send(result);
   });
+  app.post('/v1/billing/execution-receipts/status', {
+    config: { rateLimit: { max: 600, timeWindow: '1 minute', ban: 20 } },
+  }, async (request) => ({
+    result: await options.service.executionReceiptStatus(
+      request.body,
+      bearerToken(request),
+    ),
+  }));
 
   app.post('/v1/billing/edge-events', {
     config: { rateLimit: { max: 1_200, timeWindow: '1 minute', ban: 20 } },
