@@ -47,6 +47,7 @@ import {
 import type { EdgeRequestLimits } from '../src/edge-gateway/request-limits.js';
 import {
   MemoryEdgeRequestLedger,
+  type EdgeRequestBillingOutbox,
   type EdgeRequestLedger,
 } from '../src/edge-gateway/request-ledger.js';
 import { EdgeGatewayControlService } from '../src/modules/edge-gateway/service.js';
@@ -86,6 +87,7 @@ async function fixture(overrides: {
   secrets?: Readonly<Record<string, string>>;
   secretResolver?: EdgeGatewaySecretResolver;
   billingCoordinator?: EdgeBillingCoordinator;
+  billingOutbox?: EdgeRequestBillingOutbox;
   outcomeSink?: EdgeGatewayOutcomeSink;
   concurrencyLimiter?: EdgeConcurrencyLimiter;
   circuitBreaker?: EdgeRouteCircuitBreaker;
@@ -152,6 +154,7 @@ async function fixture(overrides: {
     outcomeSink: overrides.outcomeSink
       ?? { record: async (outcome) => { outcomes.push(outcome); } },
     billingCoordinator: overrides.billingCoordinator,
+    billingOutbox: overrides.billingOutbox,
     readinessProbe: overrides.readinessProbe,
     requestLimits: overrides.requestLimits,
     requestLedger: overrides.requestLedger,
@@ -868,6 +871,77 @@ describe('otto edge gateway', () => {
   });
 
 
+  it('atomically records terminal usage and a settlement intent for the shared outbox', async () => {
+    const meteredRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 10_000 },
+    };
+    const finalizeWithBillingAction = vi.fn(async () => ({} as never));
+    const billing = billingCoordinatorFixture();
+    const values = await fixture({
+      routes: [meteredRoute],
+      billingCoordinator: billing.coordinator,
+      billingOutbox: { finalizeWithBillingAction },
+      fetch: vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+        choices: [],
+        usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
+      }), { headers: { 'content-type': 'application/json' } })),
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(response.status).toBe(200);
+    await response.arrayBuffer();
+    await vi.waitFor(() => expect(finalizeWithBillingAction).toHaveBeenCalledOnce());
+
+    expect(finalizeWithBillingAction).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: 'edge_request_fixture',
+      state: 'completed',
+      actualUsage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+      billingAction: expect.objectContaining({
+        type: 'settle',
+        request: expect.objectContaining({
+          reservation: { reservationId: 'hold_edge_request_fixture' },
+          routeId: 'route_primary',
+          usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+        }),
+      }),
+    }));
+    expect(billing.settle).not.toHaveBeenCalled();
+    expect(billing.release).not.toHaveBeenCalled();
+    expect(billing.markUncertain).not.toHaveBeenCalled();
+  });
+
+  it('does not bypass a failed shared outbox with direct billing', async () => {
+    const meteredRoute: EdgeModelRouteV1 = {
+      ...primaryRoute,
+      metering: { type: 'openai_tokens', reserveUnits: 10_000 },
+    };
+    const finalizeWithBillingAction = vi.fn(async () => {
+      throw new Error('shared billing outbox unavailable');
+    });
+    const billing = billingCoordinatorFixture();
+    const values = await fixture({
+      routes: [meteredRoute],
+      billingCoordinator: billing.coordinator,
+      billingOutbox: { finalizeWithBillingAction },
+      fetch: vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+        choices: [],
+        usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
+      }), { headers: { 'content-type': 'application/json' } })),
+    });
+
+    const response = await values.gateway.fetch(values.request({
+      model: 'otto-fast', messages: [],
+    }));
+    expect(response.status).toBe(200);
+    await response.arrayBuffer();
+    await vi.waitFor(() => expect(finalizeWithBillingAction).toHaveBeenCalledOnce());
+    expect(billing.settle).not.toHaveBeenCalled();
+    expect(billing.release).not.toHaveBeenCalled();
+    expect(billing.markUncertain).not.toHaveBeenCalled();
+  });
   it('never settles billing when the durable terminal ledger write fails', async () => {
     const meteredRoute: EdgeModelRouteV1 = {
       ...primaryRoute,

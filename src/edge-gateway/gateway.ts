@@ -15,6 +15,7 @@ import {
 import {
   EdgeBillingAdmissionError,
   type EdgeBillingCoordinator,
+  type EdgeBillingOutboxAction,
   type EdgeBillingRequestIdentity,
   type EdgeBillingReservation,
   type EdgeBillingUncertainReason,
@@ -48,6 +49,7 @@ import {
   hashEdgeRequest,
   MemoryEdgeRequestLedger,
   type EdgeRequestBinding,
+  type EdgeRequestBillingOutbox,
   type EdgeRequestLedger,
   type EdgeRequestState,
 } from './request-ledger.js';
@@ -108,6 +110,7 @@ export interface EdgeGatewayReadinessProbe {
 
 export interface OttoEdgeGatewayOptions {
   requestLedger?: EdgeRequestLedger;
+  billingOutbox?: EdgeRequestBillingOutbox;
   policySource: EdgeGatewayPolicySource;
   verifier: EdgeSignatureVerifier;
   secretResolver: EdgeGatewaySecretResolver;
@@ -837,9 +840,17 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           body: authorized.upstreamBody,
         })),
       };
-      const markAdmittedRequestNotSent = async (): Promise<Response | null> => {
+      const markAdmittedRequestNotSent = async (
+        billingAction?: Extract<EdgeBillingOutboxAction, { type: 'release' }>,
+      ): Promise<Response | null> => {
         try {
-          await requestLedger.markNotSent(requestBinding);
+          if (billingAction && options.billingOutbox) {
+            await options.billingOutbox.finalizeWithBillingAction({
+              ...requestBinding,
+              state: 'not_sent',
+              billingAction,
+            });
+          } else await requestLedger.markNotSent(requestBinding);
           return null;
         } catch {
           return jsonResponse(
@@ -939,20 +950,29 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         routeId: string,
         reason: EdgeBillingUncertainReason,
       ): Promise<boolean> => {
-        try {
-          await requestLedger.markUnknownOutcome(requestBinding);
-        } catch {
-          return false;
-        }
-        if (billingReservation && options.billingCoordinator) {
-          try {
-            await options.billingCoordinator.markUncertain({
+        const uncertainRequest = billingReservation && options.billingCoordinator
+          ? {
               ...billingIdentity(evidence),
               reservation: billingReservation,
               routeId,
               reason,
               occurredAtMs: readEdgeClockAtOrAfter(now, startedAt),
+            }
+          : null;
+        try {
+          if (uncertainRequest && options.billingOutbox) {
+            await options.billingOutbox.finalizeWithBillingAction({
+              ...requestBinding,
+              state: 'unknown_outcome',
+              billingAction: { type: 'uncertain', request: uncertainRequest },
             });
+          } else await requestLedger.markUnknownOutcome(requestBinding);
+        } catch {
+          return false;
+        }
+        if (uncertainRequest && !options.billingOutbox) {
+          try {
+            await options.billingCoordinator!.markUncertain(uncertainRequest);
           } catch {
             return false;
           }
@@ -1044,16 +1064,21 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           await requestLedger.beginAttempt({ ...requestBinding, routeId: route.id });
         } catch {
           releaseConcurrency();
-          const ledgerFailure = await markAdmittedRequestNotSent();
-          if (ledgerFailure) return ledgerFailure;
-          if (billingReservation && options.billingCoordinator) {
-            try {
-              await options.billingCoordinator.release({
+          const releaseRequest = billingReservation && options.billingCoordinator
+            ? {
                 ...billingIdentity(evidence),
                 reservation: billingReservation,
-                reason: 'no_usable_route',
+                reason: 'no_usable_route' as const,
                 occurredAtMs: readEdgeClockAtOrAfter(now, startedAt),
-              });
+              }
+            : null;
+          const ledgerFailure = await markAdmittedRequestNotSent(
+            releaseRequest ? { type: 'release', request: releaseRequest } : undefined,
+          );
+          if (ledgerFailure) return ledgerFailure;
+          if (releaseRequest && !options.billingOutbox) {
+            try {
+              await options.billingCoordinator!.release(releaseRequest);
             } catch {
               return jsonResponse(
                 503,
@@ -1222,46 +1247,91 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
               const reservation = billingReservation;
               const billingCoordinator = options.billingCoordinator;
               const identity = billingIdentity(evidence);
-              const billingOperation = reservation && billingCoordinator
-                ? () => !upstream.ok
-                    ? billingCoordinator.release({
-                        ...identity,
-                        reservation,
-                        reason: 'upstream_rejected',
-                        occurredAtMs: completedAt,
-                      })
-                    : !route.metering
-                      ? billingCoordinator.release({
-                          ...identity,
-                          reservation,
-                          reason: 'unmetered_route',
-                          occurredAtMs: completedAt,
-                        })
-                      : usage?.totalTokens === 0
-                        ? billingCoordinator.release({
-                            ...identity,
-                            reservation,
-                            reason: 'zero_usage',
-                            occurredAtMs: completedAt,
-                          })
-                        : usage
-                          ? billingCoordinator.settle({
-                              ...identity,
-                              reservation,
-                              routeId: route.id,
-                              usage,
-                              occurredAtMs: completedAt,
-                            })
-                          : billingCoordinator.markUncertain({
-                              ...identity,
-                              reservation,
-                              routeId: route.id,
-                              reason: uncertainReason(completion),
-                              occurredAtMs: completedAt,
-                            })
-                : null;
+              const completesRequest = completion === 'completed'
+                && (!upstream.ok || usage !== null);
+              let billingAction: EdgeBillingOutboxAction | null = null;
+              if (reservation && billingCoordinator) {
+                if (!completesRequest) {
+                  billingAction = {
+                    type: 'uncertain',
+                    request: {
+                      ...identity,
+                      reservation,
+                      routeId: route.id,
+                      reason: uncertainReason(completion),
+                      occurredAtMs: completedAt,
+                    },
+                  };
+                } else if (!upstream.ok) {
+                  billingAction = {
+                    type: 'release',
+                    request: {
+                      ...identity,
+                      reservation,
+                      reason: 'upstream_rejected',
+                      occurredAtMs: completedAt,
+                    },
+                  };
+                } else if (!route.metering) {
+                  billingAction = {
+                    type: 'release',
+                    request: {
+                      ...identity,
+                      reservation,
+                      reason: 'unmetered_route',
+                      occurredAtMs: completedAt,
+                    },
+                  };
+                } else if (usage?.totalTokens === 0) {
+                  billingAction = {
+                    type: 'release',
+                    request: {
+                      ...identity,
+                      reservation,
+                      reason: 'zero_usage',
+                      occurredAtMs: completedAt,
+                    },
+                  };
+                } else if (usage) {
+                  billingAction = {
+                    type: 'settle',
+                    request: {
+                      ...identity,
+                      reservation,
+                      routeId: route.id,
+                      usage,
+                      occurredAtMs: completedAt,
+                    },
+                  };
+                }
+              }
               scheduleBackground(context, async () => {
-                if (completion === 'completed' && (!upstream.ok || usage)) {
+                if (billingAction && options.billingOutbox) {
+                  if (completesRequest && billingAction.type !== 'uncertain') {
+                    await options.billingOutbox.finalizeWithBillingAction({
+                      ...requestBinding,
+                      state: 'completed',
+                      actualUsage: usage ?? {
+                        inputTokens: 0,
+                        outputTokens: 0,
+                        totalTokens: 0,
+                      },
+                      ...(providerRequestId ? { providerRequestId } : {}),
+                      billingAction,
+                    });
+                    return;
+                  }
+                  if (!completesRequest && billingAction.type === 'uncertain') {
+                    await options.billingOutbox.finalizeWithBillingAction({
+                      ...requestBinding,
+                      state: 'unknown_outcome',
+                      billingAction,
+                    });
+                    return;
+                  }
+                  throw new Error('edge billing terminal state is inconsistent');
+                }
+                if (completesRequest) {
                   await requestLedger.complete({
                     ...requestBinding,
                     actualUsage: usage ?? {
@@ -1274,7 +1344,14 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
                 } else {
                   await requestLedger.markUnknownOutcome(requestBinding);
                 }
-                if (billingOperation) await billingOperation();
+                if (!billingAction) return;
+                if (billingAction.type === 'settle') {
+                  await billingCoordinator!.settle(billingAction.request);
+                } else if (billingAction.type === 'release') {
+                  await billingCoordinator!.release(billingAction.request);
+                } else {
+                  await billingCoordinator!.markUncertain(billingAction.request);
+                }
               });
             },
           );
@@ -1328,7 +1405,18 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
       }
 
       const completedAt = readEdgeClockAtOrAfter(now, evidence.startedAt);
-      const ledgerFailure = await markAdmittedRequestNotSent();
+      const releaseRequest = billingReservation && options.billingCoordinator
+        ? {
+            ...billingIdentity(evidence),
+            reservation: billingReservation,
+            reason: 'no_usable_route' as const,
+            occurredAtMs: completedAt,
+          }
+        : null;
+      const releaseAction = releaseRequest
+        ? { type: 'release' as const, request: releaseRequest }
+        : undefined;
+      const ledgerFailure = await markAdmittedRequestNotSent(releaseAction);
       if (ledgerFailure) {
         releaseConcurrency();
         return ledgerFailure;
@@ -1349,13 +1437,11 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         occurredAtMs: completedAt,
         usage: null,
       });
-      if (billingReservation && options.billingCoordinator) {
-        scheduleBackground(context, () => options.billingCoordinator!.release({
-          ...billingIdentity(evidence),
-          reservation: billingReservation,
-          reason: 'no_usable_route',
-          occurredAtMs: completedAt,
-        }));
+      if (releaseRequest && !options.billingOutbox) {
+        scheduleBackground(
+          context,
+          () => options.billingCoordinator!.release(releaseRequest),
+        );
       }
       releaseConcurrency();
       return jsonResponse(

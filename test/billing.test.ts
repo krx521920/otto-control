@@ -126,7 +126,7 @@ describe('commercial credit billing', () => {
       ...binding,
       module: 'meeting_agent',
       units: 90,
-      expiresInSeconds: 600,
+      expiresInSeconds: 10_800,
       idempotencyKey: 'hold:meeting-1',
     }, token);
     expect(held.hold.amount).toBe(12);

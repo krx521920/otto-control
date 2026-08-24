@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import type { EdgeModelUsageV1 } from '../contracts/edge-gateway.js';
+import type { EdgeBillingOutboxAction } from './billing-coordinator.js';
 import { canonicalJson } from '../crypto/signed-envelope.js';
 
 const REQUEST_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/u;
@@ -35,6 +36,25 @@ export interface EdgeRequestAdmission extends EdgeRequestBinding {
   reservedUnits: number;
 }
 
+type EdgeBillingActionOf<TType extends EdgeBillingOutboxAction['type']> =
+  Extract<EdgeBillingOutboxAction, { type: TType }>;
+
+export type EdgeRequestTerminalCommit = EdgeRequestBinding & (
+  | {
+      state: 'completed';
+      actualUsage: EdgeModelUsageV1;
+      providerRequestId?: string;
+      billingAction: EdgeBillingActionOf<'settle'> | EdgeBillingActionOf<'release'>;
+    }
+  | {
+      state: 'not_sent';
+      billingAction: EdgeBillingActionOf<'release'>;
+    }
+  | {
+      state: 'unknown_outcome';
+      billingAction: EdgeBillingActionOf<'uncertain'>;
+    }
+);
 export type EdgeRequestAttemptOutcome =
   | 'not_sent'
   | 'completed'
@@ -83,6 +103,12 @@ export interface EdgeRequestLedger {
       actualUsage: EdgeModelUsageV1;
       providerRequestId?: string;
     },
+  ): Promise<EdgeRequestRecord>;
+}
+
+export interface EdgeRequestBillingOutbox {
+  finalizeWithBillingAction(
+    input: EdgeRequestTerminalCommit,
   ): Promise<EdgeRequestRecord>;
 }
 

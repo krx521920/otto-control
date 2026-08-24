@@ -38,6 +38,7 @@ const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,159}$/u;
 const MAX_CREDITS = 9_000_000_000_000_000;
 const MAX_UNITS = 9_000_000_000_000;
 const MAX_RECEIPT_KEY_LIFETIME_MS = 400 * 24 * 60 * 60 * 1000;
+const MAX_HOLD_LIFETIME_SECONDS = 4 * 60 * 60;
 const RECEIPT_REQUEST_FIELDS = new Set(['licenseId', 'machineFingerprint', 'envelope']);
 const RECEIPT_STATUS_REQUEST_FIELDS = new Set([
   'licenseId', 'machineFingerprint', 'deploymentId', 'organizationId', 'receiptId',
@@ -560,7 +561,11 @@ export class BillingService {
     const amount = await this.#price(authenticated.customerId, module, units);
     const expiresInSeconds = body.expiresInSeconds === undefined
       ? 900
-      : positiveInteger(body.expiresInSeconds, 'expiresInSeconds', 3600);
+      : positiveInteger(
+          body.expiresInSeconds,
+          'expiresInSeconds',
+          MAX_HOLD_LIFETIME_SECONDS,
+        );
     if (expiresInSeconds < 60) throw invalidRequest('expiresInSeconds must be at least 60');
     return this.#store.createCreditHold({
       holdId: holdId(),

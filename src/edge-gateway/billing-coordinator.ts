@@ -1,3 +1,4 @@
+import type { SignedExecutionReceiptV2 } from '../contracts/billing.js';
 import type {
   EdgeGatewayEndpoint,
   EdgeModelUsageV1,
@@ -28,6 +29,8 @@ export interface EdgeBillingSettlementRequest extends EdgeBillingRequestIdentity
   routeId: string;
   usage: EdgeModelUsageV1;
   occurredAtMs: number;
+  /** Shared outbox callers provide their PostgreSQL-allocated receipt sequence. */
+  sequence?: number;
 }
 
 export type EdgeBillingReleaseReason =
@@ -56,6 +59,69 @@ export interface EdgeBillingUncertainRequest extends EdgeBillingRequestIdentity 
   occurredAtMs: number;
 }
 
+export type EdgeBillingOutboxAction =
+  | { type: 'settle'; request: EdgeBillingSettlementRequest }
+  | { type: 'release'; request: EdgeBillingReleaseRequest }
+  | { type: 'uncertain'; request: EdgeBillingUncertainRequest };
+export interface PreparedEdgeBillingSettlementDelivery {
+  version: 1;
+  action: 'settle';
+  requestId: string;
+  reservationId: string;
+  occurredAtMs: number;
+  sequence: number;
+  path: string;
+  body:
+    | {
+        licenseId: string;
+        machineFingerprint: string;
+        envelope: SignedExecutionReceiptV2;
+      }
+    | {
+        licenseId: string;
+        deploymentId: string;
+        organizationId: string;
+        machineFingerprint: string;
+        eventId: string;
+        nodeId: string;
+        nodeSequence: number;
+        holdId: string;
+        envelope: SignedExecutionReceiptV2;
+      };
+}
+
+export interface PreparedEdgeBillingReleaseDelivery {
+  version: 1;
+  action: 'release';
+  requestId: string;
+  reservationId: string;
+  occurredAtMs: number;
+  reason: EdgeBillingReleaseReason;
+  path: string;
+  body: {
+    licenseId: string;
+    deploymentId: string;
+    organizationId: string;
+    machineFingerprint: string;
+    idempotencyKey: string;
+  };
+}
+
+export interface PreparedEdgeBillingUncertainDelivery {
+  version: 1;
+  action: 'uncertain';
+  requestId: string;
+  reservationId: string;
+  routeId: string;
+  reason: EdgeBillingUncertainReason;
+  occurredAtMs: number;
+}
+
+export type PreparedEdgeBillingDelivery =
+  | PreparedEdgeBillingSettlementDelivery
+  | PreparedEdgeBillingReleaseDelivery
+  | PreparedEdgeBillingUncertainDelivery;
+
 export type EdgeBillingOperationalState = 'ready' | 'degraded' | 'unavailable';
 
 export interface EdgeBillingOperationalStatus {
@@ -79,6 +145,19 @@ export interface EdgeBillingCoordinator {
   settle(request: EdgeBillingSettlementRequest): Promise<void>;
   release(request: EdgeBillingReleaseRequest): Promise<void>;
   markUncertain(request: EdgeBillingUncertainRequest): Promise<void>;
+  prepareSettlementDelivery?(
+    request: EdgeBillingSettlementRequest,
+    sequence: number,
+  ): Promise<PreparedEdgeBillingSettlementDelivery>;
+  prepareReleaseDelivery?(
+    request: EdgeBillingReleaseRequest,
+  ): PreparedEdgeBillingReleaseDelivery;
+  prepareUncertainDelivery?(
+    request: EdgeBillingUncertainRequest,
+  ): PreparedEdgeBillingUncertainDelivery;
+  deliverPrepared?(
+    delivery: PreparedEdgeBillingDelivery,
+  ): Promise<void>;
   operationalStatus?(): EdgeBillingOperationalStatus;
   flushPending?(): Promise<void>;
 }

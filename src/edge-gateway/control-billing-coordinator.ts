@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
 import { mkdir, open, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
@@ -17,6 +17,10 @@ import {
   type EdgeBillingReservationRequest,
   type EdgeBillingSettlementRequest,
   type EdgeBillingUncertainRequest,
+  type PreparedEdgeBillingDelivery,
+  type PreparedEdgeBillingReleaseDelivery,
+  type PreparedEdgeBillingSettlementDelivery,
+  type PreparedEdgeBillingUncertainDelivery,
 } from './billing-coordinator.js';
 import {
   type EdgeControlPolicyBinding,
@@ -32,7 +36,12 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_RETRY_MS = 10_000;
 const RECEIPT_LIFETIME_MS = 518_400_000;
 const RECEIPT_KEY_LIFETIME_MS = 31_536_000_000;
+const HOLD_LIFETIME_SECONDS = 10_800;
 const MAX_UNITS = 9_000_000_000_000;
+const RECEIPT_ID = /^exec_[a-f0-9]{32}$/u;
+const TASK_ID = /^edge_[a-f0-9]{32}$/u;
+const EVENT_ID = /^edgeevt_[a-f0-9]{32}$/u;
+const ED25519_SIGNATURE = /^ed25519:[a-zA-Z0-9_-]{86}$/u;
 
 type ReservationStatus = 'active' | 'released' | 'settled' | 'uncertain';
 
@@ -125,6 +134,7 @@ export interface ControlEdgeBillingCoordinatorOptions {
   bootstrapReceiptKey?: boolean;
   /** Enables PostgreSQL-backed multi-node aggregation instead of legacy deployment sequencing. */
   nodeId?: string;
+  sharedOutbox?: boolean;
 }
 
 class ControlBillingRequestError extends Error {
@@ -198,6 +208,58 @@ function validUnits(value: number): boolean {
 
 function validTokenCount(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0 && value <= MAX_UNITS;
+}
+
+function validSequence(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 1 && value <= MAX_UNITS;
+}
+
+function exactRecord(
+  value: unknown,
+  keys: readonly string[],
+  label: string,
+): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(label);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) throw new Error(label);
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length
+    || actual.some((key, index) => key !== expected[index])) {
+    throw new Error(label);
+  }
+  return value as Record<string, unknown>;
+}
+
+function assertSettlementEvidence(request: EdgeBillingSettlementRequest): void {
+  if (!IDENTIFIER.test(request.routeId) || !validTokenCount(request.usage.inputTokens)
+    || !validTokenCount(request.usage.outputTokens) || !validUnits(request.usage.totalTokens)
+    || request.usage.inputTokens + request.usage.outputTokens !== request.usage.totalTokens
+    || !Number.isSafeInteger(request.occurredAtMs) || request.occurredAtMs < 1
+    || (request.sequence !== undefined && !validSequence(request.sequence))) {
+    throw new Error('Edge billing settlement evidence is invalid');
+  }
+}
+
+function assertReleaseEvidence(request: EdgeBillingReleaseRequest): void {
+  if (!Number.isSafeInteger(request.occurredAtMs) || request.occurredAtMs < 1) {
+    throw new Error('Edge billing release evidence is invalid');
+  }
+}
+
+function assertUncertainEvidence(request: EdgeBillingUncertainRequest): void {
+  if (!IDENTIFIER.test(request.routeId) || !Number.isSafeInteger(request.occurredAtMs)
+    || request.occurredAtMs < 1) {
+    throw new Error('Edge billing uncertain evidence is invalid');
+  }
+}
+
+function deterministicReceiptId(
+  receipt: Omit<ExecutionReceiptV2Payload, 'receiptId'>,
+): string {
+  return stableId('exec_', canonicalJson(receipt));
 }
 
 function journalPayload(value: unknown, expectedIndex: number, previousHash: string | null): JournalPayload {
@@ -291,6 +353,7 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
   readonly #requestTimeoutMs: number;
   readonly #retryIntervalMs: number;
   readonly #nodeId?: string;
+  readonly #sharedOutbox: boolean;
   readonly #reservations = new Map<string, ReservationState>();
   readonly #recoveredReservations = new Set<string>();
   readonly #pendingSettlements = new Map<string, PendingSettlement>();
@@ -327,6 +390,7 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
       options.retryIntervalMs, DEFAULT_RETRY_MS, 1_000, 60 * 60 * 1000, 'retry interval',
     );
     this.#nodeId = options.nodeId?.trim();
+    this.#sharedOutbox = options.sharedOutbox === true;
     if (this.#nodeId && !EDGE_NODE_ID.test(this.#nodeId)) {
       configurationError('edge billing node ID');
     }
@@ -384,40 +448,159 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
     }
   }
 
-  async settle(request: EdgeBillingSettlementRequest): Promise<void> {
+  async prepareSettlementDelivery(
+    request: EdgeBillingSettlementRequest,
+    sequence: number,
+  ): Promise<PreparedEdgeBillingSettlementDelivery> {
     assertIdentity(this.#binding, request);
-    if (!IDENTIFIER.test(request.routeId) || !validTokenCount(request.usage.inputTokens)
-      || !validTokenCount(request.usage.outputTokens) || !validUnits(request.usage.totalTokens)
-      || request.usage.inputTokens + request.usage.outputTokens !== request.usage.totalTokens
-      || !Number.isSafeInteger(request.occurredAtMs) || request.occurredAtMs < 1) {
+    assertSettlementEvidence(request);
+    if (!validSequence(sequence)
+      || (request.sequence !== undefined && request.sequence !== sequence)
+      || !HOLD_ID.test(request.reservation.reservationId)) {
       throw new Error('Edge billing settlement evidence is invalid');
     }
+    const receiptEvidence: Omit<ExecutionReceiptV2Payload, 'receiptId'> = {
+      version: 2,
+      deploymentId: request.deploymentId,
+      organizationId: request.organizationId,
+      taskId: stableId('edge_', request.requestId),
+      moduleId: 'model_gateway',
+      units: request.usage.totalTokens,
+      model: request.publicModel,
+      issuedAtMs: request.occurredAtMs,
+      expiresAtMs: request.occurredAtMs + RECEIPT_LIFETIME_MS,
+      sequence,
+      policyVersion: request.policyVersion,
+    };
+    const receipt: ExecutionReceiptV2Payload = {
+      ...receiptEvidence,
+      receiptId: deterministicReceiptId(receiptEvidence),
+    };
+    const envelope: SignedExecutionReceiptV2 = {
+      receipt,
+      signingKeyId: this.#signer.keyId,
+      signature: await this.#signer.sign(receipt),
+    };
+    if (this.#nodeId) {
+      return {
+        version: 1,
+        action: 'settle',
+        requestId: request.requestId,
+        reservationId: request.reservation.reservationId,
+        occurredAtMs: request.occurredAtMs,
+        sequence,
+        path: '/v1/billing/edge-events',
+        body: {
+          ...this.#binding,
+          eventId: stableId('edgeevt_', `${this.#nodeId}:${receipt.receiptId}`),
+          nodeId: this.#nodeId,
+          nodeSequence: sequence,
+          holdId: request.reservation.reservationId,
+          envelope,
+        },
+      };
+    }
+    return {
+      version: 1,
+      action: 'settle',
+      requestId: request.requestId,
+      reservationId: request.reservation.reservationId,
+      occurredAtMs: request.occurredAtMs,
+      sequence,
+      path: `/v1/billing/holds/${request.reservation.reservationId}/execution-receipts`,
+      body: {
+        licenseId: this.#binding.licenseId,
+        machineFingerprint: this.#binding.machineFingerprint,
+        envelope,
+      },
+    };
+  }
+
+  prepareReleaseDelivery(
+    request: EdgeBillingReleaseRequest,
+  ): PreparedEdgeBillingReleaseDelivery {
+    assertIdentity(this.#binding, request);
+    assertReleaseEvidence(request);
+    if (!HOLD_ID.test(request.reservation.reservationId)) {
+      throw new Error('Edge billing release evidence is invalid');
+    }
+    return {
+      version: 1,
+      action: 'release',
+      requestId: request.requestId,
+      reservationId: request.reservation.reservationId,
+      occurredAtMs: request.occurredAtMs,
+      reason: request.reason,
+      path: `/v1/billing/holds/${request.reservation.reservationId}/release`,
+      body: {
+        ...this.#binding,
+        idempotencyKey: stableId('edge-release:', request.requestId),
+      },
+    };
+  }
+
+  prepareUncertainDelivery(
+    request: EdgeBillingUncertainRequest,
+  ): PreparedEdgeBillingUncertainDelivery {
+    assertIdentity(this.#binding, request);
+    assertUncertainEvidence(request);
+    if (!HOLD_ID.test(request.reservation.reservationId)) {
+      throw new Error('Edge billing uncertain evidence is invalid');
+    }
+    return {
+      version: 1,
+      action: 'uncertain',
+      requestId: request.requestId,
+      reservationId: request.reservation.reservationId,
+      routeId: request.routeId,
+      reason: request.reason,
+      occurredAtMs: request.occurredAtMs,
+    };
+  }
+
+  async deliverPrepared(delivery: PreparedEdgeBillingDelivery): Promise<void> {
+    this.#validatePreparedDelivery(delivery);
+    if (delivery.action === 'uncertain') return;
+    await this.#post(delivery.path, delivery.body);
+  }
+
+  async settle(request: EdgeBillingSettlementRequest): Promise<void> {
+    assertIdentity(this.#binding, request);
+    assertSettlementEvidence(request);
     await this.#serializeSettlement(async () => {
       const state = this.#activeReservation(request.requestId, request.reservation);
       if (this.#pendingSettlements.has(request.requestId)) return;
-      const issuedAtMs = this.#now();
-      const sequence = this.#lastSequence + 1;
-      const random = this.#randomHex();
-      if (!/^[a-f0-9]{32}$/u.test(random)) configurationError('receipt ID generator');
-      const receipt: ExecutionReceiptV2Payload = {
-        version: 2,
-        receiptId: `exec_${random}`,
-        deploymentId: request.deploymentId,
-        organizationId: request.organizationId,
-        taskId: stableId('edge_', request.requestId),
-        moduleId: 'model_gateway',
-        units: request.usage.totalTokens,
-        model: request.publicModel,
-        issuedAtMs,
-        expiresAtMs: issuedAtMs + RECEIPT_LIFETIME_MS,
-        sequence,
-        policyVersion: request.policyVersion,
-      };
-      const envelope: SignedExecutionReceiptV2 = {
-        receipt,
-        signingKeyId: this.#signer.keyId,
-        signature: await this.#signer.sign(receipt),
-      };
+      const sequence = request.sequence ?? this.#lastSequence + 1;
+      if (!validSequence(sequence) || sequence <= this.#lastSequence) {
+        throw new Error('Edge billing settlement sequence is invalid');
+      }
+      let envelope: SignedExecutionReceiptV2;
+      if (request.sequence !== undefined) {
+        envelope = (await this.prepareSettlementDelivery(request, sequence)).body.envelope;
+      } else {
+        const issuedAtMs = this.#now();
+        const random = this.#randomHex();
+        if (!/^[a-f0-9]{32}$/u.test(random)) configurationError('receipt ID generator');
+        const receipt: ExecutionReceiptV2Payload = {
+          version: 2,
+          receiptId: `exec_${random}`,
+          deploymentId: request.deploymentId,
+          organizationId: request.organizationId,
+          taskId: stableId('edge_', request.requestId),
+          moduleId: 'model_gateway',
+          units: request.usage.totalTokens,
+          model: request.publicModel,
+          issuedAtMs,
+          expiresAtMs: issuedAtMs + RECEIPT_LIFETIME_MS,
+          sequence,
+          policyVersion: request.policyVersion,
+        };
+        envelope = {
+          receipt,
+          signingKeyId: this.#signer.keyId,
+          signature: await this.#signer.sign(receipt),
+        };
+      }
       const pending = {
         requestId: request.requestId,
         reservationId: state.reservationId,
@@ -431,16 +614,13 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
   }
 
   async release(request: EdgeBillingReleaseRequest): Promise<void> {
-    assertIdentity(this.#binding, request);
-    if (!Number.isSafeInteger(request.occurredAtMs) || request.occurredAtMs < 1) {
-      throw new Error('Edge billing release evidence is invalid');
-    }
+    const prepared = this.prepareReleaseDelivery(request);
     const state = this.#activeReservation(request.requestId, request.reservation);
     if (this.#pendingReleases.has(request.requestId)) return;
     const pending = {
       requestId: request.requestId,
       reservationId: state.reservationId,
-      idempotencyKey: stableId('edge-release:', request.requestId),
+      idempotencyKey: prepared.body.idempotencyKey,
       reason: request.reason,
     };
     await this.#append({ type: 'release_pending', ...pending });
@@ -449,23 +629,18 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
   }
 
   async markUncertain(request: EdgeBillingUncertainRequest): Promise<void> {
-    assertIdentity(this.#binding, request);
-    if (!IDENTIFIER.test(request.routeId) || !Number.isSafeInteger(request.occurredAtMs)
-      || request.occurredAtMs < 1) {
-      throw new Error('Edge billing uncertain evidence is invalid');
-    }
+    const prepared = this.prepareUncertainDelivery(request);
     const state = this.#activeReservation(request.requestId, request.reservation);
     await this.#append({
       type: 'uncertain',
-      requestId: request.requestId,
-      routeId: request.routeId,
-      reason: request.reason,
-      occurredAtMs: request.occurredAtMs,
+      requestId: prepared.requestId,
+      routeId: prepared.routeId,
+      reason: prepared.reason,
+      occurredAtMs: prepared.occurredAtMs,
     });
     this.#recoveredReservations.delete(request.requestId);
     this.#reservations.set(request.requestId, { ...state, status: 'uncertain' });
   }
-
   async flushPending(): Promise<void> {
     await this.#serializeSettlement(() => this.#flushSettlementsInOrder());
     await Promise.all([...this.#pendingReleases.values()].map((item) => this.#flushRelease(item)));
@@ -498,6 +673,200 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
     };
   }
 
+  #validatePreparedDelivery(delivery: PreparedEdgeBillingDelivery): void {
+    const invalid = 'Prepared edge billing delivery is invalid';
+    if (!delivery || typeof delivery !== 'object' || Array.isArray(delivery)) {
+      throw new Error(invalid);
+    }
+    const action = (delivery as { action?: unknown }).action;
+    if (action === 'uncertain') {
+      const root = exactRecord(delivery, [
+        'version',
+        'action',
+        'requestId',
+        'reservationId',
+        'routeId',
+        'reason',
+        'occurredAtMs',
+      ], invalid);
+      if (root.version !== 1 || !IDENTIFIER.test(String(root.requestId))
+        || !HOLD_ID.test(String(root.reservationId))
+        || !IDENTIFIER.test(String(root.routeId))
+        || ![
+          'client_cancelled',
+          'provider_error',
+          'response_limit_exceeded',
+          'stream_timed_out',
+          'usage_unavailable',
+        ].includes(String(root.reason))
+        || !Number.isSafeInteger(root.occurredAtMs)
+        || Number(root.occurredAtMs) < 1) {
+        throw new Error(invalid);
+      }
+      return;
+    }
+    if (action === 'release') {
+      const root = exactRecord(delivery, [
+        'version',
+        'action',
+        'requestId',
+        'reservationId',
+        'occurredAtMs',
+        'reason',
+        'path',
+        'body',
+      ], invalid);
+      const body = exactRecord(root.body, [
+        'licenseId',
+        'deploymentId',
+        'organizationId',
+        'machineFingerprint',
+        'idempotencyKey',
+      ], invalid);
+      const requestId = String(root.requestId);
+      const reservationId = String(root.reservationId);
+      if (root.version !== 1 || !IDENTIFIER.test(requestId)
+        || !HOLD_ID.test(reservationId)
+        || !Number.isSafeInteger(root.occurredAtMs)
+        || Number(root.occurredAtMs) < 1
+        || ![
+          'no_usable_route',
+          'unmetered_route',
+          'upstream_rejected',
+          'zero_usage',
+        ].includes(String(root.reason))
+        || root.path !== `/v1/billing/holds/${reservationId}/release`
+        || body.licenseId !== this.#binding.licenseId
+        || body.deploymentId !== this.#binding.deploymentId
+        || body.organizationId !== this.#binding.organizationId
+        || body.machineFingerprint !== this.#binding.machineFingerprint
+        || body.idempotencyKey !== stableId('edge-release:', requestId)) {
+        throw new Error(invalid);
+      }
+      return;
+    }
+    if (action !== 'settle') throw new Error(invalid);
+    const root = exactRecord(delivery, [
+      'version',
+      'action',
+      'requestId',
+      'reservationId',
+      'occurredAtMs',
+      'sequence',
+      'path',
+      'body',
+    ], invalid);
+    const requestId = String(root.requestId);
+    const reservationId = String(root.reservationId);
+    const sequence = Number(root.sequence);
+    const occurredAtMs = Number(root.occurredAtMs);
+    if (root.version !== 1 || !IDENTIFIER.test(requestId)
+      || !HOLD_ID.test(reservationId) || !validSequence(sequence)
+      || !Number.isSafeInteger(root.occurredAtMs) || occurredAtMs < 1) {
+      throw new Error(invalid);
+    }
+    const eventDelivery = root.path === '/v1/billing/edge-events';
+    const body = exactRecord(root.body, eventDelivery
+      ? [
+          'licenseId',
+          'deploymentId',
+          'organizationId',
+          'machineFingerprint',
+          'eventId',
+          'nodeId',
+          'nodeSequence',
+          'holdId',
+          'envelope',
+        ]
+      : ['licenseId', 'machineFingerprint', 'envelope'], invalid);
+    const envelope = exactRecord(body.envelope, [
+      'receipt',
+      'signingKeyId',
+      'signature',
+    ], invalid);
+    const receipt = exactRecord(envelope.receipt, [
+      'version',
+      'receiptId',
+      'deploymentId',
+      'organizationId',
+      'taskId',
+      'moduleId',
+      'units',
+      'model',
+      'issuedAtMs',
+      'expiresAtMs',
+      'sequence',
+      'policyVersion',
+    ], invalid);
+    if (receipt.version !== 2 || !RECEIPT_ID.test(String(receipt.receiptId))
+      || receipt.deploymentId !== this.#binding.deploymentId
+      || receipt.organizationId !== this.#binding.organizationId
+      || !TASK_ID.test(String(receipt.taskId))
+      || receipt.taskId !== stableId('edge_', requestId)
+      || receipt.moduleId !== 'model_gateway'
+      || !validUnits(Number(receipt.units))
+      || typeof receipt.model !== 'string'
+      || !receipt.model.trim() || receipt.model.trim().length > 160
+      || receipt.issuedAtMs !== occurredAtMs
+      || receipt.expiresAtMs !== occurredAtMs + RECEIPT_LIFETIME_MS
+      || receipt.sequence !== sequence
+      || !IDENTIFIER.test(String(receipt.policyVersion))
+      || envelope.signingKeyId !== this.#signer.keyId
+      || typeof envelope.signature !== 'string'
+      || !ED25519_SIGNATURE.test(envelope.signature)) {
+      throw new Error(invalid);
+    }
+    const receiptEvidence: Omit<ExecutionReceiptV2Payload, 'receiptId'> = {
+      version: 2,
+      deploymentId: String(receipt.deploymentId),
+      organizationId: String(receipt.organizationId),
+      taskId: String(receipt.taskId),
+      moduleId: 'model_gateway',
+      units: Number(receipt.units),
+      model: String(receipt.model),
+      issuedAtMs: Number(receipt.issuedAtMs),
+      expiresAtMs: Number(receipt.expiresAtMs),
+      sequence: Number(receipt.sequence),
+      policyVersion: String(receipt.policyVersion),
+    };
+    if (receipt.receiptId !== deterministicReceiptId(receiptEvidence)) {
+      throw new Error(invalid);
+    }
+    try {
+      const signature = String(envelope.signature);
+      if (!verify(
+        null,
+        Buffer.from(canonicalJson(receipt)),
+        createPublicKey(this.#signer.publicKeyPem),
+        Buffer.from(signature.slice('ed25519:'.length), 'base64url'),
+      )) throw new Error(invalid);
+    } catch {
+      throw new Error(invalid);
+    }
+    if (eventDelivery) {
+      const nodeId = String(body.nodeId);
+      if (body.licenseId !== this.#binding.licenseId
+        || body.deploymentId !== this.#binding.deploymentId
+        || body.organizationId !== this.#binding.organizationId
+        || body.machineFingerprint !== this.#binding.machineFingerprint
+        || !EDGE_NODE_ID.test(nodeId)
+        || body.nodeSequence !== sequence
+        || body.holdId !== reservationId
+        || !EVENT_ID.test(String(body.eventId))
+        || body.eventId !== stableId(
+          'edgeevt_',
+          `${nodeId}:${String(receipt.receiptId)}`,
+        )) {
+        throw new Error(invalid);
+      }
+      return;
+    }
+    if (root.path !== `/v1/billing/holds/${reservationId}/execution-receipts`
+      || body.licenseId !== this.#binding.licenseId
+      || body.machineFingerprint !== this.#binding.machineFingerprint) {
+      throw new Error(invalid);
+    }
+  }
   async #createReservation(
     request: EdgeBillingReservationRequest,
   ): Promise<EdgeBillingReservation> {
@@ -507,7 +876,7 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
         ...this.#binding,
         module: 'model_gateway',
         units: request.reserveUnits,
-        expiresInSeconds: 900,
+        expiresInSeconds: HOLD_LIFETIME_SECONDS,
         idempotencyKey: stableId('edge-hold:', request.requestId),
       });
     } catch (error) {
@@ -525,8 +894,17 @@ export class ControlEdgeBillingCoordinator implements EdgeBillingCoordinator {
       );
     }
     const id = reservation.id;
-    await this.#append({ type: 'reserved', requestId: request.requestId, reservationId: id });
-    this.#reservations.set(request.requestId, { reservationId: id, status: 'active' });
+    if (!this.#sharedOutbox) {
+      await this.#append({
+        type: 'reserved',
+        requestId: request.requestId,
+        reservationId: id,
+      });
+      this.#reservations.set(request.requestId, {
+        reservationId: id,
+        status: 'active',
+      });
+    }
     return { reservationId: id };
   }
 

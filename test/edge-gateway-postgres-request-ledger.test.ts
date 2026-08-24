@@ -1,7 +1,12 @@
 import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { PostgresEdgeRequestLedger } from '../src/edge-gateway/postgres-request-ledger.js';
+import type { EdgeBillingOutboxAction } from '../src/edge-gateway/billing-coordinator.js';
+import {
+  PostgresEdgeRequestLedger,
+  type PrepareEdgeBillingDeliveryInput,
+  type PreparedEdgeBillingDelivery,
+} from '../src/edge-gateway/postgres-request-ledger.js';
 import {
   hashEdgeRequest,
   type EdgeRequestAdmission,
@@ -28,6 +33,8 @@ async function resetLedgerTable(connectionString: string): Promise<void> {
   assertDisposableDatabase(connectionString);
   const pool = new Pool({ connectionString, ssl: false, max: 1 });
   try {
+    await pool.query('DROP TABLE IF EXISTS control_edge_billing_outbox');
+    await pool.query('DROP TABLE IF EXISTS control_edge_billing_sequences');
     await pool.query('DROP TABLE IF EXISTS control_edge_request_ledger');
   } finally {
     await pool.end();
@@ -50,6 +57,52 @@ const binding: EdgeRequestBinding = {
   tenant: admission.tenant,
   requestHash: admission.requestHash,
 };
+
+const completedUsage = {
+  inputTokens: 250,
+  outputTokens: 100,
+  totalTokens: 350,
+};
+
+function settlementAction(
+  organizationId = admission.tenant.organizationId,
+): Extract<EdgeBillingOutboxAction, { type: 'settle' }> {
+  return {
+    type: 'settle',
+    request: {
+      requestId: admission.requestId,
+      tokenId: 'token_alpha',
+      deploymentId: admission.tenant.deploymentId,
+      organizationId,
+      subjectId: admission.tenant.subjectId,
+      endpoint: 'responses',
+      publicModel: 'public-chat',
+      policyVersion: 'policy-v1',
+      reservation: { reservationId: 'reservation_alpha' },
+      routeId: 'route_primary',
+      usage: completedUsage,
+      occurredAtMs: 3_000,
+    },
+  };
+}
+
+function preparedDelivery(
+  input: PrepareEdgeBillingDeliveryInput,
+): PreparedEdgeBillingDelivery {
+  return {
+    version: 1,
+    action: input.action.type,
+    requestId: input.request.requestId,
+    reservationId: input.action.request.reservation.reservationId,
+    occurredAtMs: input.action.request.occurredAtMs,
+    sequence: input.sequence,
+    path: '/control/billing/test',
+    body: {
+      deploymentId: input.request.tenant.deploymentId,
+      sequence: input.sequence,
+    },
+  } as unknown as PreparedEdgeBillingDelivery;
+}
 
 postgresDescribe('PostgreSQL edge request ledger', () => {
   const ledgers = new Set<PostgresEdgeRequestLedger>();
@@ -324,5 +377,215 @@ postgresDescribe('PostgreSQL edge request ledger', () => {
     await expect(ledger.admit(admission)).rejects.toThrow(
       'PostgreSQL edge request ledger is closed',
     );
+  });
+  it('commits the terminal request and raw billing action atomically', async () => {
+    const ledger = await openLedger('edge-atomic-finalizer');
+    await ledger.admit(admission);
+    now = 2_000;
+    await ledger.beginAttempt({ ...binding, routeId: 'route_primary' });
+    now = 3_000;
+
+    await expect(ledger.finalizeWithBillingAction({
+      ...binding,
+      state: 'completed',
+      actualUsage: completedUsage,
+      providerRequestId: 'provider-atomic-1',
+      billingAction: settlementAction('organization_wrong'),
+    })).rejects.toThrow(/another request or tenant/u);
+
+    const pool = new Pool({ connectionString: DATABASE_URL!, ssl: false, max: 1 });
+    try {
+      const rolledBack = await pool.query<{
+        state: string;
+        outbox_count: string;
+      }>(
+        `SELECT record_json->>'state' AS state,
+                (SELECT COUNT(*)::text FROM control_edge_billing_outbox) AS outbox_count
+         FROM control_edge_request_ledger
+         WHERE request_id = $1`,
+        [admission.requestId],
+      );
+      expect(rolledBack.rows[0]).toEqual({
+        state: 'executing',
+        outbox_count: '0',
+      });
+
+      await ledger.finalizeWithBillingAction({
+        ...binding,
+        state: 'completed',
+        actualUsage: completedUsage,
+        providerRequestId: 'provider-atomic-1',
+        billingAction: settlementAction(),
+      });
+      const committed = await pool.query<{
+        state: string;
+        outbox_state: string;
+      }>(
+        `SELECT r.record_json->>'state' AS state, o.state AS outbox_state
+         FROM control_edge_request_ledger r
+         JOIN control_edge_billing_outbox o ON o.request_id = r.request_id
+         WHERE r.request_id = $1`,
+        [admission.requestId],
+      );
+      expect(committed.rows[0]).toEqual({
+        state: 'completed',
+        outbox_state: 'pending',
+      });
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it('lets only one of two instances claim and prepare an outbox action', async () => {
+    const [first, second] = await Promise.all([
+      openLedger('edge-outbox-first'),
+      openLedger('edge-outbox-second'),
+    ]);
+    await first.admit(admission);
+    now = 2_000;
+    await first.beginAttempt({ ...binding, routeId: 'route_primary' });
+    now = 3_000;
+    await first.finalizeWithBillingAction({
+      ...binding,
+      state: 'completed',
+      actualUsage: completedUsage,
+      billingAction: settlementAction(),
+    });
+
+    let prepareCalls = 0;
+    const prepare = async (
+      input: PrepareEdgeBillingDeliveryInput,
+    ): Promise<PreparedEdgeBillingDelivery> => {
+      prepareCalls += 1;
+      await Promise.resolve();
+      return preparedDelivery(input);
+    };
+    const claims = await Promise.all([
+      first.claimBillingActions({
+        sequenceScope: 'deployment_alpha',
+        limit: 1,
+        leaseDurationMs: 1_000,
+        prepare,
+      }),
+      second.claimBillingActions({
+        sequenceScope: 'deployment_alpha',
+        limit: 1,
+        leaseDurationMs: 1_000,
+        prepare,
+      }),
+    ]);
+    const claimed = claims.flat();
+
+    expect(claimed).toHaveLength(1);
+    expect(prepareCalls).toBe(1);
+    expect(claimed[0]).toMatchObject({
+      requestId: admission.requestId,
+      sequenceScope: 'deployment_alpha',
+      sequence: 1,
+      claimEpoch: 1,
+      attempts: 1,
+    });
+  });
+
+  it('reuses the prepared delivery after lease takeover and fences the stale owner', async () => {
+    const [first, second] = await Promise.all([
+      openLedger('edge-crashed-worker'),
+      openLedger('edge-takeover-worker'),
+    ]);
+    await first.admit(admission);
+    now = 2_000;
+    await first.beginAttempt({ ...binding, routeId: 'route_primary' });
+    now = 3_000;
+    await first.finalizeWithBillingAction({
+      ...binding,
+      state: 'completed',
+      actualUsage: completedUsage,
+      billingAction: settlementAction(),
+    });
+
+    const firstClaim = (await first.claimBillingActions({
+      sequenceScope: 'deployment_alpha',
+      limit: 1,
+      leaseDurationMs: 20,
+      prepare: async (input) => preparedDelivery(input),
+    }))[0]!;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    let preparedAgain = false;
+    const secondClaim = (await second.claimBillingActions({
+      sequenceScope: 'deployment_alpha',
+      limit: 1,
+      leaseDurationMs: 1_000,
+      prepare: async () => {
+        preparedAgain = true;
+        throw new Error('prepared deliveries must be reused');
+      },
+    }))[0]!;
+
+    expect(preparedAgain).toBe(false);
+    expect(secondClaim.sequence).toBe(firstClaim.sequence);
+    expect(secondClaim.preparedHash).toBe(firstClaim.preparedHash);
+    expect(secondClaim.preparedDelivery).toEqual(firstClaim.preparedDelivery);
+    expect(secondClaim.claimEpoch).toBe(firstClaim.claimEpoch + 1);
+
+    await expect(first.ackBillingAction({
+      requestId: admission.requestId,
+      claimEpoch: firstClaim.claimEpoch,
+    })).rejects.toMatchObject({ code: 'EDGE_REQUEST_FENCING_CONFLICT' });
+    await expect(second.ackBillingAction({
+      requestId: admission.requestId,
+      claimEpoch: secondClaim.claimEpoch,
+    })).resolves.toBeUndefined();
+  });
+
+  it('quarantines a hash-tampered action without preparing or delivering it', async () => {
+    const ledger = await openLedger('edge-tamper-worker');
+    await ledger.admit(admission);
+    now = 2_000;
+    await ledger.beginAttempt({ ...binding, routeId: 'route_primary' });
+    now = 3_000;
+    await ledger.finalizeWithBillingAction({
+      ...binding,
+      state: 'completed',
+      actualUsage: completedUsage,
+      billingAction: settlementAction(),
+    });
+
+    const pool = new Pool({ connectionString: DATABASE_URL!, ssl: false, max: 1 });
+    try {
+      await pool.query(
+        `UPDATE control_edge_billing_outbox
+         SET action_hash = repeat('0', 64)
+         WHERE request_id = $1`,
+        [admission.requestId],
+      );
+      let prepareCalls = 0;
+      const claims = await ledger.claimBillingActions({
+        sequenceScope: 'deployment_alpha',
+        limit: 1,
+        prepare: async (input) => {
+          prepareCalls += 1;
+          return preparedDelivery(input);
+        },
+      });
+      expect(claims).toEqual([]);
+      expect(prepareCalls).toBe(0);
+
+      const quarantined = await pool.query<{
+        state: string;
+        last_error_code: string;
+      }>(
+        `SELECT state, last_error_code
+         FROM control_edge_billing_outbox
+         WHERE request_id = $1`,
+        [admission.requestId],
+      );
+      expect(quarantined.rows[0]).toEqual({
+        state: 'dead_letter',
+        last_error_code: 'OUTBOX_CORRUPTED',
+      });
+    } finally {
+      await pool.end();
+    }
   });
 });

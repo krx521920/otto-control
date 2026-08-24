@@ -229,4 +229,44 @@ describe('Edge Gateway protected operations API', () => {
       { token: TOKEN, billingCoordinator: values.coordinator },
     )).resolves.toBeNull();
   });
+  it('reports and retries the shared PostgreSQL billing outbox', async () => {
+    let state: 'ready' | 'degraded' = 'degraded';
+    const flush = vi.fn(async () => {
+      state = 'ready';
+      return 1;
+    });
+    const snapshot = vi.fn(() => ({
+      state,
+      running: false,
+      delivered: state === 'ready' ? 1 : 0,
+      retried: state === 'degraded' ? 1 : 0,
+      lastErrorCode: state === 'degraded'
+        ? 'EDGE_BILLING_DELIVERY_FAILED'
+        : null,
+    }));
+    const billingOutboxWorker = { flush, snapshot };
+
+    const status = await handleEdgeOperationsRequest(
+      request('/v1/operations/status'),
+      { token: TOKEN, billingOutboxWorker },
+    );
+    expect(status?.status).toBe(200);
+    await expect(status!.json()).resolves.toMatchObject({
+      billingOutbox: {
+        state: 'degraded',
+        retried: 1,
+        lastErrorCode: 'EDGE_BILLING_DELIVERY_FAILED',
+      },
+    });
+
+    const retried = await handleEdgeOperationsRequest(
+      request('/v1/operations/billing/retry', 'POST'),
+      { token: TOKEN, billingOutboxWorker },
+    );
+    expect(retried?.status).toBe(200);
+    expect(flush).toHaveBeenCalledOnce();
+    await expect(retried!.json()).resolves.toMatchObject({
+      billingOutbox: { state: 'ready', delivered: 1 },
+    });
+  });
 });

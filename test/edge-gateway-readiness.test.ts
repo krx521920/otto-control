@@ -110,4 +110,19 @@ describe('Edge Gateway readiness composition', () => {
       backgroundTasks: overflowedTasks,
     }).check()).resolves.toBe('unavailable');
   });
+  it('degrades for a retryable outbox failure and fails closed after worker shutdown', async () => {
+    let outboxState: 'ready' | 'degraded' | 'stopped' = 'degraded';
+    const probe = createEdgeGatewayReadinessProbe({
+      policySource: { load: async () => ({}) },
+      rateLimiter: { consume: vi.fn() },
+      billingCoordinator: billing('ready'),
+      billingOutboxState: () => outboxState,
+    });
+
+    await expect(probe.check()).resolves.toBe('degraded');
+    outboxState = 'stopped';
+    await expect(probe.check()).resolves.toBe('unavailable');
+    outboxState = 'ready';
+    await expect(probe.check()).resolves.toBe('ready');
+  });
 });

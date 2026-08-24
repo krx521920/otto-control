@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { canonicalJson, LocalEd25519Signer } from '../src/crypto/signed-envelope.js';
+import type { PreparedEdgeBillingDelivery } from '../src/edge-gateway/billing-coordinator.js';
 import type { ControlEdgeBillingCoordinatorOptions } from '../src/edge-gateway/control-billing-coordinator.js';
 import { ControlEdgeBillingCoordinator } from '../src/edge-gateway/control-billing-coordinator.js';
 
@@ -125,6 +126,7 @@ describe('Control-backed Edge billing coordinator', () => {
       ...BINDING,
       module: 'model_gateway',
       units: 4_000,
+      expiresInSeconds: 10_800,
     }));
     const settlement = calls.find((item) => item.url.includes(`${HOLD_ONE}/execution-receipts`))!;
     expect(settlement.body).toEqual(expect.objectContaining({
@@ -263,20 +265,234 @@ describe('Control-backed Edge billing coordinator', () => {
       routeId: 'route_primary',
       usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
       occurredAtMs: NOW,
+      sequence: 17,
     });
 
     const aggregation = calls.find((call) => call.path === '/v1/billing/edge-events')!;
     expect(aggregation.body).toMatchObject({
       ...BINDING,
       nodeId,
-      nodeSequence: 1,
+      nodeSequence: 17,
       holdId: HOLD_ONE,
       eventId: expect.stringMatching(/^edgeevt_[a-f0-9]{32}$/u),
-      envelope: { receipt: { sequence: 1, units: 5 } },
+      envelope: { receipt: { sequence: 17, units: 5 } },
     });
     expect(calls.some((call) => call.path.includes(`${HOLD_ONE}/execution-receipts`))).toBe(false);
   });
 
+  it('leaves reservation durability to PostgreSQL when the shared outbox is enabled', async () => {
+    const journalFile = join(directory, 'shared-outbox.ndjson');
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).endsWith('/v1/billing/holds')) {
+        return response({ hold: { id: HOLD_ONE } }, 201);
+      }
+      throw new Error(`unexpected URL: ${String(input)}`);
+    });
+    const coordinator = await create(
+      fetchMock,
+      signer(),
+      journalFile,
+      { bootstrapReceiptKey: false, sharedOutbox: true },
+    );
+
+    await coordinator.reserve({
+      ...identity('request_edge_shared_outbox'),
+      reserveUnits: 4_000,
+    });
+
+    expect(coordinator.operationalStatus()).toMatchObject({
+      state: 'ready',
+      activeReservations: 0,
+      recoveredReservations: 0,
+      journalEntries: 0,
+    });
+    await expect(readFile(journalFile, 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+  it('prepares deterministic receipts and permits verbatim cross-instance replay', async () => {
+    const receiptSigner = signer();
+    const nodeId = `edge_${'a'.repeat(32)}`;
+    const originFetch = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/execution-receipt-keys/bootstrap')) return response({}, 201);
+      throw new Error(`unexpected origin path: ${path}`);
+    });
+    const origin = await create(
+      originFetch,
+      receiptSigner,
+      join(directory, 'prepared-origin.ndjson'),
+      { nodeId },
+    );
+    const request = {
+      ...identity('request_edge_prepared_1'),
+      reservation: { reservationId: HOLD_ONE },
+      routeId: 'route_primary',
+      usage: { inputTokens: 7, outputTokens: 5, totalTokens: 12 },
+      occurredAtMs: NOW + 250,
+      sequence: 41,
+    };
+    const first = await origin.prepareSettlementDelivery(request, 41);
+    const second = await origin.prepareSettlementDelivery(request, 41);
+
+    expect(second).toEqual(first);
+    expect(first).toMatchObject({
+      version: 1,
+      action: 'settle',
+      requestId: request.requestId,
+      reservationId: HOLD_ONE,
+      occurredAtMs: NOW + 250,
+      sequence: 41,
+      path: '/v1/billing/edge-events',
+      body: {
+        ...BINDING,
+        nodeId,
+        nodeSequence: 41,
+        holdId: HOLD_ONE,
+        eventId: expect.stringMatching(/^edgeevt_[a-f0-9]{32}$/u),
+        envelope: {
+          receipt: {
+            receiptId: expect.stringMatching(/^exec_[a-f0-9]{32}$/u),
+            taskId: expect.stringMatching(/^edge_[a-f0-9]{32}$/u),
+            issuedAtMs: NOW + 250,
+            expiresAtMs: NOW + 250 + 518_400_000,
+            sequence: 41,
+          },
+        },
+      },
+    });
+    const serialized = JSON.stringify(first);
+    expect(serialized).not.toMatch(/prompt|messages|input|output|file|content/iu);
+
+    const delivered: string[] = [];
+    const receiverFetch = vi.fn<typeof fetch>(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/execution-receipt-keys/bootstrap')) return response({}, 201);
+      if (path === '/v1/billing/edge-events') {
+        delivered.push(String(init?.body));
+        return response({ replayed: delivered.length > 1 }, 202);
+      }
+      throw new Error(`unexpected receiver path: ${path}`);
+    });
+    const receiver = await create(
+      receiverFetch,
+      receiptSigner,
+      join(directory, 'prepared-receiver.ndjson'),
+      { nodeId: `edge_${'b'.repeat(32)}` },
+    );
+    const restored = JSON.parse(serialized) as PreparedEdgeBillingDelivery;
+    await receiver.deliverPrepared(restored);
+    await receiver.deliverPrepared(restored);
+
+    expect(delivered).toHaveLength(2);
+    expect(delivered[1]).toBe(delivered[0]);
+    expect(JSON.parse(delivered[0]!)).toEqual(first.body);
+    expect(receiver.operationalStatus().activeReservations).toBe(0);
+  });
+
+  it('prepares stable releases and keeps uncertain outcomes local', async () => {
+    const receiptSigner = signer();
+    const origin = await create(
+      vi.fn<typeof fetch>(async () => response({}, 201)),
+      receiptSigner,
+      join(directory, 'prepared-release-origin.ndjson'),
+    );
+    const releasedRequest = {
+      ...identity('request_edge_prepared_release'),
+      reservation: { reservationId: HOLD_TWO },
+      reason: 'upstream_rejected' as const,
+      occurredAtMs: NOW + 500,
+    };
+    const uncertainRequest = {
+      ...identity('request_edge_prepared_uncertain'),
+      reservation: { reservationId: HOLD_ONE },
+      routeId: 'route_primary',
+      reason: 'stream_timed_out' as const,
+      occurredAtMs: NOW + 750,
+    };
+    const release = origin.prepareReleaseDelivery(releasedRequest);
+    const replay = origin.prepareReleaseDelivery(releasedRequest);
+    const uncertain = origin.prepareUncertainDelivery(uncertainRequest);
+
+    expect(replay).toEqual(release);
+    expect(release.body.idempotencyKey).toMatch(/^edge-release:[a-f0-9]{32}$/u);
+    const delivered: string[] = [];
+    const receiverFetch = vi.fn<typeof fetch>(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/execution-receipt-keys/bootstrap')) return response({}, 201);
+      if (path.endsWith('/release')) {
+        delivered.push(String(init?.body));
+        return response({ replayed: delivered.length > 1 });
+      }
+      throw new Error(`unexpected receiver path: ${path}`);
+    });
+    const receiver = await create(
+      receiverFetch,
+      receiptSigner,
+      join(directory, 'prepared-release-receiver.ndjson'),
+    );
+    await receiver.deliverPrepared(
+      JSON.parse(JSON.stringify(release)) as PreparedEdgeBillingDelivery,
+    );
+    await receiver.deliverPrepared(
+      JSON.parse(JSON.stringify(release)) as PreparedEdgeBillingDelivery,
+    );
+    const callsBeforeUncertain = receiverFetch.mock.calls.length;
+    await receiver.deliverPrepared(uncertain);
+
+    expect(delivered).toHaveLength(2);
+    expect(delivered[1]).toBe(delivered[0]);
+    expect(JSON.parse(delivered[0]!)).toEqual(release.body);
+    expect(receiverFetch).toHaveBeenCalledTimes(callsBeforeUncertain);
+  });
+
+  it('rejects tampered or content-bearing prepared deliveries before network access', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => response({}, 201));
+    const coordinator = await create(
+      fetchMock,
+      signer(),
+      join(directory, 'prepared-validation.ndjson'),
+    );
+    const prepared = await coordinator.prepareSettlementDelivery({
+      ...identity('request_edge_prepared_tamper'),
+      reservation: { reservationId: HOLD_ONE },
+      routeId: 'route_primary',
+      usage: { inputTokens: 1, outputTokens: 2, totalTokens: 3 },
+      occurredAtMs: NOW,
+      sequence: 9,
+    }, 9);
+    fetchMock.mockClear();
+
+    const withContent = {
+      ...prepared,
+      prompt: 'must never enter billing outbox',
+    } as unknown as PreparedEdgeBillingDelivery;
+    await expect(coordinator.deliverPrepared(withContent))
+      .rejects.toThrow('Prepared edge billing delivery is invalid');
+
+    const tampered = JSON.parse(JSON.stringify(prepared)) as PreparedEdgeBillingDelivery;
+    const receipt = (tampered as unknown as {
+      body: { envelope: { receipt: { units: number } } };
+    }).body.envelope.receipt;
+    receipt.units += 1;
+    await expect(coordinator.deliverPrepared(tampered))
+      .rejects.toThrow('Prepared edge billing delivery is invalid');
+
+    const release = coordinator.prepareReleaseDelivery({
+      ...identity('request_edge_prepared_release_tamper'),
+      reservation: { reservationId: HOLD_TWO },
+      reason: 'zero_usage',
+      occurredAtMs: NOW,
+    });
+    const forgedRelease = JSON.parse(JSON.stringify(release)) as PreparedEdgeBillingDelivery;
+    (forgedRelease as unknown as {
+      body: { idempotencyKey: string };
+    }).body.idempotencyKey = 'edge-release:forged';
+    await expect(coordinator.deliverPrepared(forgedRelease))
+      .rejects.toThrow('Prepared edge billing delivery is invalid');
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   it('replays a durable pending settlement after restart and preserves sequence order', async () => {
     const receiptSigner = signer();
     let firstSettlement = true;

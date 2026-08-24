@@ -60,6 +60,7 @@ import {
 import { FileEdgeRequestLedger } from './request-ledger.js';
 import type { EdgeRequestLedger } from './request-ledger.js';
 import { PostgresEdgeRequestLedger } from './postgres-request-ledger.js';
+import { PostgresEdgeBillingOutboxWorker } from './postgres-billing-outbox-worker.js';
 import {
   type EdgeUpstreamResponseLimits,
   loadEdgeUpstreamResponseLimits,
@@ -648,6 +649,7 @@ export function createEdgeGatewayReadinessProbe(input: {
   lifecycle?: EdgeGatewayLifecycle;
   backgroundTasks?: EdgeGatewayBackgroundTaskWaiter;
   requestLedgerHealthCheck?: () => Promise<void>;
+  billingOutboxState?: () => 'ready' | 'degraded' | 'stopped';
 }): EdgeGatewayReadinessProbe {
   return {
     async check() {
@@ -659,7 +661,10 @@ export function createEdgeGatewayReadinessProbe(input: {
         await input.rateLimiter.healthCheck?.();
         await input.requestLedgerHealthCheck?.();
         const billingState = input.billingCoordinator?.operationalStatus?.().state ?? 'ready';
-        return backgroundState === 'degraded' && billingState === 'ready'
+        const outboxState = input.billingOutboxState?.() ?? 'ready';
+        if (outboxState === 'stopped') return 'unavailable';
+        return (backgroundState === 'degraded' || outboxState === 'degraded')
+          && billingState === 'ready'
           ? 'degraded'
           : billingState;
       } catch {
@@ -708,6 +713,10 @@ export async function handleEdgeOperationsRequest(
   input: {
     token: string;
     billingCoordinator?: EdgeBillingCoordinator;
+    billingOutboxWorker?: Pick<
+      PostgresEdgeBillingOutboxWorker,
+      'flush' | 'snapshot'
+    >;
     concurrencyLimiter?: EdgeConcurrencyLimiter;
     circuitBreaker?: EdgeRouteCircuitBreaker;
     lifecycle?: EdgeGatewayLifecycle;
@@ -728,6 +737,9 @@ export async function handleEdgeOperationsRequest(
       return operationsResponse(200, {
         service: 'otto-edge-gateway',
         billing: input.billingCoordinator?.operationalStatus?.() ?? null,
+        ...(input.billingOutboxWorker
+          ? { billingOutbox: input.billingOutboxWorker.snapshot() }
+          : {}),
         concurrency: input.concurrencyLimiter?.snapshot() ?? null,
         circuits: input.circuitBreaker?.snapshot() ?? null,
         lifecycle: input.lifecycle?.snapshot() ?? null,
@@ -740,22 +752,30 @@ export async function handleEdgeOperationsRequest(
     }
   }
   if (request.method === 'POST' && url.pathname === '/v1/operations/billing/retry') {
-    if (!input.billingCoordinator?.flushPending) {
+    if (!input.billingCoordinator?.flushPending && !input.billingOutboxWorker) {
       return operationsResponse(409, {
         error: { code: 'EDGE_BILLING_NOT_CONFIGURED', message: 'billing is not configured' },
       });
     }
     try {
-      await input.billingCoordinator.flushPending();
+      await Promise.all([
+        input.billingCoordinator?.flushPending?.(),
+        input.billingOutboxWorker?.flush(),
+      ]);
     } catch {
       return operationsResponse(503, {
         error: { code: 'EDGE_BILLING_UNAVAILABLE', message: 'billing retry failed' },
       });
     }
-    const billingStatus = input.billingCoordinator.operationalStatus?.() ?? null;
-    return operationsResponse(billingStatus?.state === 'unavailable' ? 503 : 200, {
+    const billingStatus = input.billingCoordinator?.operationalStatus?.() ?? null;
+    const outboxStatus = input.billingOutboxWorker?.snapshot() ?? null;
+    const unavailable = billingStatus?.state === 'unavailable'
+      || outboxStatus?.state === 'degraded'
+      || outboxStatus?.state === 'stopped';
+    return operationsResponse(unavailable ? 503 : 200, {
       service: 'otto-edge-gateway',
       billing: billingStatus,
+      ...(outboxStatus ? { billingOutbox: outboxStatus } : {}),
     });
   }
   return operationsResponse(404, {
@@ -801,6 +821,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
       })
     : createEdgeSignatureVerifier(bootstrapPublicKeys);
   let billingCoordinator: ControlEdgeBillingCoordinator | undefined;
+  let billingOutboxSequenceScope: string | undefined;
   if (config.billing.type === 'control' && config.policy.type === 'control') {
     const identity = exactIdentity(
       JSON.parse(await readFile(config.policy.identityFile, 'utf8')) as unknown,
@@ -812,6 +833,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
     } catch {
       throw new Error('OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE could not be read');
     }
+    billingOutboxSequenceScope = config.billing.nodeId ?? identity.deploymentId;
     billingCoordinator = await ControlEdgeBillingCoordinator.create({
       controlBaseUrl: config.policy.controlBaseUrl,
       binding: identity,
@@ -821,6 +843,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
       requestTimeoutMs: config.policy.requestTimeoutMs,
       retryIntervalMs: config.billing.retryIntervalMs,
       nodeId: config.billing.nodeId,
+      sharedOutbox: config.billing.requestLedger.type === 'postgres',
     });
   }
   let postgresRequestLedger: PostgresEdgeRequestLedger | undefined;
@@ -846,6 +869,22 @@ export async function startEdgeGatewayServer(): Promise<void> {
       requestLedger = postgresRequestLedger;
     }
   }
+  const billingOutboxWorker = postgresRequestLedger
+    && billingCoordinator
+    && billingOutboxSequenceScope
+    ? new PostgresEdgeBillingOutboxWorker({
+        ledger: postgresRequestLedger,
+        coordinator: billingCoordinator,
+        sequenceScope: billingOutboxSequenceScope,
+        ...(config.billing.type === 'control'
+          && config.billing.retryIntervalMs !== undefined
+          ? { intervalMs: config.billing.retryIntervalMs }
+          : {}),
+        onError: (error) => {
+          console.error('Edge billing outbox worker error', error);
+        },
+      })
+    : undefined;
   const operationsToken = config.operationsTokenFile
     ? await loadEdgeOperationsToken(config.operationsTokenFile)
     : undefined;
@@ -872,6 +911,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
     lifecycle,
     billingCoordinator,
     requestLedger,
+    ...(postgresRequestLedger ? { billingOutbox: postgresRequestLedger } : {}),
     readinessProbe: createEdgeGatewayReadinessProbe({
       policySource: configuredPolicySource,
       rateLimiter,
@@ -881,6 +921,9 @@ export async function startEdgeGatewayServer(): Promise<void> {
       requestLedgerHealthCheck: postgresRequestLedger
         ? () => postgresRequestLedger.healthCheck()
         : undefined,
+      ...(billingOutboxWorker
+        ? { billingOutboxState: () => billingOutboxWorker.snapshot().state }
+        : {}),
     }),
     requestLimits: config.request,
     responseLimits: config.upstreamResponse,
@@ -940,6 +983,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
       ? handleEdgeOperationsRequest(convertedRequest, {
           token: operationsToken,
           billingCoordinator,
+          ...(billingOutboxWorker ? { billingOutboxWorker } : {}),
           concurrencyLimiter,
           circuitBreaker,
           lifecycle,
@@ -969,6 +1013,7 @@ export async function startEdgeGatewayServer(): Promise<void> {
     server.once('error', reject);
     server.listen(config.port, config.host, resolve);
   });
+  billingOutboxWorker?.start();
   process.stdout.write(`otto-edge-gateway listening on ${config.host}:${config.port}\n`);
   let shutdown: Promise<boolean> | null = null;
   let forcedBySignal = false;
@@ -983,6 +1028,13 @@ export async function startEdgeGatewayServer(): Promise<void> {
       lifecycle,
       backgroundTasks,
       resources: [
+        ...(billingOutboxWorker ? [{
+          close: async () => {
+            await billingOutboxWorker.flush();
+            await billingOutboxWorker.close();
+          },
+          forceClose: () => billingOutboxWorker.close(),
+        }] : []),
         ...(billingCoordinator ? [{
           close: async () => {
             billingCoordinator.close();
