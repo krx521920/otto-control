@@ -173,6 +173,16 @@ x-edge-gateway-common: &edge-gateway-common
     OTTO_EDGE_BILLING_NODE_ID: ${OTTO_EDGE_BILLING_NODE_ID:-}
     OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE: /run/secrets/edge_execution_receipt_key
     OTTO_EDGE_BILLING_JOURNAL_FILE: /var/lib/otto-edge/billing-journal.ndjson
+    OTTO_EDGE_REQUEST_LEDGER_BACKEND: postgres
+    OTTO_EDGE_REQUEST_LEDGER_DATABASE_HOST: postgres-router
+    OTTO_EDGE_REQUEST_LEDGER_DATABASE_PORT: "5432"
+    OTTO_EDGE_REQUEST_LEDGER_DATABASE_NAME: ${POSTGRES_DB:-otto_control}
+    OTTO_EDGE_REQUEST_LEDGER_DATABASE_USER: otto_edge_ledger
+    OTTO_EDGE_REQUEST_LEDGER_DATABASE_PASSWORD_FILE: /run/secrets/edge_ledger_postgres_password
+    OTTO_EDGE_REQUEST_LEDGER_DATABASE_SSL: "true"
+    OTTO_EDGE_REQUEST_LEDGER_MANAGE_SCHEMA: "false"
+    OTTO_EDGE_REQUEST_LEDGER_LEASE_MS: ${OTTO_EDGE_REQUEST_LEDGER_LEASE_MS:-7200000}
+    NODE_EXTRA_CA_CERTS: /run/secrets/postgres_tls_ca
     OTTO_EDGE_OPERATIONS_TOKEN_FILE: /run/secrets/edge_operations_token
     OTTO_EDGE_STATE_DIRECTORY: /var/lib/otto-edge
   depends_on:
@@ -181,6 +191,8 @@ x-edge-gateway-common: &edge-gateway-common
     caddy:
       condition: service_started
     edge-redis:
+      condition: service_healthy
+    postgres-tools:
       condition: service_healthy
   expose:
     - "7791"
@@ -194,6 +206,8 @@ x-edge-gateway-common: &edge-gateway-common
     - edge_redis_tls_ca
     - edge_execution_receipt_key
     - edge_operations_token
+    - edge_ledger_postgres_password
+    - postgres_tls_ca
   volumes:
     - ${OTTO_EDGE_PROVIDER_SECRETS_DIR:-./edge-provider-secrets}:/run/otto-edge-provider-secrets:ro
   read_only: true
@@ -374,8 +388,9 @@ services:
         } |
           gosu postgres sh -c 'umask 077; cat > "$$PGPASSFILE"'
         unset password superuser_password
+        gosu postgres /usr/local/bin/otto-migrate-edge-ledger
         exec gosu postgres tail -f /dev/null
-    secrets: [postgres_password, postgres_superuser_password, postgres_tls_ca]
+    secrets: [postgres_password, postgres_superuser_password, edge_ledger_postgres_password, postgres_tls_ca]
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=1m,mode=1777
     healthcheck:
@@ -556,6 +571,8 @@ secrets:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/federation_metrics_token
   postgres_password:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_password
+  edge_ledger_postgres_password:
+    file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/edge_ledger_postgres_password
   postgres_superuser_password:
     file: ${OTTO_CONTROL_SECRETS_DIR:-./secrets}/postgres_superuser_password
   postgres_replication_password:

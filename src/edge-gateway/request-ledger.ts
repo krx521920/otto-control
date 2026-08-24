@@ -91,7 +91,8 @@ export type EdgeRequestLedgerConflictCode =
   | 'EDGE_REQUEST_HASH_CONFLICT'
   | 'EDGE_REQUEST_RESERVATION_CONFLICT'
   | 'EDGE_REQUEST_STATE_CONFLICT'
-  | 'EDGE_REQUEST_PROVIDER_ID_CONFLICT';
+  | 'EDGE_REQUEST_PROVIDER_ID_CONFLICT'
+  | 'EDGE_REQUEST_FENCING_CONFLICT';
 
 export class EdgeRequestLedgerConflictError extends Error {
   constructor(
@@ -167,10 +168,16 @@ function normalizeTenant(tenant: EdgeRequestTenantIdentity): EdgeRequestTenantId
   return result;
 }
 
+export function normalizeEdgeRequestId(value: string): string {
+  const requestId = value?.trim();
+  if (!REQUEST_ID.test(requestId)) throw new TypeError('edge request ID is invalid');
+  return requestId;
+}
+
 function normalizeBinding(input: EdgeRequestBinding): EdgeRequestBinding {
-  const requestId = input.requestId?.trim();
+  const requestId = normalizeEdgeRequestId(input.requestId);
   const requestHash = input.requestHash?.trim().toLowerCase();
-  if (!REQUEST_ID.test(requestId) || !SHA256.test(requestHash)) {
+  if (!SHA256.test(requestHash)) {
     throw new TypeError('edge request binding is invalid');
   }
   return { requestId, requestHash, tenant: normalizeTenant(input.tenant) };
@@ -213,7 +220,10 @@ function sameTenant(
     && left.subjectId === right.subjectId;
 }
 
-function assertBinding(record: EdgeRequestRecord, input: EdgeRequestBinding): void {
+export function assertEdgeRequestBinding(
+  record: EdgeRequestRecord,
+  input: EdgeRequestBinding,
+): void {
   const binding = normalizeBinding(input);
   if (!sameTenant(record.tenant, binding.tenant)) {
     throw new EdgeRequestLedgerConflictError(
@@ -242,7 +252,7 @@ function assertState(
   }
 }
 
-function assertRecord(value: unknown): EdgeRequestRecord {
+export function assertEdgeRequestRecord(value: unknown): EdgeRequestRecord {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new EdgeRequestLedgerCorruptionError('edge request journal record is invalid');
   }
@@ -327,7 +337,7 @@ function assertRecord(value: unknown): EdgeRequestRecord {
 
 function assertReplay(previous: EdgeRequestRecord | undefined, next: EdgeRequestRecord): void {
   if (!previous) return;
-  assertBinding(previous, next);
+  assertEdgeRequestBinding(previous, next);
   if (previous.reservedUnits !== next.reservedUnits) {
     throw new EdgeRequestLedgerCorruptionError('edge request reservation changed in journal');
   }
@@ -346,19 +356,19 @@ function assertReplay(previous: EdgeRequestRecord | undefined, next: EdgeRequest
   }
 }
 
-type PersistRecord = (record: EdgeRequestRecord) => Promise<void>;
+export type PersistEdgeRequestRecord = (record: EdgeRequestRecord) => Promise<void>;
 
-class EdgeRequestLedgerEngine {
+export class EdgeRequestLedgerEngine {
   readonly #records = new Map<string, EdgeRequestRecord>();
   readonly #now: () => number;
-  #persist: PersistRecord;
+  #persist: PersistEdgeRequestRecord;
 
-  constructor(now: () => number, persist: PersistRecord) {
+  constructor(now: () => number, persist: PersistEdgeRequestRecord) {
     this.#now = now;
     this.#persist = persist;
   }
 
-  setPersist(persist: PersistRecord): void {
+  setPersist(persist: PersistEdgeRequestRecord): void {
     this.#persist = persist;
   }
 
@@ -379,7 +389,7 @@ class EdgeRequestLedgerEngine {
     }
     const existing = this.#records.get(binding.requestId);
     if (existing) {
-      assertBinding(existing, binding);
+      assertEdgeRequestBinding(existing, binding);
       if (existing.reservedUnits !== input.reservedUnits) {
         throw new EdgeRequestLedgerConflictError(
           'EDGE_REQUEST_RESERVATION_CONFLICT',
@@ -414,8 +424,7 @@ class EdgeRequestLedgerEngine {
   }
 
   lookup(input: Omit<EdgeRequestBinding, 'requestHash'>): EdgeRequestRecord | null {
-    const requestId = input.requestId?.trim();
-    if (!REQUEST_ID.test(requestId)) throw new TypeError('edge request ID is invalid');
+    const requestId = normalizeEdgeRequestId(input.requestId);
     const tenant = normalizeTenant(input.tenant);
     const existing = this.#records.get(requestId);
     if (!existing) return null;
@@ -433,21 +442,7 @@ class EdgeRequestLedgerEngine {
   ): Promise<EdgeRequestRecord> {
     const record = this.#required(input);
     const routeId = normalizeRouteId(input.routeId);
-    if (record.state === 'unknown_outcome') {
-      const previousAttempt = record.attempts.at(-1);
-      const previousAttemptEndedAtMs = previousAttempt?.endedAtMs;
-      const hasFreshConfirmation = typeof previousAttemptEndedAtMs === 'number'
-        && record.failoverConfirmedAt !== null
-        && record.failoverConfirmedAt >= previousAttemptEndedAtMs;
-      if (!hasFreshConfirmation || routeId === record.routeId) {
-        throw new EdgeRequestLedgerConflictError(
-          'EDGE_REQUEST_STATE_CONFLICT',
-          'an unknown request requires confirmed failover to a different route',
-        );
-      }
-    } else {
-      assertState(record, ['received'], 'begin attempt');
-    }
+    assertState(record, ['received'], 'begin attempt');
     const now = this.#now();
     const next = cloneRecord(record);
     next.state = 'executing';
@@ -608,12 +603,12 @@ class EdgeRequestLedgerEngine {
         'edge request has not been admitted',
       );
     }
-    assertBinding(record, binding);
+    assertEdgeRequestBinding(record, binding);
     return cloneRecord(record);
   }
 
   async #store(record: EdgeRequestRecord): Promise<void> {
-    const validated = assertRecord(record);
+    const validated = assertEdgeRequestRecord(record);
     const previous = this.#records.get(validated.requestId);
     assertReplay(previous, validated);
     await this.#persist(validated);
@@ -625,7 +620,10 @@ abstract class QueuedEdgeRequestLedger implements EdgeRequestLedger {
   readonly #engine: EdgeRequestLedgerEngine;
   #queue: Promise<void> = Promise.resolve();
 
-  protected constructor(now: () => number, persist: PersistRecord = async () => undefined) {
+  protected constructor(
+    now: () => number,
+    persist: PersistEdgeRequestRecord = async () => undefined,
+  ) {
     this.#engine = new EdgeRequestLedgerEngine(now, persist);
   }
 
@@ -633,7 +631,7 @@ abstract class QueuedEdgeRequestLedger implements EdgeRequestLedger {
     return this.#engine;
   }
 
-  protected setPersist(persist: PersistRecord): void {
+  protected setPersist(persist: PersistEdgeRequestRecord): void {
     this.#engine.setPersist(persist);
   }
 
@@ -761,7 +759,7 @@ export class FileEdgeRequestLedger extends QueuedEdgeRequestLedger {
         version: 1,
         index: Number(body.index),
         previousHash: body.previousHash as string | null,
-        record: assertRecord(body.record),
+        record: assertEdgeRequestRecord(body.record),
       };
       if (!SHA256.test(body.hash) || digest(payload) !== body.hash) {
         throw new EdgeRequestLedgerCorruptionError('edge request journal hash chain is invalid');

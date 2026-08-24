@@ -30,6 +30,10 @@ describe('production bootstrap', () => {
         join(output, 'secrets-staging', 'postgres_password'),
         'utf8',
       ).trim();
+      const edgeLedgerPassword = readFileSync(
+        join(output, 'secrets-staging', 'edge_ledger_postgres_password'),
+        'utf8',
+      ).trim();
       const superuserPassword = readFileSync(
         join(output, 'secrets-staging', 'postgres_superuser_password'),
         'utf8',
@@ -102,6 +106,9 @@ describe('production bootstrap', () => {
       expect(environment).not.toMatch(/CONTROL_BACKUP_S3_SECRET_ACCESS_KEY=[^\n]+/u);
       expect(environment).not.toContain(adminToken);
       expect(environment).not.toContain(databasePassword);
+      expect(edgeLedgerPassword).toMatch(/^[A-Za-z0-9_-]{32,}$/u);
+      expect(edgeLedgerPassword).not.toBe(databasePassword);
+      expect(environment).not.toContain(edgeLedgerPassword);
       expect(environment).not.toContain(superuserPassword);
       expect(environment).not.toContain(replicationPassword);
       expect(environment).not.toContain(pgbackrestCipherPass);

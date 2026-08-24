@@ -144,8 +144,12 @@ describe('production deployment assets', () => {
       `"$$PGHOST" "$$PGPORT" '*' 'postgres' "$$superuser_password"`,
     );
     expect(postgresTools).toContain(
-      'secrets: [postgres_password, postgres_superuser_password, postgres_tls_ca]',
+      'secrets: [postgres_password, postgres_superuser_password, edge_ledger_postgres_password, postgres_tls_ca]',
     );
+    expect(postgresTools).toContain('otto-migrate-edge-ledger');
+    expect(compose).toContain('OTTO_EDGE_REQUEST_LEDGER_DATABASE_USER: otto_edge_ledger');
+    expect(compose).toContain('OTTO_EDGE_REQUEST_LEDGER_MANAGE_SCHEMA: "false"');
+    expect(compose).toContain('edge_ledger_postgres_password');
     expect(compose).toContain('postgres_superuser_password');
     expect(compose).toContain('postgres_replication_password');
     expect(compose).toContain('pgbackrest_cipher_pass');

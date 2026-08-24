@@ -682,6 +682,7 @@ async function main() {
     'federation_admin_token',
     'federation_metrics_token',
     'postgres_password',
+    'edge_ledger_postgres_password',
     'postgres_superuser_password',
     'postgres_replication_password',
     'pgbackrest_cipher_pass',

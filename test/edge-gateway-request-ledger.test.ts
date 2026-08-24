@@ -87,7 +87,7 @@ describe('edge request idempotency ledger', () => {
     });
   });
 
-  it('records attempts, provider request IDs, failover consent, and actual usage', async () => {
+  it('records provider evidence, locks unknown outcomes, and completes a new logical request', async () => {
     let now = 1_000;
     const ledger = new MemoryEdgeRequestLedger({ now: () => now });
     await ledger.admit(admission);
@@ -106,50 +106,30 @@ describe('edge request idempotency ledger', () => {
       providerRequestId: 'provider-request-primary',
     });
 
-    await expect(ledger.beginAttempt({ ...binding, routeId: 'route_fallback' }))
-      .rejects.toMatchObject({
-        code: 'EDGE_REQUEST_STATE_CONFLICT',
-      });
     now = 4_000;
     await ledger.confirmFailover(binding);
+    await expect(ledger.beginAttempt({ ...binding, routeId: 'route_fallback' }))
+      .rejects.toMatchObject({ code: 'EDGE_REQUEST_STATE_CONFLICT' });
+
+    const nextAdmission = { ...admission, requestId: 'req_new_after_unknown' };
+    const nextBinding = { ...binding, requestId: nextAdmission.requestId };
     now = 5_000;
-    await ledger.beginAttempt({ ...binding, routeId: 'route_fallback' });
+    await ledger.admit(nextAdmission);
+    await ledger.beginAttempt({ ...nextBinding, routeId: 'route_fallback' });
     now = 6_000;
     const completed = await ledger.complete({
-      ...binding,
+      ...nextBinding,
       providerRequestId: 'provider-request-fallback',
       actualUsage: { inputTokens: 250, outputTokens: 100, totalTokens: 350 },
     });
-
     expect(completed).toMatchObject({
       state: 'completed',
-      reservedUnits: 8_000,
       actualUsage: { inputTokens: 250, outputTokens: 100, totalTokens: 350 },
       routeId: 'route_fallback',
       providerRequestId: 'provider-request-fallback',
-      failoverConfirmedAt: 4_000,
       completedAtMs: 6_000,
     });
-    expect(completed.attempts).toEqual([
-      {
-        attempt: 1,
-        routeId: 'route_primary',
-        providerRequestId: 'provider-request-primary',
-        startedAtMs: 2_000,
-        endedAtMs: 3_000,
-        outcome: 'unknown_outcome',
-      },
-      {
-        attempt: 2,
-        routeId: 'route_fallback',
-        providerRequestId: 'provider-request-fallback',
-        startedAtMs: 5_000,
-        endedAtMs: 6_000,
-        outcome: 'completed',
-      },
-    ]);
   });
-
   it('permits a safe retry only after an attempt is proved not sent', async () => {
     const ledger = new MemoryEdgeRequestLedger();
     await ledger.admit(admission);
@@ -183,12 +163,12 @@ describe('edge request idempotency ledger', () => {
     expect((await ledger.markUnknownOutcome(binding)).state).toBe('unknown_outcome');
   });
 
-  it('requires fresh confirmation for every supplier switch after an unknown outcome', async () => {
+  it('never reopens an unknown outcome even after repeated confirmation', async () => {
     let now = 1_000;
     const ledger = new MemoryEdgeRequestLedger({ now: () => now });
     const request: EdgeRequestAdmission = {
       ...admission,
-      requestId: 'req_confirm_each_switch',
+      requestId: 'req_unknown_never_replayed',
     };
     const requestBinding: EdgeRequestBinding = {
       requestId: request.requestId,
@@ -200,30 +180,17 @@ describe('edge request idempotency ledger', () => {
     await ledger.beginAttempt({ ...requestBinding, routeId: 'route_primary' });
     now = 2_000;
     await ledger.markUnknownOutcome(requestBinding);
-    now = 3_000;
-    await ledger.confirmFailover(requestBinding);
-    now = 4_000;
-    await ledger.beginAttempt({ ...requestBinding, routeId: 'route_fallback_1' });
-    now = 5_000;
-    await ledger.markUnknownOutcome(requestBinding);
-
-    await expect(ledger.beginAttempt({
-      ...requestBinding,
-      routeId: 'route_fallback_2',
-    })).rejects.toMatchObject({ code: 'EDGE_REQUEST_STATE_CONFLICT' });
-
-    now = 6_000;
-    const confirmed = await ledger.confirmFailover(requestBinding);
-    expect(confirmed.failoverConfirmedAt).toBe(6_000);
-    now = 7_000;
-    const thirdAttempt = await ledger.beginAttempt({
-      ...requestBinding,
-      routeId: 'route_fallback_2',
+    for (const routeId of ['route_fallback_1', 'route_fallback_2']) {
+      now += 1_000;
+      await ledger.confirmFailover(requestBinding);
+      await expect(ledger.beginAttempt({ ...requestBinding, routeId }))
+        .rejects.toMatchObject({ code: 'EDGE_REQUEST_STATE_CONFLICT' });
+    }
+    expect(await ledger.lookup(requestBinding)).toMatchObject({
+      state: 'unknown_outcome',
+      attempts: [{ routeId: 'route_primary', outcome: 'unknown_outcome' }],
     });
-    expect(thirdAttempt.attempts).toHaveLength(3);
-    expect(thirdAttempt.routeId).toBe('route_fallback_2');
   });
-
   it('fsyncs a hash-chain journal and recovers restart states conservatively', async () => {
     const directory = await temporaryDirectory();
     const journalFile = join(directory, 'request-ledger.ndjson');

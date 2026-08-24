@@ -636,12 +636,68 @@ describe('edge gateway server configuration', () => {
         type: 'control',
         receiptPrivateKeyFile: 'D:\\secure\\receipt-private.pem',
         journalFile: 'D:\\state\\edge-billing.ndjson',
-        requestJournalFile: 'D:\\state\\edge-billing.ndjson.requests',
+        requestLedger: {
+          type: 'file',
+          journalFile: 'D:\\state\\edge-billing.ndjson.requests',
+        },
         retryIntervalMs: 5000,
         nodeId: `edge_${'a'.repeat(32)}`,
       },
       operationsTokenFile: 'D:\\secure\\edge-operations.token',
     });
+  });
+
+  it('loads a TLS PostgreSQL request ledger without an inline password', () => {
+    expect(loadEdgeGatewayServerConfiguration({
+      ...common,
+      OTTO_EDGE_CONTROL_URL: 'https://control.otto.test',
+      OTTO_EDGE_DEPLOYMENT_IDENTITY_FILE: 'D:/secure/identity.json',
+      OTTO_EDGE_LEASE_TOKEN_FILE: 'D:/secure/lease-token',
+      OTTO_EDGE_BILLING_BACKEND: 'control',
+      OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE: 'D:/secure/receipt-private.pem',
+      OTTO_EDGE_BILLING_JOURNAL_FILE: 'D:/state/edge-billing.ndjson',
+      OTTO_EDGE_REQUEST_LEDGER_BACKEND: 'postgres',
+      OTTO_EDGE_REQUEST_LEDGER_DATABASE_HOST: 'postgres-router',
+      OTTO_EDGE_REQUEST_LEDGER_DATABASE_PORT: '6432',
+      OTTO_EDGE_REQUEST_LEDGER_DATABASE_NAME: 'otto_control',
+      OTTO_EDGE_REQUEST_LEDGER_DATABASE_USER: 'otto_edge',
+      OTTO_EDGE_REQUEST_LEDGER_DATABASE_PASSWORD_FILE: 'D:/secure/postgres-password',
+      OTTO_EDGE_REQUEST_LEDGER_DATABASE_SSL: 'false',
+      OTTO_EDGE_REQUEST_LEDGER_LEASE_MS: '1200000',
+    })).toMatchObject({
+      billing: {
+        type: 'control',
+        requestLedger: {
+          type: 'postgres',
+          host: 'postgres-router',
+          port: 6432,
+          database: 'otto_control',
+          user: 'otto_edge',
+          passwordFile: 'D:/secure/postgres-password',
+          ssl: false,
+          leaseDurationMs: 1200000,
+        },
+      },
+    });
+  });
+
+  it('rejects a PostgreSQL request lease that can expire during an allowed request', () => {
+    expect(() => loadEdgeGatewayServerConfiguration({
+      ...common,
+      OTTO_EDGE_CONTROL_URL: 'https://control.otto.test',
+      OTTO_EDGE_DEPLOYMENT_IDENTITY_FILE: 'D:/secure/identity.json',
+      OTTO_EDGE_LEASE_TOKEN_FILE: 'D:/secure/lease-token',
+      OTTO_EDGE_BILLING_BACKEND: 'control',
+      OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE: 'D:/secure/receipt-private.pem',
+      OTTO_EDGE_BILLING_JOURNAL_FILE: 'D:/state/edge-billing.ndjson',
+      OTTO_EDGE_REQUEST_LEDGER_BACKEND: 'postgres',
+      OTTO_EDGE_REQUEST_LEDGER_DATABASE_HOST: 'postgres-router',
+      OTTO_EDGE_REQUEST_LEDGER_DATABASE_NAME: 'otto_control',
+      OTTO_EDGE_REQUEST_LEDGER_DATABASE_USER: 'otto_edge',
+      OTTO_EDGE_REQUEST_LEDGER_DATABASE_PASSWORD_FILE: 'D:/secure/postgres-password',
+      OTTO_EDGE_UPSTREAM_MAX_RESPONSE_DURATION_MS: '60000',
+      OTTO_EDGE_REQUEST_LEDGER_LEASE_MS: '120000',
+    })).toThrow('must exceed the maximum upstream response duration');
   });
 
   it('rejects ambiguous or out-of-range managed configuration', () => {

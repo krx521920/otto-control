@@ -364,6 +364,7 @@ function main() {
     resolve(secretDirectory, 'federation_admin_token'),
     resolve(secretDirectory, 'federation_metrics_token'),
     resolve(secretDirectory, 'postgres_password'),
+    resolve(secretDirectory, 'edge_ledger_postgres_password'),
     resolve(secretDirectory, 'postgres_superuser_password'),
     resolve(secretDirectory, 'postgres_replication_password'),
     resolve(secretDirectory, 'pgbackrest_cipher_pass'),
@@ -437,6 +438,10 @@ function main() {
   writeSecret(resolve(secretDirectory, 'federation_admin_token'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'federation_metrics_token'), randomBytes(48).toString('base64url'));
   writeSecret(resolve(secretDirectory, 'postgres_password'), randomBytes(48).toString('base64url'));
+  writeSecret(
+    resolve(secretDirectory, 'edge_ledger_postgres_password'),
+    randomBytes(48).toString('base64url'),
+  );
   writeSecret(
     resolve(secretDirectory, 'postgres_superuser_password'),
     randomBytes(48).toString('base64url'),

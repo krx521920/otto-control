@@ -216,9 +216,6 @@ function clientRequestId(request: Request): string | null {
   return normalized[0] ?? null;
 }
 
-function providerSwitchConfirmed(request: Request, requestId: string): boolean {
-  return request.headers.get('x-otto-provider-switch-confirmation')?.trim() === requestId;
-}
 function bearerToken(value: string | null): string {
   return /^Bearer\s+([^\s]+)$/iu.exec(value?.trim() || '')?.[1] || '';
 }
@@ -891,33 +888,12 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           );
         }
         if (record.state === 'unknown_outcome') {
-          if (!providerSwitchConfirmed(request, id)) {
-            return jsonResponse(
-              409,
-              'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED',
-              'request outcome is unknown; switching provider requires explicit confirmation',
-              requestStateHeaders(id, record.state, record.providerRequestId),
-            );
-          }
-          try {
-            await requestLedger.confirmFailover(requestBinding);
-          } catch {
-            return jsonResponse(
-              503,
-              'EDGE_REQUEST_LEDGER_UNAVAILABLE',
-              'gateway could not record provider switch confirmation',
-              requestStateHeaders(id, record.state, record.providerRequestId),
-            );
-          }
-          routes = routes.filter((candidate) => candidate.route.id !== record.routeId);
-          if (routes.length === 0) {
-            return jsonResponse(
-              503,
-              'EDGE_MODEL_UNAVAILABLE',
-              'no different provider route is available after confirmation',
-              requestStateHeaders(id, record.state, record.providerRequestId),
-            );
-          }
+          return jsonResponse(
+            409,
+            'EDGE_REQUEST_OUTCOME_UNKNOWN',
+            'request outcome is unknown; create a new request ID before trying again',
+            requestStateHeaders(id, record.state, record.providerRequestId),
+          );
         }
       }
       let concurrencyLease: EdgeConcurrencyLease | null;
@@ -963,7 +939,11 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
         routeId: string,
         reason: EdgeBillingUncertainReason,
       ): Promise<boolean> => {
-        let preserved = true;
+        try {
+          await requestLedger.markUnknownOutcome(requestBinding);
+        } catch {
+          return false;
+        }
         if (billingReservation && options.billingCoordinator) {
           try {
             await options.billingCoordinator.markUncertain({
@@ -974,15 +954,10 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
               occurredAtMs: readEdgeClockAtOrAfter(now, startedAt),
             });
           } catch {
-            preserved = false;
+            return false;
           }
         }
-        try {
-          await requestLedger.markUnknownOutcome(requestBinding);
-        } catch {
-          preserved = false;
-        }
-        return preserved;
+        return true;
       };
 
       for (let index = 0; index < routes.length; index += 1) {
@@ -1145,8 +1120,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           releaseConcurrency();
           return jsonResponse(
             409,
-            'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED',
-            'provider delivery is uncertain; retrying another route requires explicit confirmation',
+            'EDGE_REQUEST_OUTCOME_UNKNOWN',
+            'provider delivery is uncertain; create a new request ID before trying again',
             requestStateHeaders(id, 'unknown_outcome'),
           );
         }
@@ -1198,8 +1173,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           releaseConcurrency();
           return jsonResponse(
             409,
-            'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED',
-            'provider returned a retryable result; switching routes requires explicit confirmation',
+            'EDGE_REQUEST_OUTCOME_UNKNOWN',
+            'provider returned an uncertain result; create a new request ID before trying again',
             requestStateHeaders(id, 'unknown_outcome', providerRequestId),
           );
         }
@@ -1286,26 +1261,20 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
                             })
                 : null;
               scheduleBackground(context, async () => {
-                const operations: Promise<unknown>[] = [];
-                if (billingOperation) {
-                  operations.push(Promise.resolve().then(billingOperation));
+                if (completion === 'completed' && (!upstream.ok || usage)) {
+                  await requestLedger.complete({
+                    ...requestBinding,
+                    actualUsage: usage ?? {
+                      inputTokens: 0,
+                      outputTokens: 0,
+                      totalTokens: 0,
+                    },
+                    ...(providerRequestId ? { providerRequestId } : {}),
+                  });
+                } else {
+                  await requestLedger.markUnknownOutcome(requestBinding);
                 }
-                operations.push(
-                  completion === 'completed' && (!upstream.ok || usage)
-                    ? requestLedger.complete({
-                        ...requestBinding,
-                        actualUsage: usage ?? {
-                          inputTokens: 0,
-                          outputTokens: 0,
-                          totalTokens: 0,
-                        },
-                        ...(providerRequestId ? { providerRequestId } : {}),
-                      })
-                    : requestLedger.markUnknownOutcome(requestBinding),
-                );
-                const results = await Promise.allSettled(operations);
-                const failure = results.find((result) => result.status === 'rejected');
-                if (failure?.status === 'rejected') throw failure.reason;
+                if (billingOperation) await billingOperation();
               });
             },
           );
@@ -1329,8 +1298,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           }
           return jsonResponse(
             409,
-            'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED',
-            'provider response state is uncertain; retry requires explicit confirmation',
+            'EDGE_REQUEST_OUTCOME_UNKNOWN',
+            'provider response state is uncertain; create a new request ID before trying again',
             requestStateHeaders(id, 'unknown_outcome', providerRequestId),
           );
         }
@@ -1351,8 +1320,8 @@ export function createOttoEdgeGateway(options: OttoEdgeGatewayOptions): {
           }
           return jsonResponse(
             409,
-            'EDGE_PROVIDER_SWITCH_CONFIRMATION_REQUIRED',
-            'provider response state is uncertain; retry requires explicit confirmation',
+            'EDGE_REQUEST_OUTCOME_UNKNOWN',
+            'provider response state is uncertain; create a new request ID before trying again',
             requestStateHeaders(id, 'unknown_outcome', providerRequestId),
           );
         }

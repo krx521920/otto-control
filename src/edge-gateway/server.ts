@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   createServer,
   type ServerResponse,
@@ -58,6 +58,8 @@ import {
   loadEdgeRequestLimits,
 } from './request-limits.js';
 import { FileEdgeRequestLedger } from './request-ledger.js';
+import type { EdgeRequestLedger } from './request-ledger.js';
+import { PostgresEdgeRequestLedger } from './postgres-request-ledger.js';
 import {
   type EdgeUpstreamResponseLimits,
   loadEdgeUpstreamResponseLimits,
@@ -105,7 +107,19 @@ type EdgeBillingConfiguration =
       type: 'control';
       receiptPrivateKeyFile: string;
       journalFile: string;
-      requestJournalFile: string;
+      requestLedger:
+        | { type: 'file'; journalFile: string }
+        | {
+            type: 'postgres';
+            host: string;
+            port: number;
+            database: string;
+            user: string;
+            passwordFile: string;
+            ssl: boolean;
+            manageSchema: boolean;
+            leaseDurationMs: number;
+          };
       nodeId?: string;
       retryIntervalMs?: number;
     };
@@ -236,7 +250,10 @@ function billingConfiguration(
   if (backend === 'none') {
     if (environment.OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE?.trim()
       || environment.OTTO_EDGE_BILLING_JOURNAL_FILE?.trim()
-      || environment.OTTO_EDGE_BILLING_NODE_ID?.trim()) {
+      || environment.OTTO_EDGE_BILLING_NODE_ID?.trim()
+      || Object.entries(environment).some(([name, value]) => (
+        name.startsWith('OTTO_EDGE_REQUEST_') && Boolean(value?.trim())
+      ))) {
       throw new Error('Edge billing files require OTTO_EDGE_BILLING_BACKEND=control');
     }
     return { type: 'none' };
@@ -252,20 +269,99 @@ function billingConfiguration(
     throw new Error('OTTO_EDGE_BILLING_NODE_ID must be edge_ followed by 32 lowercase hex characters');
   }
   const journalFile = requiredEnvironment('OTTO_EDGE_BILLING_JOURNAL_FILE', environment);
+  const requestLedgerBackend = environment.OTTO_EDGE_REQUEST_LEDGER_BACKEND?.trim() || 'file';
+  let requestLedger: Extract<EdgeBillingConfiguration, { type: 'control' }>['requestLedger'];
+  if (requestLedgerBackend === 'file') {
+    const postgresSetting = Object.entries(environment).find(([name, value]) => (
+      name.startsWith('OTTO_EDGE_REQUEST_LEDGER_DATABASE_') && Boolean(value?.trim())
+    ));
+    if (postgresSetting) {
+      throw new Error(`${postgresSetting[0]} requires OTTO_EDGE_REQUEST_LEDGER_BACKEND=postgres`);
+    }
+    requestLedger = {
+      type: 'file',
+      journalFile: environment.OTTO_EDGE_REQUEST_JOURNAL_FILE?.trim()
+        || `${journalFile}.requests`,
+    };
+  } else if (requestLedgerBackend === 'postgres') {
+    if (environment.OTTO_EDGE_REQUEST_JOURNAL_FILE?.trim()) {
+      throw new Error('OTTO_EDGE_REQUEST_JOURNAL_FILE cannot be used with PostgreSQL request ledger');
+    }
+    const host = requiredEnvironment('OTTO_EDGE_REQUEST_LEDGER_DATABASE_HOST', environment);
+    const database = requiredEnvironment('OTTO_EDGE_REQUEST_LEDGER_DATABASE_NAME', environment);
+    const user = requiredEnvironment('OTTO_EDGE_REQUEST_LEDGER_DATABASE_USER', environment);
+    if (!/^[a-zA-Z0-9_.:-]{1,255}$/u.test(host)) {
+      throw new Error('OTTO_EDGE_REQUEST_LEDGER_DATABASE_HOST is invalid');
+    }
+    if (!/^[a-zA-Z0-9_.-]{1,63}$/u.test(database)) {
+      throw new Error('OTTO_EDGE_REQUEST_LEDGER_DATABASE_NAME is invalid');
+    }
+    if (!/^[a-zA-Z0-9_.-]{1,63}$/u.test(user)) {
+      throw new Error('OTTO_EDGE_REQUEST_LEDGER_DATABASE_USER is invalid');
+    }
+    requestLedger = {
+      type: 'postgres',
+      host,
+      port: optionalInteger(
+        'OTTO_EDGE_REQUEST_LEDGER_DATABASE_PORT', environment, 1, 65_535,
+      ) ?? 5432,
+      database,
+      user,
+      passwordFile: requiredEnvironment(
+        'OTTO_EDGE_REQUEST_LEDGER_DATABASE_PASSWORD_FILE', environment,
+      ),
+      ssl: optionalBoolean(
+        'OTTO_EDGE_REQUEST_LEDGER_DATABASE_SSL', environment, true,
+      ),
+      manageSchema: optionalBoolean(
+        'OTTO_EDGE_REQUEST_LEDGER_MANAGE_SCHEMA', environment, true,
+      ),
+      leaseDurationMs: optionalInteger(
+        'OTTO_EDGE_REQUEST_LEDGER_LEASE_MS', environment, 30_000, 86_400_000,
+      ) ?? 900_000,
+    };
+  } else {
+    throw new Error('OTTO_EDGE_REQUEST_LEDGER_BACKEND must be file or postgres');
+  }
   return {
     type: 'control',
     receiptPrivateKeyFile: requiredEnvironment(
       'OTTO_EDGE_EXECUTION_RECEIPT_KEY_FILE', environment,
     ),
     journalFile,
-    requestJournalFile: environment.OTTO_EDGE_REQUEST_JOURNAL_FILE?.trim()
-      || `${journalFile}.requests`,
+    requestLedger,
     nodeId,
     retryIntervalMs: optionalInteger(
       'OTTO_EDGE_BILLING_RETRY_INTERVAL_MS', environment, 1_000, 60 * 60 * 1000,
     ),
   };
 }
+
+async function postgresRequestLedgerConnectionString(
+  config: Extract<
+    Extract<EdgeBillingConfiguration, { type: 'control' }>['requestLedger'],
+    { type: 'postgres' }
+  >,
+): Promise<string> {
+  let password: string;
+  try {
+    password = (await readFile(config.passwordFile, 'utf8')).trim();
+  } catch {
+    throw new Error('OTTO_EDGE_REQUEST_LEDGER_DATABASE_PASSWORD_FILE could not be read');
+  }
+  if (!password) {
+    throw new Error('OTTO_EDGE_REQUEST_LEDGER_DATABASE_PASSWORD_FILE is empty');
+  }
+  const url = new URL('postgresql://localhost');
+  url.hostname = config.host;
+  url.port = String(config.port);
+  url.username = config.user;
+  url.password = password;
+  url.pathname = `/${config.database}`;
+  return url.toString();
+}
+
+const MAX_POLICY_UPSTREAM_CONNECT_TIMEOUT_MS = 60_000;
 
 export function loadEdgeGatewayServerConfiguration(
   environment: NodeJS.ProcessEnv = process.env,
@@ -349,6 +445,18 @@ export function loadEdgeGatewayServerConfiguration(
       'OTTO_EDGE_CIRCUIT_BREAKER_MAXIMUM_ENTRIES', environment, 1, 1_000_000,
     ) ?? 10_000,
   };
+  const upstreamResponse = loadEdgeUpstreamResponseLimits(environment);
+  const billing = billingConfiguration(environment, Boolean(controlBaseUrl));
+  if (billing.type === 'control' && billing.requestLedger.type === 'postgres') {
+    const minimumLeaseMs = upstreamResponse.maximumDurationMs
+      + MAX_POLICY_UPSTREAM_CONNECT_TIMEOUT_MS;
+    if (billing.requestLedger.leaseDurationMs <= minimumLeaseMs) {
+      throw new Error(
+        'OTTO_EDGE_REQUEST_LEDGER_LEASE_MS must exceed the maximum upstream '
+        + 'response duration plus 60000 milliseconds',
+      );
+    }
+  }
   return {
     host: environment.OTTO_EDGE_HOST?.trim() || '127.0.0.1',
     port,
@@ -363,11 +471,11 @@ export function loadEdgeGatewayServerConfiguration(
     circuitBreaker,
     http: loadEdgeNodeHttpLimits(environment),
     request: loadEdgeRequestLimits(environment),
-    upstreamResponse: loadEdgeUpstreamResponseLimits(environment),
+    upstreamResponse,
     shutdownGraceMs: optionalInteger(
       'OTTO_EDGE_SHUTDOWN_GRACE_MS', environment, 1_000, 300_000,
     ) ?? 30_000,
-    billing: billingConfiguration(environment, Boolean(controlBaseUrl)),
+    billing,
     ...(environment.OTTO_EDGE_OPERATIONS_TOKEN_FILE?.trim()
       ? { operationsTokenFile: environment.OTTO_EDGE_OPERATIONS_TOKEN_FILE.trim() }
       : {}),
@@ -539,6 +647,7 @@ export function createEdgeGatewayReadinessProbe(input: {
   billingCoordinator?: EdgeBillingCoordinator;
   lifecycle?: EdgeGatewayLifecycle;
   backgroundTasks?: EdgeGatewayBackgroundTaskWaiter;
+  requestLedgerHealthCheck?: () => Promise<void>;
 }): EdgeGatewayReadinessProbe {
   return {
     async check() {
@@ -548,6 +657,7 @@ export function createEdgeGatewayReadinessProbe(input: {
         if (backgroundState === 'unavailable') return 'unavailable';
         await input.policySource.load();
         await input.rateLimiter.healthCheck?.();
+        await input.requestLedgerHealthCheck?.();
         const billingState = input.billingCoordinator?.operationalStatus?.().state ?? 'ready';
         return backgroundState === 'degraded' && billingState === 'ready'
           ? 'degraded'
@@ -713,11 +823,29 @@ export async function startEdgeGatewayServer(): Promise<void> {
       nodeId: config.billing.nodeId,
     });
   }
-  const requestLedger = config.billing.type === 'control'
-    ? await FileEdgeRequestLedger.create({
-        journalFile: config.billing.requestJournalFile,
-      })
-    : undefined;
+  let postgresRequestLedger: PostgresEdgeRequestLedger | undefined;
+  let requestLedger: EdgeRequestLedger | undefined;
+  if (config.billing.type === 'control') {
+    if (config.billing.requestLedger.type === 'file') {
+      requestLedger = await FileEdgeRequestLedger.create({
+        journalFile: config.billing.requestLedger.journalFile,
+      });
+    } else {
+      postgresRequestLedger = await PostgresEdgeRequestLedger.connect({
+        connectionString: await postgresRequestLedgerConnectionString(
+          config.billing.requestLedger,
+        ),
+        ssl: config.billing.requestLedger.ssl,
+        ownerId: `${config.billing.nodeId ?? 'edge'}:${randomUUID()}`,
+        leaseDurationMs: config.billing.requestLedger.leaseDurationMs,
+        manageSchema: config.billing.requestLedger.manageSchema,
+        onPoolError: (error) => {
+          console.error('Edge request ledger PostgreSQL pool error', error);
+        },
+      });
+      requestLedger = postgresRequestLedger;
+    }
+  }
   const operationsToken = config.operationsTokenFile
     ? await loadEdgeOperationsToken(config.operationsTokenFile)
     : undefined;
@@ -750,6 +878,9 @@ export async function startEdgeGatewayServer(): Promise<void> {
       billingCoordinator,
       lifecycle,
       backgroundTasks,
+      requestLedgerHealthCheck: postgresRequestLedger
+        ? () => postgresRequestLedger.healthCheck()
+        : undefined,
     }),
     requestLimits: config.request,
     responseLimits: config.upstreamResponse,
@@ -858,6 +989,10 @@ export async function startEdgeGatewayServer(): Promise<void> {
             await billingCoordinator.flushPending();
           },
           forceClose: () => billingCoordinator.close(),
+        }] : []),
+        ...(postgresRequestLedger ? [{
+          close: () => postgresRequestLedger.close(),
+          forceClose: () => postgresRequestLedger.close(),
         }] : []),
         rateLimiterResource,
       ],
